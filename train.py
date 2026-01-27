@@ -100,12 +100,14 @@ def main():
     ap.add_argument("--lambda_fuse", type=float, default=1.0)
     ap.add_argument("--use_stems", action="store_true")
     ap.add_argument("--compute_second_only", action="store_true")
+    ap.add_argument("--use_nonlinear_projection", action="store_true")
+    ap.add_argument("--probability_hflip", type=float, deafult=0.25)
+    ap.add_argument("--probability_affine", type=float, deafult=0.25, help="rotate,translate,scale,shear")
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
     ap.add_argument("--save_every", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
-
 
     ap.add_argument("--out_dir", type=str, default="out/train")
     ap.add_argument("--tb_dir", type=str, default="runs")
@@ -151,7 +153,8 @@ def main():
         mhi_windows=mhi_windows,
         out_dtype=torch.float16,
         in_ch_second=in_ch_second,
-        p_hflip=0.5,
+        p_hflip=0.25,
+        p_affine=0.25,
         seed=args.seed,
     )
     loader = DataLoader(
@@ -180,6 +183,7 @@ def main():
             dropout=args.dropout,
             use_stems=args.use_stems,
             compute_second_only=args.compute_second_only,
+            use_nonlinear_projection=args.use_nonlinear_projection
         ).to(device)
     elif args.model == "x3d":
         model = TwoStreamE2S_X3D_CLIP(

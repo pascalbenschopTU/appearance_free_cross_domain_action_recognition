@@ -433,6 +433,7 @@ def main():
     second_type = str(_get(ckpt_args, "second_type", "flow"))
     use_stems = bool(_get(ckpt_args, "use_stems", False))
     compute_second_only = bool(_get(ckpt_args, "compute_second_only", False))
+    use_nonlinear_projection = bool(_get(ckpt_args, "use_nonlinear_projection", False))
     second_channels = 1 if second_type == "dphase" else 2
     selected_model = str(_get(ckpt_args, "model", "i3d"))
 
@@ -561,6 +562,7 @@ def main():
             dropout=dropout,
             use_stems=use_stems,
             compute_second_only=compute_second_only,
+            use_nonlinear_projection=use_nonlinear_projection,
         ).to(device)
     elif selected_model == "x3d":
         print("selected x3d model", flush=True)

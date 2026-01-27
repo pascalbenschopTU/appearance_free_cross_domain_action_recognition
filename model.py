@@ -90,6 +90,21 @@ class Unit3Dpy(nn.Module):
         if self.activation is not None:
             out = F.relu(out, inplace=True)
         return out
+    
+class MLPProjector(nn.Module):
+    def __init__(self, in_dim=1024, hidden_dim=2048, out_dim=512, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
 
 class InputStem3D(nn.Module):
     """
@@ -291,6 +306,7 @@ class TwoStreamI3D_CLIP(nn.Module):
         use_stems: bool = False,
         init_scratch: bool = True,
         compute_second_only: bool = False,
+        use_nonlinear_projection: bool = False,
     ):        
         super().__init__()
         self.compute_second_only = compute_second_only
@@ -320,12 +336,19 @@ class TwoStreamI3D_CLIP(nn.Module):
             self.top = I3DFeature(in_channels=mhi_channels, dropout_prob=dropout, stem=top_stem)
         self.bot = I3DFeature(in_channels=second_channels, dropout_prob=dropout, stem=bot_stem)
 
-        self.proj_top = nn.Linear(1024, embed_dim)
-        self.proj_bot = nn.Linear(1024, embed_dim)
+        if use_nonlinear_projection:
+            self.proj_top = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
+            self.proj_bot = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
+        else:
+            self.proj_top = nn.Linear(1024, embed_dim)
+            self.proj_bot = nn.Linear(1024, embed_dim)
 
         self.fuse = fuse
         if fuse == "concat":
-            self.proj_fuse = nn.Linear(embed_dim * 2, embed_dim)
+            if use_nonlinear_projection:
+                self.proj_fuse = MLPProjector(in_dim=embed_dim * 2, hidden_dim=embed_dim * 2, out_dim=embed_dim)
+            else:
+                self.proj_fuse = nn.Linear(embed_dim * 2, embed_dim)
         elif fuse == "avg_then_proj":
             self.proj_fuse = nn.Linear(embed_dim, embed_dim)
         else:
@@ -351,3 +374,42 @@ class TwoStreamI3D_CLIP(nn.Module):
             ef = self.proj_fuse(0.5 * (et + eb))
 
         return {"emb_top": et, "emb_bot": eb, "emb_fuse": ef}
+
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ----------------------------
+    # Hard-coded settings
+    # ----------------------------
+    batch = 16
+
+    mhi = torch.randn(16, 1, 16, 224, 224, device=device, dtype=torch.float32)
+    flow = torch.randn(16, 2, 64, 160, 160, device=device, dtype=torch.float32)
+
+    model = TwoStreamI3D_CLIP(
+        mhi_channels=1,
+        second_channels=2,
+        embed_dim=512,
+        fuse="concat",
+        dropout=0.0,
+        use_stems=True,
+        init_scratch=True,
+        compute_second_only=False,
+        use_nonlinear_projection=True,
+    ).to(device)
+
+    model.eval()
+
+    # ----------------------------
+    # FLOP analysis (lazy import)
+    # ----------------------------
+    try:
+        from fvcore.nn import FlopCountAnalysis
+
+        flops = FlopCountAnalysis(model, (mhi, flow)).total()
+        print("\n=== FLOP Analysis (forward only) ===")
+        print(f"Total FLOPs: {flops / 1e9:.3f} GFLOPs\n")
+
+    except ImportError:
+        print("\n[INFO] fvcore not installed — skipping FLOP analysis.\n")
