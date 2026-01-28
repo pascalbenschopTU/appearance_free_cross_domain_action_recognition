@@ -1,35 +1,40 @@
 import torch
 import torch.nn as nn
 
-# -----------------------------
-# OPTIONAL deps for FLOPs
-# -----------------------------
-try:
-    from fvcore.nn import FlopCountAnalysis
-    _HAS_FVCORE = True
-except Exception:
-    _HAS_FVCORE = False
-
 try:
     from pytorchvideo.models.x3d import create_x3d
     _HAS_PYTORCHVIDEO = True
 except Exception:
     _HAS_PYTORCHVIDEO = False
 
+class MLPProjector(nn.Module):
+    def __init__(self, in_dim=2048, hidden_dim=2048, out_dim=512, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+    
 
 def build_x3d_embedder(
     *,
     in_ch: int,
     clip_len: int,
     crop: int,
-    embed_dim: int,
+    output_dim: int,
     dropout: float,
     width_factor: float,
     depth_factor: float,
     head_dim_out: int,
 ) -> nn.Module:
     """
-    X3D model that outputs (B, embed_dim) by setting model_num_class=embed_dim
+    X3D model that outputs (B, output_dim) by setting model_num_class=output_dim
     and head_activation=None (embedding head).
     """
     if not _HAS_PYTORCHVIDEO:
@@ -39,7 +44,7 @@ def build_x3d_embedder(
         input_channel=in_ch,
         input_clip_length=clip_len,
         input_crop_size=crop,
-        model_num_class=embed_dim,                # output embedding
+        model_num_class=output_dim,                # output embedding
         dropout_rate=dropout,
         width_factor=width_factor,
         depth_factor=depth_factor,
@@ -77,6 +82,7 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
         top_head_dim_out: int = 2048,
         bot_head_dim_out: int = 2048,
         compute_second_only: bool = False,
+        use_nonlinear_projection: bool = False,
     ):
         super().__init__()
         self.compute_second_only = compute_second_only
@@ -87,7 +93,7 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
                 in_ch=mhi_channels,
                 clip_len=mhi_frames,
                 crop=img_size,
-                embed_dim=embed_dim,
+                output_dim=embed_dim*2,
                 dropout=dropout,
                 width_factor=top_width_factor,
                 depth_factor=top_depth_factor,
@@ -97,15 +103,25 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
             in_ch=flow_channels,
             clip_len=flow_frames,
             crop=flow_hw,
-            embed_dim=embed_dim,
+            output_dim=embed_dim*2,
             dropout=dropout,
             width_factor=bot_width_factor,
             depth_factor=bot_depth_factor,
             head_dim_out=bot_head_dim_out,
         )
 
+        if use_nonlinear_projection:
+            self.proj_top = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
+            self.proj_bot = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
+        else:
+            self.proj_top = nn.Linear(embed_dim*2, embed_dim)
+            self.proj_bot = nn.Linear(embed_dim*2, embed_dim)
+
         if fuse == "concat":
-            self.proj_fuse = nn.Linear(embed_dim * 2, embed_dim)
+            if use_nonlinear_projection:
+                self.proj_fuse = MLPProjector(in_dim=embed_dim * 2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
+            else:
+                self.proj_fuse = nn.Linear(embed_dim*2, embed_dim)
         elif fuse == "avg_then_proj":
             self.proj_fuse = nn.Linear(embed_dim, embed_dim)
         else:
@@ -117,6 +133,9 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
             et = self.top(mhi_bcthw)
         else:
             et = torch.zeros_like(eb)
+
+        et = self.proj_top(et)
+        eb = self.proj_bot(eb)
 
         if self.fuse == "concat":
             ef = self.proj_fuse(torch.cat([et, eb], dim=-1))

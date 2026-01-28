@@ -2,8 +2,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class MLPProjector(nn.Module):
+    def __init__(self, in_dim=1024, hidden_dim=2048, out_dim=512, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
 # ----------------------------
-# I3D (TF-padding) blocks
+# I3D code
 # ----------------------------
 
 def get_padding_shape(filter_shape, stride):
@@ -90,20 +104,6 @@ class Unit3Dpy(nn.Module):
         if self.activation is not None:
             out = F.relu(out, inplace=True)
         return out
-    
-class MLPProjector(nn.Module):
-    def __init__(self, in_dim=1024, hidden_dim=2048, out_dim=512, dropout=0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, out_dim),
-            nn.LayerNorm(out_dim),
-        )
-
-    def forward(self, x):
-        return self.net(x)
 
 
 class InputStem3D(nn.Module):
@@ -384,8 +384,8 @@ if __name__ == "__main__":
     # ----------------------------
     batch = 16
 
-    mhi = torch.randn(16, 1, 16, 224, 224, device=device, dtype=torch.float32)
-    flow = torch.randn(16, 2, 64, 160, 160, device=device, dtype=torch.float32)
+    mhi = torch.randn(16, 1, 32, 224, 224, device=device, dtype=torch.float32)
+    flow = torch.randn(16, 2, 128, 160, 160, device=device, dtype=torch.float32)
 
     model = TwoStreamI3D_CLIP(
         mhi_channels=1,

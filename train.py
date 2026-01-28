@@ -20,8 +20,6 @@ import numpy as np
 from torch.utils.data import DataLoader
 import time
 
-from torch.utils.data import DataLoader
-
 def make_loader_for_epoch(
     *,
     dataset,
@@ -101,8 +99,8 @@ def main():
     ap.add_argument("--use_stems", action="store_true")
     ap.add_argument("--compute_second_only", action="store_true")
     ap.add_argument("--use_nonlinear_projection", action="store_true")
-    ap.add_argument("--probability_hflip", type=float, deafult=0.25)
-    ap.add_argument("--probability_affine", type=float, deafult=0.25, help="rotate,translate,scale,shear")
+    ap.add_argument("--probability_hflip", type=float, default=0.25)
+    ap.add_argument("--probability_affine", type=float, default=0.25, help="rotate,translate,scale,shear")
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -153,8 +151,8 @@ def main():
         mhi_windows=mhi_windows,
         out_dtype=torch.float16,
         in_ch_second=in_ch_second,
-        p_hflip=0.25,
-        p_affine=0.25,
+        p_hflip=args.probability_hflip,
+        p_affine=args.probability_affine,
         seed=args.seed,
     )
     loader = DataLoader(
@@ -183,7 +181,7 @@ def main():
             dropout=args.dropout,
             use_stems=args.use_stems,
             compute_second_only=args.compute_second_only,
-            use_nonlinear_projection=args.use_nonlinear_projection
+            use_nonlinear_projection=args.use_nonlinear_projection,
         ).to(device)
     elif args.model == "x3d":
         model = TwoStreamE2S_X3D_CLIP(
@@ -195,11 +193,12 @@ def main():
             flow_hw=args.flow_hw,
             embed_dim=args.embed_dim,
             fuse=args.fuse,
+            use_nonlinear_projection=args.use_nonlinear_projection,
         ).to(device)
 
     parameters = list(model.parameters()) + list(logit_scale.parameters())
     opt = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler(args.device, enabled=(device.type == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
     steps_per_epoch = len(loader)
     total_train_steps = steps_per_epoch * args.epochs
@@ -241,6 +240,18 @@ def main():
         running_clip_loss = 0.0
         n_logs = 0
 
+        # loader = make_loader_for_epoch(
+        #     dataset=dataset,
+        #     collate_fn=collate_motion,
+        #     epoch=epoch,
+        #     batch_size=args.batch_size,
+        #     num_workers=args.num_workers,
+        #     pin_memory=True,
+        #     seed=args.seed,
+        #     drop_last=True,
+        #     resume_epoch=start_epoch,
+        #     start_in_epoch=start_in_epoch if epoch == start_epoch else 0,
+        # )
         for step_in_epoch, (mhi_top, flow_bot, labels, cnames) in enumerate(loader):
             mhi_top  = mhi_top.to(device, non_blocking=True)   # (B,C,32,224,224)
             flow_bot = flow_bot.to(device, non_blocking=True)  # (B,2,128,112,112)
@@ -298,7 +309,7 @@ def main():
                     elapsed = time.time() - start_time
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:06d} lr {learning_rate:.6f}] "
-                        f"clip_loss={running_clip_loss/n_logs:.4f}"
+                        f"clip_loss={running_clip_loss/n_logs:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
                     print(msg, flush=True)
