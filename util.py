@@ -1,25 +1,36 @@
 # utils.py
 import os
 import glob
-from typing import Optional, Tuple, Dict, Any, List
+import json
+import re
+from typing import Optional, Tuple, Dict, Any, List, Union
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
 
 try:
     import clip  # openai clip
 except Exception as e:
     raise RuntimeError("Could not import 'clip'. Install OpenAI CLIP (or adapt to open_clip).") from e
 
+CLIP_TEMPLATES = [
+    "{}",
+    "a video of {}",
+    "a video of a person {}",
+    "a person is {}",
+    "someone is {}",
+    "the action of {}",
+    "a clip of {}",
+]
+
 # ----------------------------
 # Checkpoint loading
 # ----------------------------
 
-def find_latest_ckpt(ckpt_dir: str, pattern: str = "*.pt") -> Optional[str]:
+def find_latest_ckpt(ckpt_dir: str, pattern: str = "*epoch_*.pt") -> Optional[str]:
     ckpts = sorted(glob.glob(os.path.join(ckpt_dir, pattern)))
     return ckpts[-1] if ckpts else None
 
@@ -39,23 +50,26 @@ def load_checkpoint(
 
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=strict)
     print(f"[CKPT] loaded {ckpt_path}")
-    if missing:
-        print("Missing keys:", missing)
-    if unexpected:
-        print("Unexpected keys:", unexpected)
+    if missing: print("Missing keys:", missing)
+    if unexpected: print("Unexpected keys:", unexpected)
 
+    loaded_opt = False
     if optimizer is not None and "optimizer_state" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state"])
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+            loaded_opt = True
+        except ValueError as e:
+            print(f"[CKPT] optimizer_state skipped (param groups changed): {e}")
 
     if scaler is not None and "scaler_state" in ckpt:
         try:
             scaler.load_state_dict(ckpt["scaler_state"])
         except Exception:
-            pass
+            print("[CKPT] scaler_state skipped")
 
-    # Scheduler: load if present, otherwise sync from global_step
     if scheduler is not None:
-        if "scheduler_state" in ckpt:
+        # only trust scheduler_state if optimizer loaded successfully
+        if loaded_opt and "scheduler_state" in ckpt:
             try:
                 scheduler.load_state_dict(ckpt["scheduler_state"])
             except Exception as e:
@@ -63,6 +77,7 @@ def load_checkpoint(
                 sync_scheduler_to_global_step(scheduler, ckpt.get("global_step", 0))
         else:
             sync_scheduler_to_global_step(scheduler, ckpt.get("global_step", 0))
+
     if logit_scale is not None and "logit_scale_state" in ckpt:
         logit_scale.load_state_dict(ckpt["logit_scale_state"])
 
@@ -102,6 +117,88 @@ def make_ckpt_payload(
 # ----------------------------
 # CLIP text encoder
 # ----------------------------
+
+def _norm(s: str) -> str:
+    # normalize for matching only (don’t feed this into CLIP)
+    return re.sub(r"[\s_]+", " ", s.strip().lower())
+
+def adapt_class_texts(
+    class_texts_json: Union[str, Dict[str, Any]],
+    classnames: List[str],
+) -> Dict[str, List[str]]:
+    """
+    Returns Dict[raw_classname -> List[str]] compatible with build_text_bank.
+    Supports:
+      - {"brush_hair": ["brushing hair", ...], ...} (Custom)
+      - {"0": "Abseiling: ...", "1": "Air Drumming: ...", ...} (TC-CLIP style)
+    """
+    if isinstance(class_texts_json, str):
+        data = json.loads(class_texts_json)
+    else:
+        data = class_texts_json
+
+    # Already in expected shape?
+    if all(isinstance(k, str) and isinstance(v, list) for k, v in data.items()):
+        return {k: [str(x).strip() for x in v if str(x).strip()] for k, v in data.items()}
+
+    # Build lookup from normalized names -> raw classname
+    cname_by_norm = {_norm(c): c for c in classnames}
+
+    out: Dict[str, List[str]] = {}
+
+    # Detect numeric-key format
+    numeric_keys = all(isinstance(k, str) and k.isdigit() for k in data.keys())
+    if not numeric_keys:
+        raise ValueError("Unrecognized class_texts format. Expected list-values or numeric-string keys.")
+
+    for k, v in data.items():
+        idx = int(k)
+        if idx < 0 or idx >= len(classnames):
+            continue
+        raw_by_index = classnames[idx]
+
+        s = str(v).strip()
+        if not s:
+            continue
+
+        # Try to parse "ClassName: description..."
+        # Keep both class label and description as variants (CLIP usually benefits).
+        # TC-CLIP style
+        label = None
+        desc = s
+        if ":" in s:
+            left, right = s.split(":", 1)
+            left = left.strip()
+            right = right.strip()
+            if left:
+                label = left
+            if right:
+                desc = right
+
+        # Try name-based match first (safer than relying on order)
+        raw = None
+        if label is not None:
+            raw = cname_by_norm.get(_norm(label))
+
+        # Fall back to index-based mapping
+        if raw is None:
+            raw = raw_by_index
+
+        variants = []
+        if label:
+            variants.append(label)       # e.g. "Abseiling"
+        if desc:
+            variants.append(desc)        # e.g. "This video shows the process of ..."
+
+        # merge if already exists
+        out.setdefault(raw, [])
+        for vv in variants:
+            vv = vv.strip()
+            if vv and vv not in out[raw]:
+                out[raw].append(vv)
+
+    return out
+
 
 def load_clip_text_encoder(device: torch.device):
     """
@@ -150,22 +247,18 @@ def build_text_bank(
     """
     all_class_embs = []
     for raw in classnames:
-        norm = normalize_classname_ucf(raw)
+        normalized_classname = normalize_classname_ucf(raw)
+        prompts = []
+        for t in templates:
+            prompts.append(t.format(normalized_classname))
+
         # If user provides extra texts, use them; else just the normalized name.
-        variants = [norm]
+        variants = []
         if class_texts is not None and raw in class_texts:
             variants = [normalize_classname_ucf(v) if v == raw else v for v in class_texts[raw]]
-            # Keep as-is (user might provide already-natural phrases); still lowercasing helps CLIP less than harming,
-            # so we won't force it beyond basic strip.
             variants = [v.strip() for v in variants if v.strip()]
-            if not variants:
-                variants = [norm]
-
-        # For each variant, apply all templates
-        prompts = []
-        for v in variants:
-            for t in templates:
-                prompts.append(t.format(v))
+            for v in variants:
+                prompts.append(v)
 
         tok = tokenize_fn(prompts).to(device)
         feats = clip_model.encode_text(tok)  # (P,512)
@@ -179,17 +272,6 @@ def build_text_bank(
 
     text_bank = torch.stack(all_class_embs, dim=0)  # (C,512)
     return text_bank
-
-
-CLIP_TEMPLATES = [
-    "{}",
-    "a video of {}",
-    "a video of a person {}",
-    "a person is {}",
-    "someone is {}",
-    "the action of {}",
-    "a clip of {}",
-]
 
 class LogitScale(nn.Module):
     def __init__(self, init_temp=0.07):
@@ -207,6 +289,7 @@ def build_clip_text_bank_and_logit_scale(
     device: torch.device,
     init_temp: float = 0.07,
     dtype=torch.float16,
+    class_texts=None,
 ):
     """
     Returns:
@@ -224,7 +307,7 @@ def build_clip_text_bank_and_logit_scale(
     classnames_norm = [norm_cname(c) for c in dataset_classnames]
 
     text_bank = build_text_bank(
-        clip_model, tokenize_fn, classnames_norm, device, templates
+        clip_model, tokenize_fn, classnames_norm, device, templates, class_texts=class_texts
     )
     text_bank = text_bank.to(dtype=dtype).to(device).detach()
 

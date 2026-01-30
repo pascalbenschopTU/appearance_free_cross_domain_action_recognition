@@ -414,6 +414,7 @@ def main():
 
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    print(f"args: {args}")
 
     device = torch.device(args.device)
     autocast_on = (device.type == "cuda")
@@ -598,7 +599,9 @@ def main():
                 ls.eval()
                 with torch.no_grad():
                     scale_motion = float(ls().exp().item())
-            except Exception:
+                    print(f"Logit scale of value {scale_motion} loaded")
+            except Exception as e:
+                print(f"Logit scale not loaded: {e}")
                 pass
 
     if args.clip_vision_scale and args.clip_vision_scale > 0:

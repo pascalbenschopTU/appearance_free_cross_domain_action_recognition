@@ -1,3 +1,4 @@
+import json
 from dataset import MotionTwoStreamZstdDataset, collate_motion, ResumableShuffleSampler
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
@@ -6,6 +7,7 @@ from util import (
     find_latest_ckpt,
     load_checkpoint,
     make_ckpt_payload,
+    adapt_class_texts,
     build_clip_text_bank_and_logit_scale,
 )
 import argparse
@@ -101,6 +103,7 @@ def main():
     ap.add_argument("--use_nonlinear_projection", action="store_true")
     ap.add_argument("--probability_hflip", type=float, default=0.25)
     ap.add_argument("--probability_affine", type=float, default=0.25, help="rotate,translate,scale,shear")
+    ap.add_argument("--class_text_json", type=str, default="")
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -165,11 +168,19 @@ def main():
         drop_last=True,
     )
 
+    
+    class_texts = None
+    if args.class_text_json.strip():
+        with open(args.class_text_json, "r") as f:
+            raw_data = json.load(f)
+        class_texts = adapt_class_texts(raw_data, dataset.classnames)
+
     clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
         dataset_classnames=dataset.classnames,
         device=device,
         init_temp=0.07,
         dtype=torch.float16,
+        class_texts=class_texts,
     )
     # Student model
     if args.model == "i3d":
