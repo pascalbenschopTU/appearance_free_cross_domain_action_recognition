@@ -30,7 +30,9 @@ import json
 import time
 import argparse
 from typing import List, Dict, Optional
-
+import glob
+import math
+from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
@@ -133,6 +135,53 @@ def save_cm_pdf(cm: np.ndarray, classnames: List[str], out_pdf: str, title: str 
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
+
+
+def expand_manifest_args(manifest_args: Optional[List[str]]) -> List[str]:
+    """Accept explicit files and/or globs; return sorted unique file paths."""
+    if not manifest_args:
+        return []
+    out = []
+    for s in manifest_args:
+        # allow globs
+        matches = glob.glob(s)
+        if matches:
+            out.extend(matches)
+        else:
+            out.append(s)
+    # unique + stable order
+    out = sorted({os.path.abspath(p) for p in out})
+    return out
+
+
+def split_name_from_manifest(manifest_path: Optional[str]) -> str:
+    if manifest_path is None:
+        return "all"
+    return os.path.splitext(os.path.basename(manifest_path))[0]
+
+
+def mean_std(vals: List[float]) -> Dict[str, float]:
+    """Sample std (ddof=1) if >=2 else 0."""
+    if not vals:
+        return {"mean": float("nan"), "std": float("nan")}
+    m = float(sum(vals) / len(vals))
+    if len(vals) < 2:
+        return {"mean": m, "std": 0.0}
+    var = sum((v - m) ** 2 for v in vals) / (len(vals) - 1)
+    return {"mean": m, "std": float(math.sqrt(var))}
+
+
+def aggregate_metrics(per_split: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """
+    per_split: {split_name: {metric_key: value}}
+    returns: {metric_key: {"mean":..., "std":...}}
+    """
+    keys = sorted({k for d in per_split.values() for k in d.keys()})
+    out = {}
+    for k in keys:
+        vals = [float(per_split[s][k]) for s in per_split.keys() if k in per_split[s]]
+        out[k] = mean_std(vals)
+    return out
 
 
 # -----------------------------
@@ -365,6 +414,189 @@ def clip_rgb_video_embedding(clip_model, preprocess, paths: List[str], device, r
     return F.normalize(out, dim=-1)
 
 
+def evaluate_one_split(
+    *,
+    args,
+    dataset,
+    dataloader,
+    device,
+    autocast_on,
+    model,
+    clip_model,
+    clip_preprocess,
+    text_bank,
+    scale_motion: float,
+    scale_clip: float,
+    num_classes: int,
+    classnames: List[str],
+    out_dir: str,
+    base_json: Dict,
+):
+    # -----------------------------
+    # Accumulators (3 main modes + per-head breakdowns)
+    # -----------------------------
+    y_true_all = []
+
+    y_pred_motion_ens = []
+    y_pred_rgb_only = []
+    y_pred_fused_ens = []
+    top1_motion_ens = 0
+    top5_motion_ens = 0
+    top1_rgb = 0
+    top5_rgb = 0
+    top1_fused_ens = 0
+    top5_fused_ens = 0
+
+    head_tags = ["top", "bot", "fuse"]
+
+    # -----------------------------
+    # Head weights (for ensemble result)
+    # -----------------------------
+    heads_ens = parse_list(args.use_heads)
+    wts = parse_floats(args.head_weights)
+    if len(wts) == 1 and len(heads_ens) > 1:
+        wts = [wts[0]] * len(heads_ens)
+    if len(wts) != len(heads_ens):
+        raise ValueError("head_weights must have same length as use_heads (or a single scalar).")
+    s = sum(wts)
+    wts = [w / s for w in wts]
+
+    w_rgb = max(0.0, min(1.0, float(args.rgb_weight)))
+    w_motion = 1.0 - w_rgb
+
+    # -----------------------------
+    # Eval loop
+    # -----------------------------
+    n = 0
+    t0 = time.time()
+
+    with torch.no_grad():
+        for mhi, second, y, paths in dataloader:
+            b = y.shape[0]
+            n += b
+
+            if mhi is not None:
+                mhi = mhi.to(device, non_blocking=True)
+            second = second.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+
+            with torch.autocast(device_type=device.type, enabled=autocast_on):
+                out = model(mhi, second)
+
+                logits_by_head = {}
+
+                v = F.normalize(out["emb_top"].float(), dim=-1)
+                logits_by_head["top"] = scale_motion * (v @ text_bank.t().float())
+
+                v = F.normalize(out["emb_bot"].float(), dim=-1)
+                logits_by_head["bot"] = scale_motion * (v @ text_bank.t().float())
+
+                v = F.normalize(out["emb_fuse"].float(), dim=-1)
+                logits_by_head["fuse"] = scale_motion * (v @ text_bank.t().float())
+
+                logits_motion_ens = None
+                for h, w in zip(heads_ens, wts):
+                    if h not in logits_by_head:
+                        raise ValueError(f"use_heads contains '{h}', but available are {list(logits_by_head.keys())}")
+                    logits_motion_ens = logits_by_head[h] * w if logits_motion_ens is None else logits_motion_ens + logits_by_head[h] * w
+
+            if not args.no_rgb:
+                v_rgb = clip_rgb_video_embedding(
+                    clip_model=clip_model,
+                    preprocess=clip_preprocess,
+                    paths=paths,
+                    device=device,
+                    rgb_frames=int(args.rgb_frames),
+                    rgb_sampling=args.rgb_sampling,
+                )
+                logits_rgb = scale_clip * (v_rgb @ text_bank.t().float())
+                logits_fused_ens = w_motion * logits_motion_ens + w_rgb * logits_rgb
+
+            y_true_all.append(y.detach().cpu().numpy())
+
+            top1_motion_ens += topk_correct(logits_motion_ens, y, 1)
+            top5_motion_ens += topk_correct(logits_motion_ens, y, min(5, num_classes))
+            y_pred_motion_ens.append(torch.argmax(logits_motion_ens, dim=-1).detach().cpu().numpy())
+
+            if not args.no_rgb:
+                top1_rgb += topk_correct(logits_rgb, y, 1)
+                top5_rgb += topk_correct(logits_rgb, y, min(5, num_classes))
+                y_pred_rgb_only.append(torch.argmax(logits_rgb, dim=-1).detach().cpu().numpy())
+
+                top1_fused_ens += topk_correct(logits_fused_ens, y, 1)
+                top5_fused_ens += topk_correct(logits_fused_ens, y, min(5, num_classes))
+                y_pred_fused_ens.append(torch.argmax(logits_fused_ens, dim=-1).detach().cpu().numpy())
+
+            if (n % max(1, args.batch_size * 10)) == 0:
+                dt = time.time() - t0
+                print(
+                    f"[{n}/{len(dataset)}] elapsed={dt:.1f}s | "
+                    f"ens_motion_top1={top1_motion_ens/n:.4f} | "
+                    f"rgb_top1={(top1_rgb/n if not args.no_rgb else 0):.4f} | "
+                    f"ens_fused_top1={(top1_fused_ens/n if not args.no_rgb else 0):.4f}",
+                    flush=True
+                )
+
+    # -----------------------------
+    # Finalize arrays
+    # -----------------------------
+    y_true = np.concatenate(y_true_all, axis=0)
+    y_pred_motion_ens = np.concatenate(y_pred_motion_ens, axis=0)
+
+    # -----------------------------
+    # Save metrics/artifacts
+    # -----------------------------
+    os.makedirs(out_dir, exist_ok=True)
+
+    m_metrics = compute_metrics_and_artifacts(
+        tag="motion_only",
+        out_dir=out_dir,
+        classnames=classnames,
+        y_true=y_true,
+        y_pred=y_pred_motion_ens,
+        top1_correct=top1_motion_ens,
+        top5_correct=top5_motion_ens,
+        extra_json=base_json,
+    )
+
+    r_metrics = None
+    f_metrics = None
+    if not args.no_rgb:
+        y_pred_rgb_only = np.concatenate(y_pred_rgb_only, axis=0)
+        y_pred_fused_ens = np.concatenate(y_pred_fused_ens, axis=0)
+
+        r_metrics = compute_metrics_and_artifacts(
+            tag="clip_rgb_only",
+            out_dir=out_dir,
+            classnames=classnames,
+            y_true=y_true,
+            y_pred=y_pred_rgb_only,
+            top1_correct=top1_rgb,
+            top5_correct=top5_rgb,
+            extra_json=base_json,
+        )
+
+        f_metrics = compute_metrics_and_artifacts(
+            tag="motion_plus_rgb_ensemble",
+            out_dir=out_dir,
+            classnames=classnames,
+            y_true=y_true,
+            y_pred=y_pred_fused_ens,
+            top1_correct=top1_fused_ens,
+            top5_correct=top5_fused_ens,
+            extra_json=base_json,
+        )
+
+    return {
+        "motion_only": m_metrics,
+        **({} if args.no_rgb else {
+            "clip_rgb_only": r_metrics,
+            "motion_plus_rgb_ensemble": f_metrics,
+        })
+    }
+
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -374,11 +606,11 @@ def main():
     ap.add_argument("--root_dir", type=str, required=True)
     ap.add_argument("--ckpt", type=str, required=True)
     ap.add_argument("--out_dir", type=str, default="eval_out")
+    ap.add_argument("--manifests", type=str, nargs="*", default=None, help="evaluation splits")
 
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=0)
-    ap.add_argument("--dataset_split_txt", type=str, default=None)
     ap.add_argument("--class_id_to_label_csv", type=str, default=None)
 
     # Motion stream params (match training defaults)
@@ -415,6 +647,13 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"args: {args}")
+
+    manifest_paths = expand_manifest_args(args.manifests)
+    if not manifest_paths:
+        manifest_paths = [None]  # evaluate full dataset
+
+    multi_split = (len(manifest_paths) > 1)
+    per_mode_per_split = {} 
 
     device = torch.device(args.device)
     autocast_on = (device.type == "cuda")
@@ -462,65 +701,6 @@ def main():
         flags=int(_get(ckpt_args, "fb_flags", args.fb_flags)),
     )
 
-    if second_type == "dphase":
-        ds = VideoMHIDPhaseDataset(
-            args.root_dir,
-            img_size=args.img_size,
-            mhi_frames=args.mhi_frames,
-            mhi_windows=mhi_windows,
-            diff_threshold=args.diff_threshold,
-            dphase_hw=args.flow_hw,           # reuse args
-            dphase_frames=args.flow_frames,
-            compute_mhi=not compute_second_only,
-            compute_dphase=True,
-            out_dtype=torch.float16,
-        )
-        collate_fn = collate_video_mhi_dphase
-    else:
-        ds = VideoMotionDataset(
-            args.root_dir,
-            img_size=img_size,
-            flow_hw=flow_hw,
-            mhi_frames=mhi_frames,
-            flow_frames=flow_frames,
-            mhi_windows=mhi_windows,
-            diff_threshold=diff_threshold,
-            fb_params=fb_params,
-            flow_max_disp=flow_max_disp,
-            flow_normalize=True,
-            out_dtype=torch.float16,
-            dataset_split_txt=args.dataset_split_txt,
-            class_id_to_label_csv=args.class_id_to_label_csv
-        )
-
-        # ds = VideoMHIFramesDataset(
-        #     args.root_dir,
-        #     img_size=args.img_size,
-        #     flow_hw=args.flow_hw,
-        #     mhi_frames=args.mhi_frames,
-        #     flow_pairs=args.flow_frames,
-        #     mhi_windows=mhi_windows,
-        #     diff_threshold=args.diff_threshold,
-        #     out_mhi_dtype=torch.float16,
-        # )
-        # raft = build_raft_large(device)
-        # raft.eval()
-
-        collate_fn = collate_video_motion
-
-    dl = DataLoader(
-        ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        collate_fn=collate_fn,
-        drop_last=False,
-    )
-
-    classnames = ds.classnames
-    num_classes = len(classnames)
-
     # -----------------------------
     # CLIP
     # -----------------------------  
@@ -541,15 +721,7 @@ def main():
         with open(args.class_text_json, "r") as f:
             class_texts = json.load(f)
 
-    text_bank = build_text_bank(
-        clip_model=clip_model,
-        tokenize_fn=clip.tokenize,
-        classnames=classnames,
-        device=device,
-        templates=templates,
-        class_texts=class_texts,
-        l2_normalize=True,
-    )  # (C,512)
+    reference_classnames = None
 
     # -----------------------------
     # Load checkpoint + motion model
@@ -609,256 +781,208 @@ def main():
     else:
         scale_clip = float(clip_model.logit_scale.exp().item())
 
-    # -----------------------------
-    # Head weights (for ensemble result)
-    # -----------------------------
-    heads_ens = parse_list(args.use_heads)  # e.g. ["fuse","top","bot"]
-    wts = parse_floats(args.head_weights)
-    if len(wts) == 1 and len(heads_ens) > 1:
-        wts = [wts[0]] * len(heads_ens)
-    if len(wts) != len(heads_ens):
-        raise ValueError("head_weights must have same length as use_heads (or a single scalar).")
-    s = sum(wts)
-    wts = [w / s for w in wts]
+    for manifest_path in manifest_paths:
+        split_name = split_name_from_manifest(manifest_path)
+        split_out_dir = args.out_dir if not multi_split else os.path.join(args.out_dir, split_name)
+        os.makedirs(split_out_dir, exist_ok=True)
 
-    # Fusion weights
-    w_rgb = max(0.0, min(1.0, float(args.rgb_weight)))
-    w_motion = 1.0 - w_rgb
+        # Build dataset for THIS split
+        if second_type == "dphase":
+            dataset = VideoMHIDPhaseDataset(
+                args.root_dir,
+                img_size=args.img_size,
+                mhi_frames=args.mhi_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=args.diff_threshold,
+                dphase_hw=args.flow_hw,
+                dphase_frames=args.flow_frames,
+                compute_mhi=not compute_second_only,
+                compute_dphase=True,
+                out_dtype=torch.float16,
+            )
+            collate_fn = collate_video_mhi_dphase
+        else:
+            dataset = VideoMotionDataset(
+                args.root_dir,
+                img_size=img_size,
+                flow_hw=flow_hw,
+                mhi_frames=mhi_frames,
+                flow_frames=flow_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=diff_threshold,
+                fb_params=fb_params,
+                flow_max_disp=flow_max_disp,
+                flow_normalize=True,
+                out_dtype=torch.float16,
+                dataset_split_txt=manifest_path,
+                class_id_to_label_csv=args.class_id_to_label_csv,
+            )
+            collate_fn = collate_video_motion
 
-    # -----------------------------
-    # Accumulators (3 main modes + per-head breakdowns)
-    # -----------------------------
-    y_true_all = []
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
+            collate_fn=collate_fn,
+            drop_last=False,
+        )
 
-    # 3 main modes:
-    y_pred_motion_ens = []
-    y_pred_rgb_only = []
-    y_pred_fused_ens = []
-    top1_motion_ens = 0
-    top5_motion_ens = 0
-    top1_rgb = 0
-    top5_rgb = 0
-    top1_fused_ens = 0
-    top5_fused_ens = 0
+        classnames = dataset.classnames
+        num_classes = len(classnames)
 
-    # per-head: motion-only
-    head_tags = ["top", "bot", "fuse"]
-    y_pred_head = {h: [] for h in head_tags}
-    top1_head = {h: 0 for h in head_tags}
-    top5_head = {h: 0 for h in head_tags}
-
-    # per-head: fused with rgb (optional but very useful)
-    y_pred_head_fused = {h: [] for h in head_tags}
-    top1_head_fused = {h: 0 for h in head_tags}
-    top5_head_fused = {h: 0 for h in head_tags}
-
-    # -----------------------------
-    # Eval loop
-    # -----------------------------
-    n = 0
-    t0 = time.time()
-    with torch.no_grad():
-        for mhi, second, y, paths in dl:
-            b = y.shape[0]
-            n += b
-
-            # mhi = mhi.to(device, non_blocking=True)
-            if mhi is not None:
-                mhi = mhi.to(device, non_blocking=True)
-            second = second.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-
-            # print("Pairs? ", second.shape, flush=True)
-            # start = time.time()
-            # second = raft_flow_from_paired_frames_batched(
-            #     second,
-            #     raft_model=raft,
-            #     device=device.type,
-            #     use_amp=True,
-            #     out_dtype=torch.float16
-            # )
-            # print(f"time taken: {time.time() - start}")
-
-            # --- Motion logits per head + ensemble ---
-            with torch.autocast(device_type=device.type, enabled=autocast_on):
-                out = model(mhi, second)
-
-                logits_by_head = {}
-
-                v = F.normalize(out["emb_top"].float(), dim=-1)
-                logits_by_head["top"] = scale_motion * (v @ text_bank.t().float())
-
-                v = F.normalize(out["emb_bot"].float(), dim=-1)
-                logits_by_head["bot"] = scale_motion * (v @ text_bank.t().float())
-
-                v = F.normalize(out["emb_fuse"].float(), dim=-1)
-                logits_by_head["fuse"] = scale_motion * (v @ text_bank.t().float())
-
-                # Your chosen head ensemble result (motion-only)
-                logits_motion_ens = None
-                for h, w in zip(heads_ens, wts):
-                    if h not in logits_by_head:
-                        raise ValueError(f"use_heads contains '{h}', but available are {list(logits_by_head.keys())}")
-                    logits_motion_ens = logits_by_head[h] * w if logits_motion_ens is None else logits_motion_ens + logits_by_head[h] * w
-
-            # --- RGB-only logits (CLIP vision) ---
-            if not args.no_rgb:
-                v_rgb = clip_rgb_video_embedding(
-                    clip_model=clip_model,
-                    preprocess=clip_preprocess,
-                    paths=paths,
-                    device=device,
-                    rgb_frames=int(args.rgb_frames),
-                    rgb_sampling=args.rgb_sampling,
-                )  # (B,512) normalized
-                logits_rgb = scale_clip * (v_rgb @ text_bank.t().float())
-
-                # --- Fused logits (ensemble + rgb) ---
-                logits_fused_ens = w_motion * logits_motion_ens + w_rgb * logits_rgb
-
-                # --- Per-head fused logits (head + rgb) ---
-                logits_fused_by_head = {h: (w_motion * logits_by_head[h] + w_rgb * logits_rgb) for h in head_tags}
-
-            # Save y_true once
-            y_true_all.append(y.detach().cpu().numpy())
-
-            # -----------------------------
-            # Update: 3 main modes
-            # -----------------------------
-            top1_motion_ens += topk_correct(logits_motion_ens, y, 1)
-            top5_motion_ens += topk_correct(logits_motion_ens, y, min(5, num_classes))
-            y_pred_motion_ens.append(torch.argmax(logits_motion_ens, dim=-1).detach().cpu().numpy())
-
-            if not args.no_rgb:
-                top1_rgb += topk_correct(logits_rgb, y, 1)
-                top5_rgb += topk_correct(logits_rgb, y, min(5, num_classes))
-                y_pred_rgb_only.append(torch.argmax(logits_rgb, dim=-1).detach().cpu().numpy())
-
-                top1_fused_ens += topk_correct(logits_fused_ens, y, 1)
-                top5_fused_ens += topk_correct(logits_fused_ens, y, min(5, num_classes))
-                y_pred_fused_ens.append(torch.argmax(logits_fused_ens, dim=-1).detach().cpu().numpy())
-            else:
-                top1_rgb = 0.0
-                top5_rgb = 0.0
-                top1_fused_ens = 0.0
-                top5_fused_ens = 0.0
-
-            # -----------------------------
-            # Update: per-head breakdowns
-            # -----------------------------
-            for h in head_tags:
-                lh = logits_by_head[h]
-                top1_head[h] += topk_correct(lh, y, 1)
-                top5_head[h] += topk_correct(lh, y, min(5, num_classes))
-                y_pred_head[h].append(torch.argmax(lh, dim=-1).detach().cpu().numpy())
-
-                if not args.no_rgb:
-                    lhf = logits_fused_by_head[h]
-                    top1_head_fused[h] += topk_correct(lhf, y, 1)
-                    top5_head_fused[h] += topk_correct(lhf, y, min(5, num_classes))
-                    y_pred_head_fused[h].append(torch.argmax(lhf, dim=-1).detach().cpu().numpy())
-
-            if (n % max(1, args.batch_size * 10)) == 0:
-                dt = time.time() - t0
-                print(
-                    f"[{n}/{len(ds)}] elapsed={dt:.1f}s | "
-                    f"ens_motion_top1={top1_motion_ens/n:.4f} | "
-                    f"rgb_top1={top1_rgb/n:.4f} | "
-                    f"ens_fused_top1={top1_fused_ens/n:.4f} | "
-                    f"head_top_top1={top1_head['top']/n:.4f} | "
-                    f"head_bot_top1={top1_head['bot']/n:.4f} | "
-                    f"head_fuse_top1={top1_head['fuse']/n:.4f}",
-                    flush=True
+        # Enforce consistent classnames across splits (recommended)
+        if reference_classnames is None:
+            reference_classnames = list(classnames)
+        else:
+            if list(classnames) != reference_classnames:
+                raise RuntimeError(
+                    f"Class list differs for split '{split_name}'. "
+                    "Aggregation assumes identical class ordering across splits."
                 )
-
-    # -----------------------------
-    # Finalize arrays
-    # -----------------------------
-    y_true = np.concatenate(y_true_all, axis=0)
-    y_pred_motion_ens = np.concatenate(y_pred_motion_ens, axis=0)
-    if not args.no_rgb:
-        y_pred_rgb_only = np.concatenate(y_pred_rgb_only, axis=0)
-        y_pred_fused_ens = np.concatenate(y_pred_fused_ens, axis=0)
-
-    # Build base json for saving
-    base_json = {
-        "root_dir": args.root_dir,
-        "ckpt": args.ckpt,
-        "num_samples": int(len(y_true)),
-        "num_classes": int(num_classes),
-        "classnames": classnames,
-        "text_mode": args.text_mode,
-        "use_heads": heads_ens,
-        "head_weights": wts,
-        "logit_scale_motion": float(scale_motion),
-        "rgb_frames": int(args.rgb_frames),
-        "rgb_sampling": args.rgb_sampling,
-        "rgb_weight": float(w_rgb),
-        "logit_scale_clip_vision": float(scale_clip),
-    }
-
-    # -----------------------------
-    # Save: 3 main modes
-    # -----------------------------
-    m_metrics = compute_metrics_and_artifacts(
-        tag="motion_only",
-        out_dir=args.out_dir,
-        classnames=classnames,
-        y_true=y_true,
-        y_pred=y_pred_motion_ens,
-        top1_correct=top1_motion_ens,
-        top5_correct=top5_motion_ens,
-        extra_json=base_json,
-    )
-
-    if not args.no_rgb:
-        r_metrics = compute_metrics_and_artifacts(
-            tag="clip_rgb_only",
-            out_dir=args.out_dir,
+            
+        text_bank = build_text_bank(
+            clip_model=clip_model,
+            tokenize_fn=clip.tokenize,
             classnames=classnames,
-            y_true=y_true,
-            y_pred=y_pred_rgb_only,
-            top1_correct=top1_rgb,
-            top5_correct=top5_rgb,
-            extra_json=base_json,
+            device=device,
+            templates=templates,
+            class_texts=class_texts,
+            l2_normalize=True,
+        )  # (C,512)
+
+        # Base json (per split)
+        base_json = {
+            "root_dir": args.root_dir,
+            "ckpt": args.ckpt,
+            "split": split_name,
+            "manifest": (os.path.abspath(manifest_path) if manifest_path else None),
+            "num_samples": int(len(dataset)),
+            "num_classes": int(num_classes),
+            "classnames": classnames,
+            "text_mode": args.text_mode,
+            "use_heads": parse_list(args.use_heads),
+            "head_weights": parse_floats(args.head_weights),
+            "logit_scale_motion": float(scale_motion),
+            "rgb_frames": int(args.rgb_frames),
+            "rgb_sampling": args.rgb_sampling,
+            "rgb_weight": float(max(0.0, min(1.0, float(args.rgb_weight)))),
+            "logit_scale_clip_vision": float(scale_clip),
+        }
+
+        print(f"\n--- Evaluating split '{split_name}' | samples={len(dataset)} | out_dir={os.path.abspath(split_out_dir)} ---", flush=True)
+
+        split_results = evaluate_one_split(
+            args=args,
+            dataset=dataset,
+            dataloader=dataloader,
+            device=device,
+            autocast_on=autocast_on,
+            model=model,
+            clip_model=clip_model,
+            clip_preprocess=clip_preprocess,
+            text_bank=text_bank,
+            scale_motion=scale_motion,
+            scale_clip=scale_clip,
+            num_classes=num_classes,
+            classnames=classnames,
+            out_dir=split_out_dir,
+            base_json=base_json,
         )
 
-        f_metrics = compute_metrics_and_artifacts(
-            tag="motion_plus_rgb_ensemble",
-            out_dir=args.out_dir,
-            classnames=classnames,
-            y_true=y_true,
-            y_pred=y_pred_fused_ens,
-            top1_correct=top1_fused_ens,
-            top5_correct=top5_fused_ens,
-            extra_json=base_json,
-        )
+        # collect for aggregation
+        for mode, metrics in split_results.items():
+            per_mode_per_split.setdefault(mode, {})
+            per_mode_per_split[mode][split_name] = metrics
 
-    # -----------------------------
-    # Print summary
-    # -----------------------------
-    print("\n" + "=" * 80)
-    print("RESULTS SUMMARY")
-    print("-" * 80)
-    print(f"Text mode            : {args.text_mode}")
-    print(f"Motion logit scale   : {scale_motion:.4f}")
-    print(f"CLIP vision scale    : {scale_clip:.4f}")
-    print(f"RGB frames/sampling  : {args.rgb_frames} / {args.rgb_sampling}")
-    print(f"Fusion weights       : motion={w_motion:.3f}, rgb={w_rgb:.3f}")
-    print("-" * 80)
-    print(f"Ensemble motion-only : Top1={m_metrics['top1']:.4f}  Top5={m_metrics['top5']:.4f}  MCA={m_metrics['mean_class_acc']:.4f}")
-    if not args.no_rgb:
-        print(f"CLIP RGB-only        : Top1={r_metrics['top1']:.4f}  Top5={r_metrics['top5']:.4f}  MCA={r_metrics['mean_class_acc']:.4f}")
-        print(f"Ensemble fused       : Top1={f_metrics['top1']:.4f}  Top5={f_metrics['top5']:.4f}  MCA={f_metrics['mean_class_acc']:.4f}")
+        # Aggregate mean/std over splits if multiple
+    keys = [
+        "top1",
+        "top5",
+        "mean_class_acc",
+        "precision_macro",
+        "recall_macro",
+        "f1_macro",
+        "precision_weighted",
+        "recall_weighted",
+        "f1_weighted",
+    ]
+    if len(manifest_paths) > 1:
+        mode_summaries = {}  # keep to print nicely
 
-    print("\nSaved to:", os.path.abspath(args.out_dir))
-    print("  - metrics_motion_only_ensemble.json")
-    print("  - metrics_clip_rgb_only.json")
-    print("  - metrics_motion_plus_rgb_ensemble.json")
-    print("  - metrics_motion_only_head_{top,bot,fuse}.json")
-    print("  - metrics_motion_plus_rgb_head_{top,bot,fuse}.json")
-    print("  - confusion_*.csv/.npy and per_class_*.csv for each tag")
+        for mode, split_dict in per_mode_per_split.items():
+            agg = aggregate_metrics(split_dict)  # metric_key -> {mean,std}
 
+            summary = {
+                "mode": mode,
+                "num_splits": len(split_dict),
+                "splits": split_dict,
+                "aggregate": agg,
+            }
+
+            out_path = os.path.join(args.out_dir, f"summary_{mode}.json")
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+
+            mode_summaries[mode] = summary
+
+        print("\n" + "=" * 80)
+        print("AGGREGATED SUMMARY (mean ± std over splits)")
+        print("=" * 80)
+
+        # header
+        print(f"{'mode':28s} " + " ".join([f"{k:>18s}" for k in keys]))
+        print("-" * 80)
+
+        def fmt(ms):
+            if ms is None:
+                return "      n/a"
+            m = ms.get("mean", float("nan"))
+            s = ms.get("std", float("nan"))
+            if m != m or s != s:  # NaN check
+                return "      n/a"
+            return f"{m:7.4f}±{s:7.4f}"
+
+        for mode, summary in mode_summaries.items():
+            agg = summary["aggregate"]
+            row = [fmt(agg.get(k)) for k in keys]
+            print(f"{mode:28s} " + " ".join([f"{x:>18s}" for x in row]))
+
+        print("-" * 80)
+        print("Per-split metrics are stored under summary_<mode>.json")
+        print("Wrote aggregated summaries to:", os.path.abspath(args.out_dir), flush=True)
+
+    else:
+        some_mode = next(iter(per_mode_per_split.keys()), None)
+        if some_mode is None:
+            print("[WARN] No metrics collected.")
+        else:
+            split_name = next(iter(per_mode_per_split[some_mode].keys()), "all")
+
+            print("\n" + "=" * 80)
+            print(f"SUMMARY (single split: {split_name})")
+            print("=" * 80)
+            print(f"{'mode':28s} " + " ".join([f"{k:>18s}" for k in keys]))
+            print("-" * 80)
+
+            for mode, split_dict in per_mode_per_split.items():
+                # there should be exactly one entry
+                split_name, metrics = next(iter(split_dict.items()))
+                summary = {
+                    "mode": mode,
+                    "num_splits": 1,
+                    "splits": {split_name: metrics},
+                    "aggregate": {k: {"mean": float(metrics.get(k, float("nan"))), "std": 0.0} for k in keys},
+                }
+                out_path = os.path.join(args.out_dir, f"summary_{mode}.json")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(summary, f, indent=2)
+                    
+                row = [f"{float(metrics.get(k, float('nan'))):.4f}" for k in keys]
+                print(f"{mode:28s} " + " ".join([f"{x:>18s}" for x in row]))
+
+            print("-" * 80)
 
 if __name__ == "__main__":
     main()
