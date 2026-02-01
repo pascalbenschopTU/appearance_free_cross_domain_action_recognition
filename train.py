@@ -102,7 +102,8 @@ def main():
     ap.add_argument("--compute_second_only", action="store_true")
     ap.add_argument("--use_nonlinear_projection", action="store_true")
     ap.add_argument("--probability_hflip", type=float, default=0.25)
-    ap.add_argument("--probability_affine", type=float, default=0.25, help="rotate,translate,scale,shear")
+    ap.add_argument("--max_probability_drop_frame", type=float, default=0.10)
+    ap.add_argument("--probability_affine", type=float, default=0.10, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
 
     ap.add_argument("--num_workers", type=int, default=16)
@@ -155,6 +156,7 @@ def main():
         out_dtype=torch.float16,
         in_ch_second=in_ch_second,
         p_hflip=args.probability_hflip,
+        p_max_drop_frame=args.max_probability_drop_frame,
         p_affine=args.probability_affine,
         seed=args.seed,
     )

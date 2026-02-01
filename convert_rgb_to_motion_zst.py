@@ -176,6 +176,9 @@ def compute_mhi_and_flow_stream_cpu(
     flow_set = set(map(int, flow_idx.numpy()))
     mhi_set = set(map(int, mhi_idx.numpy()))
 
+    if num_frames < flow_frames:
+        print(f"Num frames {num_frames} < flow_frames {flow_frames}, sampled: {flow_set}", file=sys.stderr)
+
     flow_pos = {int(t): i for i, t in enumerate(flow_idx.tolist())}
     mhi_pos = {int(t): i for i, t in enumerate(mhi_idx.tolist())}
 
@@ -542,7 +545,8 @@ def main():
 
             for name in videos_to_select:
                 if name not in video_map:
-                    raise FileNotFoundError(f"Manifest file not found under root_dir: {name}")
+                    print(f"Manifest file not found under root_dir: {name}", file=sys.stderr)
+                    continue
 
                 matches = video_map[name]
                 if len(matches) > 1:
@@ -558,9 +562,6 @@ def main():
 
             videos = selected_videos
             labels = resolved_labels
-            print(f"Selected videos: {videos}", file=sys.stderr)
-
-
 
     elif args.glob is not None and len(args.glob) > 0:
         videos = iter_videos_glob(args.glob)

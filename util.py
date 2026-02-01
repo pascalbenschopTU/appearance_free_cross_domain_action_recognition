@@ -3,6 +3,7 @@ import os
 import glob
 import json
 import re
+import sys
 from typing import Optional, Tuple, Dict, Any, List, Union
 import math
 import torch
@@ -406,13 +407,12 @@ def list_videos(
 
     # ---- Mode A: dataset_split_txt (tc_clip style) ----
     if dataset_split_txt:
-        print(f"split found: {dataset_split_txt}", flush=True)
         txt_items = _parse_dataset_split_txt(dataset_split_txt)
-        print(f"parsed split: {dataset_split_txt}", flush=True)
+        if len(txt_items) == 0:
+            print(f"No items found int dataset_split_text: {dataset_split_txt}",file=sys.stderr)
 
         # Scan all videos once so we can resolve entries even if dataset uses class folders
         all_vids = _scan_videos_under_root(root)
-        print(f"Found all vids", flush=True)
 
         rel_map: Dict[str, str] = {}          # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
         base_map: Dict[str, List[str]] = {}   # "c.mp4" -> ["/abs/.../c.mp4", ...]
@@ -453,10 +453,13 @@ def list_videos(
                     f"Use relative paths in the txt to disambiguate."
                 )
 
-            raise FileNotFoundError(
-                f"Could not resolve {fname!r} under root_dir={root_dir!r}. "
-                f"Tried: root/fname, relative match, basename match."
+            print(
+                f"[WARN] Missing file in split '{dataset_split_txt}': could not resolve {fname!r} under root_dir={root_dir!r}. "
+                f"Skipping.",
+                file=sys.stderr,
+                flush=True,
             )
+            continue
 
         # Build classnames (best-effort)
         uniq = sorted(set(labels))
@@ -538,3 +541,94 @@ def classnames_from_id_csv(
             classnames[i] = id2name[i]
     return classnames
 
+
+# ----------------------------
+# Sampling logic
+# ----------------------------
+
+def _strictly_increasing_int_positions(n: int, s: int) -> torch.Tensor:
+    """
+    Return (s,) int positions in [0, n-1] that are strictly increasing.
+    Requires n >= s.
+    """
+    if s == 1:
+        return torch.tensor([0], dtype=torch.long)
+    # start with evenly spaced floor positions
+    pos = torch.floor(torch.linspace(0, n - 1, steps=s)).long()
+    # enforce strictly increasing: pos[i] >= pos[i-1] + 1
+    pos = torch.maximum(pos, torch.arange(s, dtype=torch.long))
+    # enforce room at the end: pos[i] <= (n-1) - (s-1-i)
+    max_allowed = (n - 1) - (s - 1 - torch.arange(s, dtype=torch.long))
+    pos = torch.minimum(pos, max_allowed)
+    return pos
+
+def sample_unique_indices(
+    T: int,
+    S: int,
+    *,
+    start: int = 0,
+    end: Optional[int] = None,
+    short_video_strategy: str = "spread",          # "spread" | "contiguous"
+    placement: str = "center",      # for "contiguous": "center" | "front" | "random"
+    pad_value: int = -1,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """
+    Returns (S,) long tensor of frame indices in [start, end], with NO repeats.
+    If not enough frames, pads remaining slots with pad_value (-1).
+    """
+    if S <= 0:
+        return torch.empty((0,), dtype=torch.long)
+    if T <= 0:
+        return torch.full((S,), pad_value, dtype=torch.long)
+
+    if end is None:
+        end = T - 1
+    start = max(0, int(start))
+    end = min(T - 1, int(end))
+    if end < start:
+        return torch.full((S,), pad_value, dtype=torch.long)
+
+    N = end - start + 1  # available frames
+
+    # Enough frames: pick S unique indices directly.
+    if N >= S:
+        pos = _strictly_increasing_int_positions(N, S)
+        return (start + pos).long()
+
+    # short video: use all frames once, and pad the rest.
+    out = torch.full((S,), pad_value, dtype=torch.long)
+    src = torch.arange(start, end + 1, dtype=torch.long)  # length N, unique
+
+    if short_video_strategy == "contiguous":
+        pad = S - N
+        if placement == "front":
+            off = 0
+        elif placement == "center":
+            off = pad // 2
+        else:  # random
+            off = int(torch.randint(0, pad + 1, (1,), generator=generator).item())
+        out[off:off + N] = src
+        return out
+
+    # default: "spread" -> spread N frames over S slots with gaps
+    if N == 1:
+        out[S // 2] = src[0]
+        return out
+    pos = _strictly_increasing_int_positions(S, N)  # positions in [0, S-1], length N
+    out[pos] = src
+    return out
+
+def aligned_indices_from_superset_unique(flow_idx: torch.Tensor, mhi_frames: int, short_video_strategy="spread") -> torch.Tensor:
+    valid = flow_idx[flow_idx >= 0]  # already unique
+    if valid.numel() == 0:
+        return torch.full((mhi_frames,), -1, dtype=torch.long)
+    pick_pos = sample_unique_indices(
+        valid.numel(), mhi_frames,
+        start=0, end=valid.numel() - 1,
+        short_video_strategy=short_video_strategy, pad_value=-1
+    )
+    out = torch.full((mhi_frames,), -1, dtype=torch.long)
+    mask = pick_pos >= 0
+    out[mask] = valid[pick_pos[mask]]
+    return out

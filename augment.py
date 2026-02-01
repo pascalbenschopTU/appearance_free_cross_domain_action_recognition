@@ -106,18 +106,38 @@ def _warp_batch_bchw(
     grid = F.affine_grid(theta_1x2x3.expand(b, -1, -1), size=(b, c, h, w), align_corners=True)
     return F.grid_sample(batch_bchw, grid, mode=mode, padding_mode=padding_mode, align_corners=True)
 
+def temporal_frame_dropout(
+    mhi: torch.Tensor,        # (C, Tm, H, W)
+    second: torch.Tensor,     # (2, Tf, Hf, Wf) for flow (or (1, Tf, Hf, Wf))
+    rng: np.random.Generator,
+    *,
+    p_drop_mhi: float = 0.0,
+    p_drop_second: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if p_drop_mhi > 0 and mhi.numel() > 0:
+        Tm = mhi.shape[1]
+        keep = torch.from_numpy((rng.random(Tm) >= float(p_drop_mhi))).to(device=mhi.device)
+        mhi = mhi * keep.view(1, Tm, 1, 1).to(dtype=mhi.dtype)
+
+    if p_drop_second > 0 and second.numel() > 0:
+        Tf = second.shape[1]
+        keep = torch.from_numpy((rng.random(Tf) >= float(p_drop_second))).to(device=second.device)
+        second = second * keep.view(1, Tf, 1, 1).to(dtype=second.dtype)
+
+    return mhi, second
 
 # ---------------------------
-# Public augmentation
+# Augmentation
 # ---------------------------
 
-def random_spatial_motion(
+def random_motion_augment(
     mhi: torch.Tensor,            # (C, Tm, H, W)
     second: torch.Tensor,         # flow: (2, Tf, Hf, Wf)  OR dphase-like: (1, Tf, Hf, Wf)
     rng: np.random.Generator,
     *,
     second_type: str = "flow",
     p_horizontal_flip: float = 0.25,
+    p_max_drop_frame: float = 0.10,
     p_affine: float = 0.25,
     p_rotate: float = 0.30,
     p_scale: float = 0.30,
@@ -134,15 +154,13 @@ def random_spatial_motion(
     """
     One coherent spatial transform per clip:
       - optional horizontal flip
+      - optional frame dropout
       - optional affine (rotate/scale/shear/translate) with per-op probabilities
 
     For flow:
       - warp the flow field
       - AND transform flow vectors with the same 2x2 linear matrix.
     """
-    # --------
-    # 1) Horizontal flip (cheap)
-    # --------
     if rng.random() < float(p_horizontal_flip):
         mhi = torch.flip(mhi, dims=(-1,))
         second = torch.flip(second, dims=(-1,))
@@ -150,9 +168,13 @@ def random_spatial_motion(
             second = second.clone()
             second[0].neg_()  # x component flips sign
 
-    # --------
-    # 2) Affine (expensive) - decide early
-    # --------
+    p_drop_frame = float(rng.uniform(0.0, p_max_drop_frame))
+    mhi, second = temporal_frame_dropout(
+        mhi, second, rng, 
+        p_drop_mhi=p_drop_frame,
+        p_drop_second=p_drop_frame,
+    )
+
     if rng.random() >= float(p_affine):
         return mhi, second
 
