@@ -1,0 +1,1 @@
+python .\finetune.py --root_dir ..\..\datasets\UCF101_motion\ --manifest ..\tc-clip\datasets_splits\ucf_splits\train1_few_shot_16.txt --class_id_to_label_csv ..\tc-clip\labels\ucf_101_labels.csv --eval_root_dir ..\..\datasets\UCF101\ --eval_manifest ..\tc-clip\datasets_splits\ucf_splits\val1.txt --pretrained_ckpt .\out\checkpoint_epoch_027_loss0.6155.pt

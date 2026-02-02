@@ -97,6 +97,12 @@ def save_zstd_features(
     with open(out_zst_path, "wb") as f:
         f.write(comp)
 
+def _resolve(p: str, base_dir: str) -> str:
+    p = os.path.expanduser(p.strip())
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    return os.path.normpath(os.path.join(base_dir, p))
+
 
 # -----------------------------
 # Feature computation (MHI + Farneback flow) [CPU]
@@ -176,8 +182,8 @@ def compute_mhi_and_flow_stream_cpu(
     flow_set = set(map(int, flow_idx.numpy()))
     mhi_set = set(map(int, mhi_idx.numpy()))
 
-    if num_frames < flow_frames:
-        print(f"Num frames {num_frames} < flow_frames {flow_frames}, sampled: {flow_set}", file=sys.stderr)
+    # if num_frames < flow_frames:
+    #     # print(f"Num frames {num_frames} < flow_frames {flow_frames}, sampled: {flow_set}", file=sys.stderr)
 
     flow_pos = {int(t): i for i, t in enumerate(flow_idx.tolist())}
     mhi_pos = {int(t): i for i, t in enumerate(mhi_idx.tolist())}
@@ -536,29 +542,32 @@ def main():
             videos_to_select, labels = iter_videos_manifest(manifest)
 
             video_map = {}
+            label_map = {}
             for vp in videos:
-                bn = os.path.basename(vp)
+                bn = os.path.basename(vp).strip().lower()
                 video_map.setdefault(bn, []).append(vp)
+                label_map.setdefault(bn, []).append(vp)
 
             selected_videos = []
             resolved_labels = {}
 
             for name in videos_to_select:
-                if name not in video_map:
+                lower_name = name.strip().lower()
+                if lower_name not in video_map:
                     print(f"Manifest file not found under root_dir: {name}", file=sys.stderr)
                     continue
 
-                matches = video_map[name]
+                matches = video_map[lower_name]
                 if len(matches) > 1:
                     raise RuntimeError(
-                        f"Ambiguous filename '{name}', matches:\n" + "\n".join(matches)
+                        f"Ambiguous filename '{lower_name}', matches:\n" + "\n".join(matches)
                     )
 
                 vp = matches[0]
                 selected_videos.append(vp)
 
                 if name in labels:
-                    resolved_labels[vp] = labels[name]
+                    resolved_labels[vp] = label_map[lower_name]
 
             videos = selected_videos
             labels = resolved_labels
