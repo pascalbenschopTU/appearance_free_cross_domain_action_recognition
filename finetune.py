@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import MotionTwoStreamZstdDataset, collate_motion, VideoMotionDataset, collate_video_motion
@@ -151,7 +151,11 @@ def load_pretrained_weights(
 
     return ckpt
 
-
+def make_fixed_subset(dataset, k=100, seed=42):
+    g = torch.Generator()
+    g.manual_seed(seed)
+    idx = torch.randperm(len(dataset), generator=g)[:k].tolist()
+    return Subset(dataset, idx)
 
 def eval_on_validation_split(
     *,
@@ -175,13 +179,14 @@ def eval_on_validation_split(
         flow_max_disp=ckpt_cfg.flow_max_disp,
         flow_normalize=True,
         out_dtype=torch.float16,
-        dataset_split_txt=args.eval_manifest_path,
+        dataset_split_txt=args.eval_manifest,
         class_id_to_label_csv=args.class_id_to_label_csv,
     )
+    eval_subset = make_fixed_subset(dataset, k=200, seed=args.seed)
     collate_fn = collate_video_motion
 
     dataloader = DataLoader(
-        dataset,
+        eval_subset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -193,13 +198,18 @@ def eval_on_validation_split(
     base_json = {
         "root_dir": args.root_dir,
         "split": "validation",
-        "manifest": (os.path.abspath(args.eval_manifest_path) if args.eval_manifest_path else None),
+        "manifest": (os.path.abspath(args.eval_manifest) if args.eval_manifest else None),
         "num_samples": int(len(dataset)),
         "num_classes": int(len(dataset.classnames)),
         "classnames": dataset.classnames,
         "logit_scale_motion": float(logit_scale_value),
         "logit_scale_clip_vision": 0.0,
     }
+
+    args.use_heads = "fuse"
+    args.head_weights = "1.0"
+    args.rgb_weight = 0.5
+    args.no_rgb = True
     
     evaluate_one_split(
         args=args,
@@ -264,7 +274,6 @@ def main():
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
     ap.add_argument("--save_every", type=int, default=200)
-    ap.add_argument("--save_head_every", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
 
     ap.add_argument("--out_dir", type=str, default="out/finetune")
@@ -511,6 +520,7 @@ def main():
                     )
                     payload = make_ckpt_payload(
                         epoch=epoch,
+                        step_in_epoch=step_in_epoch,
                         global_step=global_step,
                         model=model,
                         optimizer=opt,
@@ -518,8 +528,8 @@ def main():
                         scaler=scaler if use_amp else None,
                         args=args,
                         best_loss=best_loss,
+                        logit_scale=logit_scale,
                     )
-                    payload["logit_scale_state"] = logit_scale.state_dict()
                     payload["pretrained"] = {
                         "path": pretrained_path,
                         "epoch": pretrained_ckpt.get("epoch", None),
@@ -537,7 +547,7 @@ def main():
                     eval_on_validation_split(
                         args=args,
                         model=model,
-                        fb_params=ckpt_cfg.fb_params,
+                        ckpt_cfg=ckpt_cfg,
                         device=device,
                         logit_scale_value=logit_scale().exp(),
                         clip_text_bank=clip_text_bank,
