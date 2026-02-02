@@ -4,13 +4,15 @@ import glob
 import json
 import re
 import sys
-from typing import Optional, Tuple, Dict, Any, List, Union
+from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from pathlib import Path
+from dataclasses import dataclass
+
 
 try:
     import clip  # openai clip
@@ -414,12 +416,13 @@ def list_videos(
         # Scan all videos once so we can resolve entries even if dataset uses class folders
         all_vids = _scan_videos_under_root(root)
 
-        rel_map: Dict[str, str] = {}          # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
-        base_map: Dict[str, List[str]] = {}   # "c.mp4" -> ["/abs/.../c.mp4", ...]
+        rel_map: Dict[str, str] = {}                 # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
+        stem_map: Dict[str, List[str]] = {}          # "c" (lower) -> ["/abs/.../c.zst", ...]
+
         for p in all_vids:
             rel = p.relative_to(root).as_posix()
             rel_map[rel] = str(p)
-            base_map.setdefault(p.name, []).append(str(p))
+            stem_map.setdefault(p.stem.lower(), []).append(str(p))
 
         paths: List[str] = []
         labels: List[int] = []
@@ -440,16 +443,16 @@ def list_videos(
                 labels.append(int(y))
                 continue
 
-            # 3) Basename-only match (only if unique)
-            base = Path(fname_norm).name
-            hits = base_map.get(base, [])
+            # 3) Stem-only match (basename without extension), case-insensitive
+            stem = Path(fname_norm).stem.lower()
+            hits = stem_map.get(stem, [])
             if len(hits) == 1:
                 paths.append(hits[0])
                 labels.append(int(y))
                 continue
             if len(hits) > 1:
                 raise ValueError(
-                    f"Ambiguous basename match for {fname!r}: found {len(hits)} files under {root_dir}. "
+                    f"Ambiguous stem match for {fname!r} (stem={stem!r}): found {len(hits)} files under {root_dir}. "
                     f"Use relative paths in the txt to disambiguate."
                 )
 
@@ -632,3 +635,197 @@ def aligned_indices_from_superset_unique(flow_idx: torch.Tensor, mhi_frames: int
     mask = pick_pos >= 0
     out[mask] = valid[pick_pos[mask]]
     return out
+
+
+# -----------------------------
+# eval util Manifest helpers
+# -----------------------------
+
+def expand_manifest_args(manifest_args: Optional[Sequence[str]]) -> List[str]:
+    """Accept explicit files and/or globs; return sorted unique absolute file paths."""
+    if not manifest_args:
+        return []
+    out: List[str] = []
+    for s in manifest_args:
+        matches = glob.glob(s)
+        if matches:
+            out.extend(matches)
+        else:
+            out.append(s)
+    return sorted({os.path.abspath(p) for p in out})
+
+
+def split_name_from_manifest(manifest_path: Optional[str]) -> str:
+    if manifest_path is None:
+        return "all"
+    return os.path.splitext(os.path.basename(manifest_path))[0]
+
+
+def read_manifest_paths(
+    manifest_path: str,
+    *,
+    root_dir: Optional[str] = None,
+    allow_missing: bool = False,
+) -> List[str]:
+    """
+    Reads a split manifest and returns a list of video file paths.
+
+    Supports common formats:
+    - one path per line
+    - "path label" or "path,label" (takes first token/field)
+    - relative paths resolved against root_dir if provided
+
+    Skips blank lines and '#' comments.
+    """
+    paths: List[str] = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # Take first field: split on comma first (csv-like), else whitespace
+            if "," in line:
+                p = line.split(",")[0].strip()
+            else:
+                p = line.split()[0].strip()
+
+            if root_dir and not os.path.isabs(p):
+                p = os.path.join(root_dir, p)
+
+            p = os.path.abspath(p)
+            if allow_missing or os.path.exists(p):
+                paths.append(p)
+
+    return paths
+
+
+def collect_split_files(
+    manifests: Optional[Sequence[str]],
+    *,
+    root_dir: Optional[str] = None,
+    allow_missing: bool = False,
+) -> Dict[str, List[str]]:
+    """
+    Given `--manifests` args, return dict {split_name: [files...]}.
+    If manifests is empty/None, returns {"all": []} (caller decides behavior).
+    """
+    mpaths = expand_manifest_args(manifests)
+    if not mpaths:
+        return {"all": []}
+
+    out: Dict[str, List[str]] = {}
+    for mp in mpaths:
+        name = split_name_from_manifest(mp)
+        out[name] = read_manifest_paths(mp, root_dir=root_dir, allow_missing=allow_missing)
+    return out
+
+
+# -----------------------------
+# Checkpoint arg extraction
+# -----------------------------
+
+def _get(ckpt_args: Dict[str, Any], key: str, fallback: Any) -> Any:
+    v = ckpt_args.get(key, None)
+    return fallback if v is None else v
+
+
+@dataclass
+class MotionCkptConfig:
+    # Core
+    model: str = "i3d"
+    embed_dim: int = 512
+    fuse: str = "avg_then_proj"
+    dropout: float = 0.0
+
+    # Streams
+    second_type: str = "flow"  # flow | dphase
+    use_stems: bool = False
+    compute_second_only: bool = False
+    use_nonlinear_projection: bool = False
+
+    # Input sizing
+    img_size: int = 224
+    mhi_frames: int = 32
+    flow_frames: int = 128
+    flow_hw: int = 112
+    mhi_windows: Tuple[int, ...] = (15,)
+
+    # Motion preprocessing
+    diff_threshold: float = 25.0
+    flow_max_disp: float = 20.0
+
+    # Farneback params
+    fb_pyr_scale: float = 0.5
+    fb_levels: int = 5
+    fb_winsize: int = 21
+    fb_iterations: int = 5
+    fb_poly_n: int = 7
+    fb_poly_sigma: float = 1.5
+    fb_flags: int = 0
+
+    @property
+    def second_channels(self) -> int:
+        return 1 if self.second_type == "dphase" else 2
+
+    @property
+    def mhi_channels(self) -> int:
+        return len(self.mhi_windows)
+
+    @property
+    def fb_params(self) -> Dict[str, Any]:
+        return dict(
+            pyr_scale=self.fb_pyr_scale,
+            levels=self.fb_levels,
+            winsize=self.fb_winsize,
+            iterations=self.fb_iterations,
+            poly_n=self.fb_poly_n,
+            poly_sigma=self.fb_poly_sigma,
+            flags=self.fb_flags,
+        )
+
+
+def extract_motion_config_from_ckpt(
+    ckpt: Dict[str, Any],
+    *,
+    fallback: Optional[MotionCkptConfig] = None,
+) -> MotionCkptConfig:
+    """
+    Mirror eval.py’s checkpoint argument extraction into a reusable function.
+    """
+    base = fallback or MotionCkptConfig()
+    ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
+
+    # mhi_windows stored as string like "15" or "5,25"
+    mhi_windows_str = str(_get(ckpt_args, "mhi_windows", ",".join(map(str, base.mhi_windows))))
+    mhi_windows = tuple(int(x) for x in mhi_windows_str.split(",") if x.strip())
+
+    cfg = MotionCkptConfig(
+        model=str(_get(ckpt_args, "model", base.model)),
+        embed_dim=int(_get(ckpt_args, "embed_dim", base.embed_dim)),
+        fuse=str(_get(ckpt_args, "fuse", base.fuse)),
+        dropout=float(_get(ckpt_args, "dropout", base.dropout)),
+
+        second_type=str(_get(ckpt_args, "second_type", base.second_type)),
+        use_stems=bool(_get(ckpt_args, "use_stems", base.use_stems)),
+        compute_second_only=bool(_get(ckpt_args, "compute_second_only", base.compute_second_only)),
+        use_nonlinear_projection=bool(_get(ckpt_args, "use_nonlinear_projection", base.use_nonlinear_projection)),
+
+        img_size=int(_get(ckpt_args, "img_size", base.img_size)),
+        mhi_frames=int(_get(ckpt_args, "mhi_frames", base.mhi_frames)),
+        flow_frames=int(_get(ckpt_args, "flow_frames", base.flow_frames)),
+        flow_hw=int(_get(ckpt_args, "flow_hw", base.flow_hw)),
+        mhi_windows=mhi_windows if mhi_windows else base.mhi_windows,
+
+        diff_threshold=float(_get(ckpt_args, "diff_threshold", base.diff_threshold)),
+        flow_max_disp=float(_get(ckpt_args, "flow_max_disp", base.flow_max_disp)),
+
+        fb_pyr_scale=float(_get(ckpt_args, "fb_pyr_scale", base.fb_pyr_scale)),
+        fb_levels=int(_get(ckpt_args, "fb_levels", base.fb_levels)),
+        fb_winsize=int(_get(ckpt_args, "fb_winsize", base.fb_winsize)),
+        fb_iterations=int(_get(ckpt_args, "fb_iterations", base.fb_iterations)),
+        fb_poly_n=int(_get(ckpt_args, "fb_poly_n", base.fb_poly_n)),
+        fb_poly_sigma=float(_get(ckpt_args, "fb_poly_sigma", base.fb_poly_sigma)),
+        fb_flags=int(_get(ckpt_args, "fb_flags", base.fb_flags)),
+    )
+    return cfg

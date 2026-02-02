@@ -45,7 +45,7 @@ from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 from util import build_text_bank, LogitScale
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from dataset import VideoMotionDataset, collate_video_motion, VideoMHIDPhaseDataset, collate_video_mhi_dphase, VideoMHIFramesDataset, raft_flow_from_paired_frames_batched
+from dataset import VideoMotionDataset, collate_video_motion, VideoMHIFramesDataset, raft_flow_from_paired_frames_batched
 
 
 try:

@@ -138,9 +138,13 @@ class MotionTwoStreamZstdDataset(Dataset):
         affine_scale=(0.5, 1.5),
         affine_shear=(-2.0, 2.0),
         seed: int = 0,
+        dataset_split_txt=None,
+        class_id_to_label_csv=None
     ):
         self.root_dir = os.path.abspath(root_dir)
-        self.paths, self.labels, self.classnames = list_videos(root_dir)
+        self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
+        if dataset_split_txt is not None and class_id_to_label_csv is not None:
+            self.classnames = classnames_from_id_csv(class_id_to_label_csv, self.labels)
 
         self.img_size = img_size
         self.flow_hw = flow_hw
@@ -408,19 +412,19 @@ def collate_video_motion(batch):
         list(paths),
     )
 
-# ----------------------------
-# dPhase core (FFT phase-only recon of dGS)
-# ----------------------------
-def phase_only_recon_dgs(dgs_2d: np.ndarray) -> np.ndarray:
-    """
-    dgs_2d: (H,W) float32
-    Returns: (H,W) float32 reconstructed image from unit-magnitude spectrum using phase of rfft2(dgs).
-    """
-    f = np.fft.rfft2(dgs_2d)
-    phase = np.angle(f)
-    f_unit = np.cos(phase) + 1j * np.sin(phase)
-    out = np.fft.irfft2(f_unit, s=dgs_2d.shape)
-    return out.astype(np.float32)
+# # ----------------------------
+# # dPhase core (FFT phase-only recon of dGS)
+# # ----------------------------
+# def phase_only_recon_dgs(dgs_2d: np.ndarray) -> np.ndarray:
+#     """
+#     dgs_2d: (H,W) float32
+#     Returns: (H,W) float32 reconstructed image from unit-magnitude spectrum using phase of rfft2(dgs).
+#     """
+#     f = np.fft.rfft2(dgs_2d)
+#     phase = np.angle(f)
+#     f_unit = np.cos(phase) + 1j * np.sin(phase)
+#     out = np.fft.irfft2(f_unit, s=dgs_2d.shape)
+#     return out.astype(np.float32)
 
 # # ----------------------------
 # # Compute MHI + dPhase (CPU)
