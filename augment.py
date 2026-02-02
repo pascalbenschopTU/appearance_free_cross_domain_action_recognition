@@ -143,9 +143,9 @@ def random_motion_augment(
     p_scale: float = 0.30,
     p_shear: float = 0.15,
     p_translate: float = 0.30,
-    max_degrees: float = 6.0,
-    max_translate_frac: float = 0.05, # fraction of width/height
-    scale_range: Tuple[float, float] = (0.95, 1.5),
+    max_degrees: float = 10.0,
+    max_translate_frac: float = 0.10, # fraction of width/height
+    scale_range: Tuple[float, float] = (0.5, 1.5),
     shear_range: Tuple[float, float] = (-2.0, 2.0),
     mhi_mode: str = "bilinear",
     second_mode: str = "bilinear",

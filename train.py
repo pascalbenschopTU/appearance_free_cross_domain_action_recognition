@@ -1,4 +1,5 @@
 import json
+import sys
 from dataset import MotionTwoStreamZstdDataset, collate_motion, ResumableShuffleSampler
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
@@ -306,13 +307,15 @@ def main():
 
             # Logging
             with torch.no_grad():
-                writer.add_scalar("loss/total", float(loss.item()), global_step)
-                writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
-                writer.add_scalar("loss/top", float(loss_top.item()), global_step)
-                writer.add_scalar("loss/bot", float(loss_bot.item()), global_step)
-                writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
-                writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
-
+                try:
+                    writer.add_scalar("loss/total", float(loss.item()), global_step)
+                    writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
+                    writer.add_scalar("loss/top", float(loss_top.item()), global_step)
+                    writer.add_scalar("loss/bot", float(loss_bot.item()), global_step)
+                    writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
+                    writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
+                except Exception as e:
+                    print(f"Writing failed: {e}", file=sys.stderr)
 
                 running_clip_loss += float(loss.item())
                 n_logs += 1
