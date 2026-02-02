@@ -211,7 +211,7 @@ def eval_on_validation_split(
     args.rgb_weight = 0.5
     args.no_rgb = True
     
-    evaluate_one_split(
+    metrics = evaluate_one_split(
         args=args,
         dataset=dataset,
         dataloader=dataloader,
@@ -228,6 +228,8 @@ def eval_on_validation_split(
         out_dir=args.eval_dir,
         base_json = base_json,
     )
+
+    return float(metrics["motion_only"]["top1"])
 
 # -----------------------------
 # Main
@@ -415,6 +417,7 @@ def main():
     # Resume (finetune run)
     global_step = 0
     best_loss = float("inf")
+    best_top1_acc = 0.0
     resume_path = find_latest_ckpt(args.ckpt_dir)
 
     if resume_path is not None:
@@ -511,13 +514,8 @@ def main():
 
                 # Save best (simple)
                 current = run_clip / max(1, n_logs)
-                if args.save_every > 0 and (global_step % args.save_every) == 0 and current < best_loss:
-
+                if args.save_every > 0 and (global_step % args.save_every) == 0:
                     best_loss = current
-                    save_path = os.path.join(
-                        args.ckpt_dir,
-                        f"checkpoint_epoch_{epoch:03d}_step{global_step:07d}_loss{current:.4f}.pt",
-                    )
                     payload = make_ckpt_payload(
                         epoch=epoch,
                         step_in_epoch=step_in_epoch,
@@ -544,7 +542,7 @@ def main():
                         "manifest": manifest_path,
                     }
 
-                    eval_on_validation_split(
+                    top_1_acc = eval_on_validation_split(
                         args=args,
                         model=model,
                         ckpt_cfg=ckpt_cfg,
@@ -553,9 +551,16 @@ def main():
                         clip_text_bank=clip_text_bank,
                         use_amp=use_amp
                     )
+                    print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
+                    if top_1_acc > best_top1_acc:
+                        save_path = os.path.join(
+                            args.ckpt_dir,
+                            f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
+                        )
 
-                    torch.save(payload, save_path)
-                    print(f"[CKPT] saved {save_path}", flush=True)
+                        torch.save(payload, save_path)
+                        print(f"[CKPT] saved {save_path}", flush=True)
+                        best_top1_acc = top_1_acc
 
         if n_logs > 0:
             msg = f"[EPOCH {epoch:03d}] clip_loss={run_clip/n_logs:.4f}"
