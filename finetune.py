@@ -90,6 +90,40 @@ def get_trainable_params(model: nn.Module, extra_modules: Optional[List[nn.Modul
     return params
 
 
+def smooth_one_hot(labels: torch.Tensor, num_classes: int, smoothing: float) -> torch.Tensor:
+    if smoothing <= 0.0:
+        return F.one_hot(labels, num_classes=num_classes).float()
+    off_value = smoothing / num_classes
+    on_value = 1.0 - smoothing + off_value
+    return torch.full(
+        (labels.size(0), num_classes),
+        off_value,
+        device=labels.device,
+        dtype=torch.float32,
+    ).scatter_(1, labels.view(-1, 1), on_value)
+
+
+def mixup_batch(
+    mhi: torch.Tensor,
+    flow: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    num_classes: int,
+    alpha: float,
+    label_smoothing: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    lam = torch.distributions.Beta(alpha, alpha).sample().to(device=labels.device, dtype=mhi.dtype)
+    rand_index = torch.randperm(labels.size(0), device=labels.device)
+
+    mhi_mix = lam * mhi + (1.0 - lam) * mhi[rand_index]
+    flow_mix = lam * flow + (1.0 - lam) * flow[rand_index]
+
+    y1 = smooth_one_hot(labels, num_classes=num_classes, smoothing=label_smoothing)
+    y2 = y1[rand_index]
+    y_mix = lam * y1 + (1.0 - lam) * y2
+    return mhi_mix, flow_mix, y_mix
+
+
 def resolve_ckpt_path(path_or_dir: str) -> str:
     if os.path.isdir(path_or_dir):
         latest = find_latest_ckpt(path_or_dir)
@@ -161,47 +195,20 @@ def eval_on_validation_split(
     *,
     args,
     model,
-    ckpt_cfg,
+    eval_dataset,
+    eval_dataloader,
     device,
     logit_scale_value,
     clip_text_bank,
     use_amp=True,
 ):
-    dataset = VideoMotionDataset(
-        args.eval_root_dir,
-        img_size=ckpt_cfg.img_size,
-        flow_hw=ckpt_cfg.flow_hw,
-        mhi_frames=ckpt_cfg.mhi_frames,
-        flow_frames=ckpt_cfg.flow_frames,
-        mhi_windows=list(ckpt_cfg.mhi_windows),
-        diff_threshold=ckpt_cfg.diff_threshold,
-        fb_params=ckpt_cfg.fb_params,
-        flow_max_disp=ckpt_cfg.flow_max_disp,
-        flow_normalize=True,
-        out_dtype=torch.float16,
-        dataset_split_txt=args.eval_manifest,
-        class_id_to_label_csv=args.class_id_to_label_csv,
-    )
-    eval_subset = make_fixed_subset(dataset, k=200, seed=args.seed)
-    collate_fn = collate_video_motion
-
-    dataloader = DataLoader(
-        eval_subset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        collate_fn=collate_fn,
-        drop_last=False,
-    )
-    
     base_json = {
         "root_dir": args.root_dir,
         "split": "validation",
         "manifest": (os.path.abspath(args.eval_manifest) if args.eval_manifest else None),
-        "num_samples": int(len(dataset)),
-        "num_classes": int(len(dataset.classnames)),
-        "classnames": dataset.classnames,
+        "num_samples": int(len(eval_dataset)),
+        "num_classes": int(len(eval_dataset.classnames)),
+        "classnames": eval_dataset.classnames,
         "logit_scale_motion": float(logit_scale_value),
         "logit_scale_clip_vision": 0.0,
     }
@@ -213,8 +220,8 @@ def eval_on_validation_split(
     
     metrics = evaluate_one_split(
         args=args,
-        dataset=dataset,
-        dataloader=dataloader,
+        dataset=eval_dataset,
+        dataloader=eval_dataloader,
         device=device,
         autocast_on=use_amp,
         model=model,
@@ -223,8 +230,8 @@ def eval_on_validation_split(
         text_bank=clip_text_bank,
         scale_motion=logit_scale_value,
         scale_clip=0.0,
-        num_classes=len(dataset.classnames),
-        classnames=dataset.classnames,
+        num_classes=len(eval_dataset.classnames),
+        classnames=eval_dataset.classnames,
         out_dir=args.eval_dir,
         base_json = base_json,
     )
@@ -272,6 +279,9 @@ def main():
     ap.add_argument("--warmup_steps", type=int, default=1000)
     ap.add_argument("--min_lr", type=float, default=1e-6)
     ap.add_argument("--lambda_align", type=float, default=0.0)
+    ap.add_argument("--label_smoothing", type=float, default=0.0)
+    ap.add_argument("--mixup_alpha", type=float, default=0.0)
+    ap.add_argument("--mixup_prob", type=float, default=0.0)
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -350,6 +360,33 @@ def main():
         drop_last=True,
     )
 
+    eval_dataset = VideoMotionDataset(
+        args.eval_root_dir,
+        img_size=ckpt_cfg.img_size,
+        flow_hw=ckpt_cfg.flow_hw,
+        mhi_frames=ckpt_cfg.mhi_frames,
+        flow_frames=ckpt_cfg.flow_frames,
+        mhi_windows=list(ckpt_cfg.mhi_windows),
+        diff_threshold=ckpt_cfg.diff_threshold,
+        fb_params=ckpt_cfg.fb_params,
+        flow_max_disp=ckpt_cfg.flow_max_disp,
+        flow_normalize=True,
+        out_dtype=torch.float16,
+        dataset_split_txt=args.eval_manifest,
+        class_id_to_label_csv=args.class_id_to_label_csv,
+    )
+    eval_subset = make_fixed_subset(eval_dataset, k=400, seed=args.seed)
+
+    eval_dataloader = DataLoader(
+        eval_subset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
+        collate_fn=collate_video_motion,
+        drop_last=False,
+    )
+
     # Text bank for NEW classes
     clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
         dataset_classnames=dataset.classnames,
@@ -357,6 +394,7 @@ def main():
         init_temp=0.07,
         dtype=torch.float16,
     )
+    num_classes = len(dataset.classnames)
 
     # Model
     model = TwoStreamI3D_CLIP(
@@ -418,21 +456,6 @@ def main():
     global_step = 0
     best_loss = float("inf")
     best_top1_acc = 0.0
-    resume_path = find_latest_ckpt(args.ckpt_dir)
-
-    if resume_path is not None:
-        ckpt = load_checkpoint(
-            resume_path,
-            device=device,
-            model=model,
-            optimizer=opt,
-            scheduler=scheduler,
-            scaler=scaler,
-            logit_scale=logit_scale,
-            strict=False,
-        )
-        global_step = int(ckpt.get("global_step", 0))
-        best_loss = float(ckpt.get("best_loss", best_loss))
 
     start_epoch = global_step // max(1, steps_per_epoch)
     start_time = time.time()
@@ -460,11 +483,25 @@ def main():
             use_amp = (device.type == "cuda")
 
             with torch.autocast(device_type=device.type, enabled=use_amp):
+                use_mixup = (args.mixup_alpha > 0) and (args.mixup_prob > 0) and (np.random.rand() < args.mixup_prob)
+                if use_mixup:
+                    mhi_top, flow_bot, labels_soft = mixup_batch(
+                        mhi_top,
+                        flow_bot,
+                        labels,
+                        num_classes=num_classes,
+                        alpha=args.mixup_alpha,
+                        label_smoothing=args.label_smoothing,
+                    )
                 out = model(mhi_top, flow_bot)
 
                 video = F.normalize(out["emb_fuse"], dim=-1)
                 logits = logit_scale().exp() * (video @ clip_text_bank.t())
-                clip_loss = F.cross_entropy(logits, labels)
+                if use_mixup:
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    clip_loss = -(labels_soft * log_probs).sum(dim=-1).mean()
+                else:
+                    clip_loss = F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
 
                 if args.lambda_align > 0:
                     et = F.normalize(out["emb_top"], dim=-1)
@@ -512,61 +549,61 @@ def main():
                         msg += f" align_loss={run_align/n_logs:.4f}"
                     print(msg, flush=True)
 
-                # Save best (simple)
-                current = run_clip / max(1, n_logs)
-                if args.save_every > 0 and (global_step % args.save_every) == 0:
-                    best_loss = current
-                    payload = make_ckpt_payload(
-                        epoch=epoch,
-                        step_in_epoch=step_in_epoch,
-                        global_step=global_step,
-                        model=model,
-                        optimizer=opt,
-                        scheduler=scheduler,
-                        scaler=scaler if use_amp else None,
-                        args=args,
-                        best_loss=best_loss,
-                        logit_scale=logit_scale,
-                    )
-                    payload["pretrained"] = {
-                        "path": pretrained_path,
-                        "epoch": pretrained_ckpt.get("epoch", None),
-                        "global_step": pretrained_ckpt.get("global_step", None),
-                    }
-                    payload["data_cfg"] = {
-                        "img_size": img_size,
-                        "mhi_frames": mhi_frames,
-                        "flow_frames": flow_frames,
-                        "flow_hw": flow_hw,
-                        "mhi_windows": mhi_windows,
-                        "manifest": manifest_path,
-                    }
-
-                    top_1_acc = eval_on_validation_split(
-                        args=args,
-                        model=model,
-                        ckpt_cfg=ckpt_cfg,
-                        device=device,
-                        logit_scale_value=logit_scale().exp(),
-                        clip_text_bank=clip_text_bank,
-                        use_amp=use_amp
-                    )
-                    print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
-                    if top_1_acc > best_top1_acc:
-                        save_path = os.path.join(
-                            args.ckpt_dir,
-                            f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
-                        )
-
-                        torch.save(payload, save_path)
-                        print(f"[CKPT] saved {save_path}", flush=True)
-                        best_top1_acc = top_1_acc
-
         if n_logs > 0:
             msg = f"[EPOCH {epoch:03d}] clip_loss={run_clip/n_logs:.4f}"
             if args.lambda_align > 0:
                 msg += f" align_loss={run_align/n_logs:.4f}"
             print(msg, flush=True)
+
+        # Save best (simple)
+        current = run_clip / max(1, n_logs)
+        best_loss = current
+        payload = make_ckpt_payload(
+            epoch=epoch,
+            step_in_epoch=step_in_epoch,
+            global_step=global_step,
+            model=model,
+            optimizer=opt,
+            scheduler=scheduler,
+            scaler=scaler if use_amp else None,
+            args=args,
+            best_loss=best_loss,
+            logit_scale=logit_scale,
+        )
+        payload["pretrained"] = {
+            "path": pretrained_path,
+            "epoch": pretrained_ckpt.get("epoch", None),
+            "global_step": pretrained_ckpt.get("global_step", None),
+        }
+        payload["data_cfg"] = {
+            "img_size": img_size,
+            "mhi_frames": mhi_frames,
+            "flow_frames": flow_frames,
+            "flow_hw": flow_hw,
+            "mhi_windows": mhi_windows,
+            "manifest": manifest_path,
+        }
+
+        top_1_acc = eval_on_validation_split(
+            args=args,
+            model=model,
+            eval_dataset=eval_dataset,
+            eval_dataloader=eval_dataloader,
+            device=device,
+            logit_scale_value=logit_scale().exp(),
+            clip_text_bank=clip_text_bank,
+            use_amp=use_amp
+        )
+        print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
+        if top_1_acc > best_top1_acc:
+            save_path = os.path.join(
+                args.ckpt_dir,
+                f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
+            )
+
+            torch.save(payload, save_path)
+            print(f"[CKPT] saved {save_path}", flush=True)
+            best_top1_acc = top_1_acc
 
 
 if __name__ == "__main__":
