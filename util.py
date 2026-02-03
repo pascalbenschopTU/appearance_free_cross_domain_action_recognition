@@ -370,11 +370,42 @@ def sync_scheduler_to_global_step(scheduler, global_step: int):
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".zst"}
 
 def _scan_videos_under_root(root: Path) -> List[Path]:
-    vids = []
-    for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
-            vids.append(p)
-    return vids
+    """
+    Faster than Path.rglob for large trees.
+    video_exts should be lowercase, including dot: {".mp4", ".avi", ...}
+    """
+    root = root.resolve()
+    out: List[Path] = []
+    stack = [os.fspath(root)]
+
+    while stack:
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    # Skip symlinks to avoid loops unless you want them
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                            continue
+                        if not e.is_file(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        # permissions / broken links / transient IO issues
+                        continue
+
+                    # Extension check without Path construction
+                    name = e.name
+                    dot = name.rfind(".")
+                    if dot == -1:
+                        continue
+                    ext = name[dot:].lower()
+                    if ext in VIDEO_EXTS:
+                        out.append(Path(e.path))
+        except OSError:
+            continue
+
+    return out
 
 def _parse_dataset_split_txt(txt_path: str) -> List[Tuple[str, int]]:
     items: List[Tuple[str, int]] = []
