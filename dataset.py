@@ -133,9 +133,9 @@ class MotionTwoStreamZstdDataset(Dataset):
         p_scl: float = 0.30,
         p_shr: float = 0.10,
         p_trn: float = 0.30,
-        affine_degrees: float = 6.0,
-        affine_translate: float = 0.05,
-        affine_scale=(0.95, 1.5),
+        affine_degrees: float = 10.0,
+        affine_translate: float = 0.10,
+        affine_scale=(0.5, 1.5),
         affine_shear=(-2.0, 2.0),
         seed: int = 0,
         dataset_split_txt=None,
@@ -226,7 +226,7 @@ class MotionTwoStreamZstdDataset(Dataset):
             )
 
         except Exception as e:
-            print(f"Something went wrong, video: {video_path}", flush=True)
+            print(f"Something went wrong, video: {video_path}, error: {e}", flush=True)
             C = len(self.mhi_windows)
             mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
             second = torch.zeros((self.in_ch_second, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
