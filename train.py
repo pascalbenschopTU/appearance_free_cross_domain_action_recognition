@@ -22,52 +22,38 @@ import numpy as np
 from torch.utils.data import DataLoader
 import time
 
-def make_loader_for_epoch(
+def smooth_one_hot(labels: torch.Tensor, num_classes: int, smoothing: float) -> torch.Tensor:
+    if smoothing <= 0.0:
+        return F.one_hot(labels, num_classes=num_classes).float()
+    off_value = smoothing / num_classes
+    on_value = 1.0 - smoothing + off_value
+    return torch.full(
+        (labels.size(0), num_classes),
+        off_value,
+        device=labels.device,
+        dtype=torch.float32,
+    ).scatter_(1, labels.view(-1, 1), on_value)
+
+
+def mixup_batch(
+    mhi: torch.Tensor,
+    flow: torch.Tensor,
+    labels: torch.Tensor,
     *,
-    dataset,
-    collate_fn,
-    epoch: int,
-    batch_size: int,
-    num_workers: int,
-    pin_memory: bool,
-    seed: int,
-    drop_last: bool = True,
-    resume_epoch: int | None = None,
-    start_in_epoch: int = 0,
-    persistent_workers: bool = True,
-):
-    """
-    Builds a DataLoader for a specific epoch.
-    If (resume_epoch == epoch), resumes from `start_in_epoch` batches into the epoch
-    without decoding/skipping earlier samples (via an offset sampler).
-    """
-    dataset.set_epoch(epoch)
+    num_classes: int,
+    alpha: float,
+    label_smoothing: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    lam = torch.distributions.Beta(alpha, alpha).sample().to(device=labels.device, dtype=mhi.dtype)
+    rand_index = torch.randperm(labels.size(0), device=labels.device)
 
-    start_index = 0
-    if resume_epoch is not None and epoch == resume_epoch and start_in_epoch > 0:
-        start_index = start_in_epoch * batch_size  # batches -> samples
+    mhi_mix = lam * mhi + (1.0 - lam) * mhi[rand_index]
+    flow_mix = lam * flow + (1.0 - lam) * flow[rand_index]
 
-    sampler = ResumableShuffleSampler(
-        dataset_len=len(dataset),
-        seed=seed,
-        epoch=epoch,
-        start_index=start_index,
-        drop_last=drop_last,
-        batch_size=batch_size,
-    )
-
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        shuffle=False,  # must be False when sampler is set
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=collate_fn,
-        drop_last=drop_last,
-        persistent_workers=persistent_workers if num_workers > 0 else False,
-    )
-
+    y1 = smooth_one_hot(labels, num_classes=num_classes, smoothing=label_smoothing)
+    y2 = y1[rand_index]
+    y_mix = lam * y1 + (1.0 - lam) * y2
+    return mhi_mix, flow_mix, y_mix
 
 def main():
     ap = argparse.ArgumentParser()
@@ -105,6 +91,9 @@ def main():
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.10)
     ap.add_argument("--probability_affine", type=float, default=0.10, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
+    ap.add_argument("--label_smoothing", type=float, default=0.1)
+    ap.add_argument("--mixup_alpha", type=float, default=0.8)
+    ap.add_argument("--mixup_prob", type=float, default=0.5)
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -184,6 +173,7 @@ def main():
         dtype=torch.float16,
         class_texts=class_texts,
     )
+    num_classes = len(dataset.classnames)
     # Student model
     if args.model == "i3d":
         model = TwoStreamI3D_CLIP(
@@ -244,8 +234,9 @@ def main():
         global_step = ckpt.get("global_step", 0)
         best_loss = ckpt.get("best_loss", float("inf"))
 
-        start_epoch = ckpt["epoch"]
-        start_in_epoch = ckpt.get("step_in_epoch", 0)
+        # Epoch checkpoints are saved after an epoch completes, so resume at next epoch.
+        start_epoch = ckpt["epoch"] + 1
+        start_in_epoch = 0
 
     for epoch in range(start_epoch, args.epochs):
         dataset.set_epoch(epoch)
@@ -253,18 +244,6 @@ def main():
         running_clip_loss = 0.0
         n_logs = 0
 
-        # loader = make_loader_for_epoch(
-        #     dataset=dataset,
-        #     collate_fn=collate_motion,
-        #     epoch=epoch,
-        #     batch_size=args.batch_size,
-        #     num_workers=args.num_workers,
-        #     pin_memory=True,
-        #     seed=args.seed,
-        #     drop_last=True,
-        #     resume_epoch=start_epoch,
-        #     start_in_epoch=start_in_epoch if epoch == start_epoch else 0,
-        # )
         for step_in_epoch, (mhi_top, flow_bot, labels, cnames) in enumerate(loader):
             mhi_top  = mhi_top.to(device, non_blocking=True)   # (B,C,32,224,224)
             flow_bot = flow_bot.to(device, non_blocking=True)  # (B,2,128,112,112)
@@ -275,6 +254,16 @@ def main():
 
             use_amp = (device.type == "cuda")
             with torch.autocast(device_type=device.type, enabled=use_amp):
+                use_mixup = (args.mixup_alpha > 0) and (args.mixup_prob > 0) and (np.random.rand() < args.mixup_prob)
+                if use_mixup:
+                    mhi_top, flow_bot, labels_soft = mixup_batch(
+                        mhi_top,
+                        flow_bot,
+                        labels,
+                        num_classes=num_classes,
+                        alpha=args.mixup_alpha,
+                        label_smoothing=args.label_smoothing,
+                    )
                 out = model(mhi_top, flow_bot)
 
                 s = logit_scale().exp()
@@ -282,7 +271,10 @@ def main():
                 def ce_from_emb(emb):
                     emb = F.normalize(emb, dim=-1)
                     logits = s * (emb @ clip_text_bank.t())
-                    return F.cross_entropy(logits, labels)
+                    if use_mixup:
+                        log_probs = F.log_softmax(logits, dim=-1)
+                        return -(labels_soft * log_probs).sum(dim=-1).mean()
+                    return F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
 
                 loss_fuse = ce_from_emb(out["emb_fuse"])
                 loss_top  = ce_from_emb(out["emb_top"])
