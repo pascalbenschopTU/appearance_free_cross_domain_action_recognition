@@ -23,39 +23,6 @@ import numpy as np
 from torch.utils.data import DataLoader
 import time
 
-def smooth_one_hot(labels: torch.Tensor, num_classes: int, smoothing: float) -> torch.Tensor:
-    if smoothing <= 0.0:
-        return F.one_hot(labels, num_classes=num_classes).float()
-    off_value = smoothing / num_classes
-    on_value = 1.0 - smoothing + off_value
-    return torch.full(
-        (labels.size(0), num_classes),
-        off_value,
-        device=labels.device,
-        dtype=torch.float32,
-    ).scatter_(1, labels.view(-1, 1), on_value)
-
-
-def mixup_batch(
-    mhi: torch.Tensor,
-    flow: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    num_classes: int,
-    alpha: float,
-    label_smoothing: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    lam = torch.distributions.Beta(alpha, alpha).sample().to(device=labels.device, dtype=mhi.dtype)
-    rand_index = torch.randperm(labels.size(0), device=labels.device)
-
-    mhi_mix = lam * mhi + (1.0 - lam) * mhi[rand_index]
-    flow_mix = lam * flow + (1.0 - lam) * flow[rand_index]
-
-    y1 = smooth_one_hot(labels, num_classes=num_classes, smoothing=label_smoothing)
-    y2 = y1[rand_index]
-    y_mix = lam * y1 + (1.0 - lam) * y2
-    return mhi_mix, flow_mix, y_mix
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root_dir", type=str, required=True)
@@ -92,9 +59,7 @@ def main():
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.10)
     ap.add_argument("--probability_affine", type=float, default=0.10, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
-    ap.add_argument("--label_smoothing", type=float, default=0.1)
-    ap.add_argument("--mixup_alpha", type=float, default=0.8)
-    ap.add_argument("--mixup_prob", type=float, default=0.5)
+    ap.add_argument("--label_smoothing", type=float, default=0.0)
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -239,6 +204,9 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         start_in_epoch = 0
 
+    global_running_clip_loss = 0.0
+    global_n_logs = 0
+
     for epoch in range(start_epoch, args.epochs):
         dataset.set_epoch(epoch)
         model.train()
@@ -255,16 +223,6 @@ def main():
 
             use_amp = (device.type == "cuda")
             with torch.autocast(device_type=device.type, enabled=use_amp):
-                use_mixup = (args.mixup_alpha > 0) and (args.mixup_prob > 0) and (np.random.rand() < args.mixup_prob)
-                if use_mixup:
-                    mhi_top, flow_bot, labels_soft = mixup_batch(
-                        mhi_top,
-                        flow_bot,
-                        labels,
-                        num_classes=num_classes,
-                        alpha=args.mixup_alpha,
-                        label_smoothing=args.label_smoothing,
-                    )
                 out = model(mhi_top, flow_bot)
 
                 s = logit_scale().exp()
@@ -272,9 +230,6 @@ def main():
                 def ce_from_emb(emb):
                     emb = F.normalize(emb, dim=-1)
                     logits = s * (emb @ clip_text_bank.t())
-                    if use_mixup:
-                        log_probs = F.log_softmax(logits, dim=-1)
-                        return -(labels_soft * log_probs).sum(dim=-1).mean()
                     return F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
 
                 loss_fuse = ce_from_emb(out["emb_fuse"])
@@ -311,13 +266,16 @@ def main():
 
                 running_clip_loss += float(loss.item())
                 n_logs += 1
+                global_running_clip_loss += float(loss.item())
+                global_n_logs += 1
 
                 if (global_step % args.log_every) == 0:
                     learning_rate = opt.param_groups[0]["lr"]
                     elapsed = time.time() - start_time
+                    running_avg = global_running_clip_loss / max(global_n_logs, 1)
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:06d} lr {learning_rate:.6f}] "
-                        f"clip_loss={running_clip_loss/n_logs:.4f} "
+                        f"clip_loss={running_avg:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
                     print(msg, flush=True)
