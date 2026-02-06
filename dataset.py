@@ -58,15 +58,16 @@ class ResumableShuffleSampler(Sampler[int]):
 # ----------------------------
 # Zstandard dataset
 # ----------------------------
-MAGIC_FLOW   = b"MHIFLOW1"
-MAGIC_DPHASE = b"MHIDPHAS"
+MAGIC_FLOW     = b"MHIFLOW1"
+MAGIC_DPHASE   = b"MHIDPHAS"
+MAGIC_FLOWONLY = b"FLOWONLY"
 
 def _unpack_blob(blob: bytes):
     if len(blob) < 28:
         raise RuntimeError("Blob too small")
 
     magic, meta_len, mhi_nbytes, second_nbytes = struct.unpack("<8sIQQ", blob[:28])
-    if magic not in (MAGIC_FLOW, MAGIC_DPHASE):
+    if magic not in (MAGIC_FLOW, MAGIC_DPHASE, MAGIC_FLOWONLY):
         raise RuntimeError(f"Bad magic header: {magic!r}")
 
     p = 28
@@ -82,9 +83,13 @@ def _unpack_blob(blob: bytes):
     mhi_buf = memoryview(blob)[p:end_mhi]
     second_buf = memoryview(blob)[end_mhi:end_second]
 
-    mhi_u8 = np.frombuffer(mhi_buf, dtype=np.uint8).reshape(meta["mhi_shape"])
+    mhi_shape = meta.get("mhi_shape", [0])
+    if mhi_nbytes == 0:
+        mhi_u8 = np.empty((0,), dtype=np.uint8)
+    else:
+        mhi_u8 = np.frombuffer(mhi_buf, dtype=np.uint8).reshape(mhi_shape)
 
-    if magic == MAGIC_FLOW:
+    if magic in (MAGIC_FLOW, MAGIC_FLOWONLY):
         second = np.frombuffer(second_buf, dtype=np.int8).reshape(meta["flow_shape"])
         second_type = "flow"
     else:
@@ -106,7 +111,11 @@ def load_zstd_mhi_second(
     blob = dctx.decompress(comp)
     mhi_u8, second_i8, meta, second_type = _unpack_blob(blob)
 
-    mhi = torch.from_numpy(mhi_u8).to(device=device, dtype=dtype) * float(meta["mhi_scale"])
+    mhi_scale = float(meta.get("mhi_scale", 1.0 / 255.0))
+    if mhi_u8.size == 0:
+        mhi = torch.empty((0,), device=device, dtype=dtype)
+    else:
+        mhi = torch.from_numpy(mhi_u8).to(device=device, dtype=dtype) * mhi_scale
 
     if second_type == "flow":
         second = torch.from_numpy(second_i8).to(device=device, dtype=dtype) * float(meta["flow_scale"])
@@ -199,6 +208,12 @@ class MotionTwoStreamZstdDataset(Dataset):
 
             # --- Temporal selection ---
             rng = np.random.default_rng(self.seed + 1000003 * self.epoch + idx)
+            if mhi.numel() == 0 or mhi.ndim != 4:
+                C = len(self.mhi_windows)
+                mhi = torch.zeros(
+                    (C, self.mhi_frames, self.img_size, self.img_size),
+                    dtype=self.out_dtype,
+                )
             Tm = mhi.shape[1]
             Tf = second.shape[1]
             if Tm >= self.mhi_frames and Tf >= self.flow_frames:
