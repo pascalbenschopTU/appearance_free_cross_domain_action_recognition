@@ -32,11 +32,6 @@ from util import (
 )
 from pathlib import Path
 
-
-THIS_DIR = Path(__file__).resolve().parent
-REPO_ROOT = THIS_DIR.parent
-
-
 class MLPProjector(nn.Module):
     def __init__(self, in_dim=1024, hidden_dim=2048, out_dim=512, dropout=0.1):
         super().__init__()
@@ -141,34 +136,24 @@ def resolve_single_manifest(manifest_arg: Optional[str]) -> Optional[str]:
     return matches[0]
 
 
-def smooth_one_hot(labels: torch.Tensor, num_classes: int, smoothing: float) -> torch.Tensor:
-    if smoothing <= 0.0:
-        return F.one_hot(labels, num_classes=num_classes).float()
-    off_value = smoothing / num_classes
-    on_value = 1.0 - smoothing + off_value
-    return torch.full(
-        (labels.size(0), num_classes),
-        off_value,
-        device=labels.device,
-        dtype=torch.float32,
-    ).scatter_(1, labels.view(-1, 1), on_value)
-
-
-def mixup_batch(
-    flow: torch.Tensor,
-    labels: torch.Tensor,
+def should_run_eval(
+    epoch: int,
     *,
-    num_classes: int,
-    alpha: float,
-    label_smoothing: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    lam = torch.distributions.Beta(alpha, alpha).sample().to(device=labels.device, dtype=flow.dtype)
-    rand_index = torch.randperm(labels.size(0), device=labels.device)
-    flow_mix = lam * flow + (1.0 - lam) * flow[rand_index]
-    y1 = smooth_one_hot(labels, num_classes=num_classes, smoothing=label_smoothing)
-    y2 = y1[rand_index]
-    y_mix = lam * y1 + (1.0 - lam) * y2
-    return flow_mix, y_mix
+    eval_skip_epochs: int,
+    eval_every: int,
+    eval_after_epoch: Optional[int] = None,
+    eval_every_after: Optional[int] = None,
+) -> bool:
+    if eval_every is None or eval_every <= 0:
+        return False
+    if epoch < eval_skip_epochs:
+        return False
+    if eval_after_epoch is not None and epoch >= eval_after_epoch:
+        every_after = eval_every if eval_every_after is None else eval_every_after
+        if every_after <= 0:
+            return False
+        return ((epoch - eval_after_epoch) % every_after) == 0
+    return ((epoch - eval_skip_epochs) % eval_every) == 0
 
 
 @torch.no_grad()
@@ -179,12 +164,14 @@ def evaluate_top1(
     device: torch.device,
     clip_text_bank: torch.Tensor,
     logit_scale: nn.Module,
+    force_bn_eval_flag: bool = True,
 ) -> float:
     if dataloader is None:
         return 0.0
 
     model.eval()
-    force_bn_eval(model.backbone)
+    if force_bn_eval_flag:
+        force_bn_eval(model.backbone)
 
     total = 0
     correct = 0
@@ -220,16 +207,16 @@ def main():
 
     # Data
     ap.add_argument("--root_dir", type=str, required=True, help="Motion dataset root (.zst files).")
-    ap.add_argument("--manifest", type=str, required=True, help="Train split manifest (file or glob).")
+    ap.add_argument("--manifest", type=str, default=None, help="Train split manifest (file or glob).")
     ap.add_argument("--class_id_to_label_csv", type=str, default=None)
     ap.add_argument("--eval_root_dir", type=str, default=None, help="Defaults to --root_dir.")
     ap.add_argument("--eval_manifest", type=str, default=None, help="Validation split manifest.")
 
     # Motion data shape (should match your zst conversion setup)
-    ap.add_argument("--img_size", type=int, default=224)
-    ap.add_argument("--flow_hw", type=int, default=112)
-    ap.add_argument("--mhi_frames", type=int, default=32)
-    ap.add_argument("--flow_frames", type=int, default=128)
+    ap.add_argument("--img_size", type=int, default=0)
+    ap.add_argument("--mhi_frames", type=int, default=2)
+    ap.add_argument("--flow_hw", type=int, default=224)
+    ap.add_argument("--flow_frames", type=int, default=64)
     ap.add_argument("--mhi_windows", type=str, default="15")
 
     # Model
@@ -237,8 +224,7 @@ def main():
     ap.add_argument("--dropout", type=float, default=0.0)
     ap.add_argument("--head_type", type=str, default="mlp", choices=["mlp", "linear"])
     ap.add_argument("--head_hidden_dim", type=int, default=2048)
-    default_i3d_flow = str(REPO_ROOT / "video_features" / "models" / "i3d" / "checkpoints" / "i3d_flow.pt")
-    ap.add_argument("--i3d_flow_ckpt", type=str, default=default_i3d_flow)
+    ap.add_argument("--i3d_flow_ckpt", type=str, default=None)
 
     # Finetune behavior
     ap.add_argument("--freeze_backbone", action="store_true", default=True)
@@ -256,10 +242,13 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--warmup_steps", type=int, default=1000)
     ap.add_argument("--min_lr", type=float, default=1e-6)
-    ap.add_argument("--label_smoothing", type=float, default=0.0)
-    ap.add_argument("--mixup_alpha", type=float, default=0.0)
-    ap.add_argument("--mixup_prob", type=float, default=0.0)
     ap.add_argument("--grad_clip", type=float, default=1.0)
+    ap.add_argument("--force_bn_eval", action="store_true", default=True, help="Keep BatchNorm layers in eval mode.")
+    ap.add_argument("--no_force_bn_eval", action="store_false", dest="force_bn_eval", help="Allow BatchNorm layers to update stats.")
+    ap.add_argument("--eval_skip_epochs", type=int, default=0, help="Skip eval for the first N epochs.")
+    ap.add_argument("--eval_every", type=int, default=1, help="Eval interval after the skip.")
+    ap.add_argument("--eval_after_epoch", type=int, default=None, help="Switch to --eval_every_after starting at this epoch.")
+    ap.add_argument("--eval_every_after", type=int, default=None, help="Eval interval after --eval_after_epoch (defaults to --eval_every).")
 
     # Runtime
     ap.add_argument("--num_workers", type=int, default=8)
@@ -274,6 +263,13 @@ def main():
 
     args = ap.parse_args()
     set_seed(args.seed)
+
+    if args.i3d_flow_ckpt is None:
+        print(f"Required flow checkpoint")
+        return
+    if args.eval_every_after is None:
+        args.eval_every_after = args.eval_every
+
     device = torch.device(args.device)
     data_dtype = torch.float16 if device.type == "cuda" else torch.float32
 
@@ -348,6 +344,17 @@ def main():
         dtype=data_dtype,
     )
     num_classes = len(train_dataset.classnames)
+    print(
+        f"[DATA] train_samples={len(train_dataset)} num_classes={num_classes} "
+        f"root_dir={args.root_dir} manifest={train_manifest}",
+        flush=True,
+    )
+    if num_classes < 2:
+        raise ValueError(
+            "Need at least 2 classes for contrastive classification loss. "
+            "This usually means root_dir points one level too high/low "
+            "(e.g., use .../train instead of dataset root)."
+        )
 
     model = I3DFlowCLIP(
         embed_dim=args.embed_dim,
@@ -365,7 +372,8 @@ def main():
         unfreeze_named_submodules(model.backbone, unfreeze_list)
         model.backbone.eval()
 
-    force_bn_eval(model.backbone)
+    if args.force_bn_eval:
+        force_bn_eval(model.backbone)
 
     lr_head = args.lr if args.lr_head is None else args.lr_head
     lr_backbone = (lr_head * args.backbone_lr_mult) if args.lr_backbone is None else args.lr_backbone
@@ -419,7 +427,8 @@ def main():
         model.train()
         if args.freeze_backbone:
             model.backbone.eval()
-        force_bn_eval(model.backbone)
+        if args.force_bn_eval:
+            force_bn_eval(model.backbone)
 
         running_loss = 0.0
         n_steps = 0
@@ -431,27 +440,11 @@ def main():
 
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=use_amp):
-                use_mixup = (
-                    args.mixup_alpha > 0 and args.mixup_prob > 0 and np.random.rand() < args.mixup_prob
-                )
-                if use_mixup:
-                    flow, labels_soft = mixup_batch(
-                        flow,
-                        labels,
-                        num_classes=num_classes,
-                        alpha=args.mixup_alpha,
-                        label_smoothing=args.label_smoothing,
-                    )
 
                 out = model(flow)
                 video = F.normalize(out["emb_fuse"], dim=-1)
                 logits = logit_scale().exp() * (video @ clip_text_bank.t())
-
-                if use_mixup:
-                    log_probs = F.log_softmax(logits, dim=-1)
-                    loss = -(labels_soft * log_probs).sum(dim=-1).mean()
-                else:
-                    loss = F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
+                loss = F.cross_entropy(logits, labels)
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -493,16 +486,29 @@ def main():
         print(f"[EPOCH {epoch:03d}] loss={train_loss:.4f}", flush=True)
 
         top1 = None
-        if eval_loader is not None:
+        do_eval = (
+            eval_loader is not None
+            and should_run_eval(
+                epoch,
+                eval_skip_epochs=args.eval_skip_epochs,
+                eval_every=args.eval_every,
+                eval_after_epoch=args.eval_after_epoch,
+                eval_every_after=args.eval_every_after,
+            )
+        )
+        if eval_loader is not None and do_eval:
             top1 = evaluate_top1(
                 model=model,
                 dataloader=eval_loader,
                 device=device,
                 clip_text_bank=clip_text_bank,
                 logit_scale=logit_scale,
+                force_bn_eval_flag=args.force_bn_eval,
             )
             writer.add_scalar("acc/top1_eval", top1, epoch)
             print(f"[EPOCH {epoch:03d}] eval_top1={top1:.4f} best_top1={best_top1:.4f}", flush=True)
+        elif eval_loader is not None:
+            print(f"[EPOCH {epoch:03d}] eval skipped (schedule)", flush=True)
 
         best_by_acc = (top1 is not None and top1 > best_top1)
         best_by_loss = (eval_loader is None and train_loss < best_train_loss)
