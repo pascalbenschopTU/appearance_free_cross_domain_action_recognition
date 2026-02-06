@@ -246,14 +246,14 @@ def main():
     ap = argparse.ArgumentParser()
 
     # Data
-    ap.add_argument("--root_dir", type=str, required=True)
-    ap.add_argument("--manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
-    ap.add_argument("--class_id_to_label_csv", type=str, default=None)
+    ap.add_argument("-r", "--root_dir", type=str, required=True)
+    ap.add_argument("-m", "--manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
+    ap.add_argument("-c", "--class_id_to_label_csv", type=str, default=None)
     ap.add_argument("--eval_root_dir", type=str, required=True)
     ap.add_argument("--eval_manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
 
     # Pretrained
-    ap.add_argument("--pretrained_ckpt", type=str, required=True, help="checkpoint path OR directory")
+    ap.add_argument("-p", "--pretrained_ckpt", type=str, required=True, help="checkpoint path OR directory")
 
     # If not provided, inherit from ckpt['args']
     ap.add_argument("--img_size", type=int, default=None)
@@ -292,10 +292,20 @@ def main():
     ap.add_argument("--tb_dir", type=str, default="runs")
     ap.add_argument("--ckpt_dir", type=str, default="checkpoints")
     ap.add_argument("--eval_dir", type=str, default="eval_out")
+    ap.add_argument("--eval_skip_epochs", type=int, default=15, help="Skip eval for the first N epochs.")
+    ap.add_argument("--eval_every", type=int, default=1, help="Eval interval after the skip.")
 
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    _default_device = (
+        "mps"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        else "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+    ap.add_argument("--device", type=str, default=_default_device)
 
     args = ap.parse_args()
+    print(args)
 
     os.makedirs(args.out_dir, exist_ok=True)
     args.tb_dir = os.path.join(args.out_dir, args.tb_dir)
@@ -306,6 +316,11 @@ def main():
     writer = SummaryWriter(log_dir=args.tb_dir)
     set_seed(args.seed)
     device = torch.device(args.device)
+    if args.device == "mps" and not (
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    ):
+        raise RuntimeError("Requested --device mps but MPS backend is not available.")
+    data_dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     # Resolve paths
     pretrained_path = resolve_ckpt_path(args.pretrained_ckpt)
@@ -344,7 +359,7 @@ def main():
         mhi_frames=mhi_frames,
         flow_frames=flow_frames,
         mhi_windows=mhi_windows,
-        out_dtype=torch.float16,
+        out_dtype=data_dtype,
         p_hflip=0.5,
         seed=args.seed,
         dataset_split_txt=manifest_path,
@@ -371,7 +386,7 @@ def main():
         fb_params=ckpt_cfg.fb_params,
         flow_max_disp=ckpt_cfg.flow_max_disp,
         flow_normalize=True,
-        out_dtype=torch.float16,
+        out_dtype=data_dtype,
         dataset_split_txt=args.eval_manifest,
         class_id_to_label_csv=args.class_id_to_label_csv,
     )
@@ -392,7 +407,7 @@ def main():
         dataset_classnames=dataset.classnames,
         device=device,
         init_temp=0.07,
-        dtype=torch.float16,
+        dtype=data_dtype,
     )
     num_classes = len(dataset.classnames)
 
@@ -482,7 +497,7 @@ def main():
             opt.zero_grad(set_to_none=True)
             use_amp = (device.type == "cuda")
 
-            with torch.autocast(device_type=device.type, enabled=use_amp):
+            with torch.autocast(device_type="cuda", enabled=use_amp):
                 use_mixup = (args.mixup_alpha > 0) and (args.mixup_prob > 0) and (np.random.rand() < args.mixup_prob)
                 if use_mixup:
                     mhi_top, flow_bot, labels_soft = mixup_batch(
@@ -584,26 +599,35 @@ def main():
             "manifest": manifest_path,
         }
 
-        top_1_acc = eval_on_validation_split(
-            args=args,
-            model=model,
-            eval_dataset=eval_dataset,
-            eval_dataloader=eval_dataloader,
-            device=device,
-            logit_scale_value=logit_scale().exp(),
-            clip_text_bank=clip_text_bank,
-            use_amp=use_amp
+        do_eval = (
+            eval_dataloader is not None
+            and epoch >= args.eval_skip_epochs
+            and (epoch - args.eval_skip_epochs) % args.eval_every == 0
         )
-        print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
-        if top_1_acc > best_top1_acc:
-            save_path = os.path.join(
-                args.ckpt_dir,
-                f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
+        top_1_acc = None
+        if do_eval:
+            top_1_acc = eval_on_validation_split(
+                args=args,
+                model=model,
+                eval_dataset=eval_dataset,
+                eval_dataloader=eval_dataloader,
+                device=device,
+                logit_scale_value=logit_scale().exp(),
+                clip_text_bank=clip_text_bank,
+                use_amp=use_amp
             )
+            print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
+            if top_1_acc > best_top1_acc:
+                save_path = os.path.join(
+                    args.ckpt_dir,
+                    f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
+                )
 
-            torch.save(payload, save_path)
-            print(f"[CKPT] saved {save_path}", flush=True)
-            best_top1_acc = top_1_acc
+                torch.save(payload, save_path)
+                print(f"[CKPT] saved {save_path}", flush=True)
+                best_top1_acc = top_1_acc
+        else:
+            print(f"[EPOCH {epoch:03d}] eval skipped (schedule)", flush=True)
 
 
 if __name__ == "__main__":
