@@ -1,6 +1,7 @@
 import torch
 import cv2
 from torch.utils.data import Dataset, Sampler
+import torch.nn.functional as F
 import torchvision.transforms as T
 import zstandard as zstd
 import os, json, struct
@@ -139,7 +140,7 @@ class MotionTwoStreamZstdDataset(Dataset):
         affine_shear=(-2.0, 2.0),
         seed: int = 0,
         dataset_split_txt=None,
-        class_id_to_label_csv=None
+        class_id_to_label_csv=None,
     ):
         self.root_dir = os.path.abspath(root_dir)
         self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
@@ -224,6 +225,24 @@ class MotionTwoStreamZstdDataset(Dataset):
                 scale_range=self.affine_scale,
                 shear_range=self.affine_shear,
             )
+
+            old_h, old_w = int(second.shape[-2]), int(second.shape[-1])
+            if (old_h != self.flow_hw) or (old_w != self.flow_hw):
+                second = F.interpolate(
+                    second.permute(1, 0, 2, 3).to(torch.float32),
+                    size=(self.flow_hw, self.flow_hw),
+                    mode="bilinear",
+                    align_corners=False,
+                ).permute(1, 0, 2, 3)
+
+                # Keep optical-flow vectors in pixel units consistent after resizing.
+                if second_type == "flow" and second.shape[0] >= 2:
+                    scale_x = float(self.flow_hw) / float(max(1, old_w))
+                    scale_y = float(self.flow_hw) / float(max(1, old_h))
+                    second[0].mul_(scale_x)
+                    second[1].mul_(scale_y)
+
+                second = second.to(dtype=self.out_dtype)
 
         except Exception as e:
             print(f"Something went wrong, video: {video_path}, error: {e}", flush=True)
@@ -411,268 +430,6 @@ def collate_video_motion(batch):
         torch.tensor(y, dtype=torch.long),
         list(paths),
     )
-
-# # ----------------------------
-# # dPhase core (FFT phase-only recon of dGS)
-# # ----------------------------
-# def phase_only_recon_dgs(dgs_2d: np.ndarray) -> np.ndarray:
-#     """
-#     dgs_2d: (H,W) float32
-#     Returns: (H,W) float32 reconstructed image from unit-magnitude spectrum using phase of rfft2(dgs).
-#     """
-#     f = np.fft.rfft2(dgs_2d)
-#     phase = np.angle(f)
-#     f_unit = np.cos(phase) + 1j * np.sin(phase)
-#     out = np.fft.irfft2(f_unit, s=dgs_2d.shape)
-#     return out.astype(np.float32)
-
-# # ----------------------------
-# # Compute MHI + dPhase (CPU)
-# # ----------------------------
-# @torch.inference_mode()
-# def compute_mhi_and_dphase_stream(
-#     path: str,
-#     *,
-#     # toggles
-#     compute_mhi: bool,
-#     compute_dphase: bool,
-#     # MHI config
-#     mhi_windows: List[int],
-#     diff_threshold: float,
-#     img_size: int,
-#     mhi_frames: int,
-#     # dPhase config
-#     dphase_hw: int,
-#     dphase_frames: int,
-#     dphase_clip: float = 3.0,
-#     out_dtype: torch.dtype = torch.float16,
-# ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-#     """
-#     Returns:
-#       mhi_out:  (C, mhi_frames, img_size, img_size) or None
-#       dphase:   (1, dphase_frames, dphase_hw, dphase_hw) or None
-#     """
-#     if not (compute_mhi or compute_dphase):
-#         raise ValueError("At least one of compute_mhi/compute_dphase must be True")
-
-#     C = len(mhi_windows)
-
-#     # allocate only what we need
-#     if compute_mhi:
-#         dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)
-#         mhi = torch.zeros((C, img_size, img_size), dtype=torch.float32)
-#         mhi_out = torch.zeros((C, mhi_frames, img_size, img_size), dtype=torch.float32)
-#     else:
-#         dur = None
-#         mhi = None
-#         mhi_out = None
-
-#     if compute_dphase:
-#         dphase = torch.zeros((1, dphase_frames, dphase_hw, dphase_hw), dtype=torch.float32)
-#     else:
-#         dphase = None
-
-#     cap = cv2.VideoCapture(path)
-#     if not cap.isOpened():
-#         raise RuntimeError(f"Could not open video: {path}")
-
-#     num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-#     if num_frames <= 1:
-#         cap.release()
-#         raise RuntimeError(f"Video too short (frames={num_frames}): {path}")
-
-#     # We drive sampling off the dPhase timeline if computed, else off MHI timeline.
-#     if compute_dphase:
-#         stream_idx = spaced_indices(num_frames, dphase_frames).cpu()
-#         last_needed = int(stream_idx[-1].item())
-#     else:
-#         # no dPhase, but still need frames for MHI snapshots
-#         stream_idx = spaced_indices(num_frames, mhi_frames).cpu()
-#         last_needed = int(stream_idx[-1].item())
-
-#     if compute_mhi:
-#         mhi_idx = aligned_indices_from_superset(stream_idx, mhi_frames).cpu()
-#         mhi_set = set(map(int, mhi_idx.tolist()))
-#         mhi_pos = {int(t): i for i, t in enumerate(mhi_idx.tolist())}
-#     else:
-#         mhi_set = set()
-#         mhi_pos = {}
-
-#     if compute_dphase:
-#         stream_set = set(map(int, stream_idx.tolist()))
-#         stream_pos = {int(t): i for i, t in enumerate(stream_idx.tolist())}
-#     else:
-#         stream_set = set()
-#         stream_pos = {}
-
-#     prev_gray224 = None  # for MHI
-#     prev_gray_dp = None  # for dPhase (at dphase_hw resolution)
-
-#     t = -1
-#     while True:
-#         ok, frame_bgr = cap.read()
-#         if not ok:
-#             break
-#         t += 1
-#         if t > last_needed:
-#             break
-
-#         # Only compute the resizes we need
-#         if compute_mhi:
-#             frame224 = cv2.resize(frame_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
-#             gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
-#         else:
-#             gray224 = None
-
-#         if compute_dphase:
-#             frame_dp = cv2.resize(frame_bgr, (dphase_hw, dphase_hw), interpolation=cv2.INTER_AREA)
-#             gray_dp = cv2.cvtColor(frame_dp, cv2.COLOR_BGR2GRAY)
-#         else:
-#             gray_dp = None
-
-#         # --- MHI update ---
-#         if compute_mhi and (prev_gray224 is not None):
-#             g_cur = torch.from_numpy(gray224).to(dtype=torch.float32)
-#             g_prev = torch.from_numpy(prev_gray224).to(dtype=torch.float32)
-#             diff = (g_cur - g_prev).abs()
-#             motion = (diff > diff_threshold).float().unsqueeze(0)  # (1,H,W)
-
-#             mhi = (mhi - 1.0).clamp_(min=0.0)
-#             mhi = torch.where(motion > 0, dur.view(C, 1, 1).expand_as(mhi), mhi)
-#             mhi = torch.minimum(mhi, dur.view(C, 1, 1))
-
-#         if compute_mhi and (t in mhi_set):
-#             j = mhi_pos[t]
-#             mhi_out[:, j] = mhi / dur.view(C, 1, 1)
-
-#         # --- dPhase update (only on sampled timesteps) ---
-#         if compute_dphase and (t in stream_set) and (prev_gray_dp is not None):
-#             i = stream_pos[t]
-#             dgs = gray_dp.astype(np.float32) - prev_gray_dp.astype(np.float32)
-#             dp = phase_only_recon_dgs(dgs)
-#             if dphase_clip and dphase_clip > 0:
-#                 np.clip(dp, -dphase_clip, dphase_clip, out=dp)
-#             dphase[0, i] = torch.from_numpy(dp)
-
-#         if compute_mhi:
-#             prev_gray224 = gray224
-#         if compute_dphase:
-#             prev_gray_dp = gray_dp
-
-#     cap.release()
-
-#     if compute_mhi:
-#         mhi_out = mhi_out.to(out_dtype)
-#     if compute_dphase:
-#         dphase = dphase.to(out_dtype)
-
-#     return mhi_out, dphase
-
-
-# # ----------------------------
-# # Dataset for phase
-# # ----------------------------
-# class VideoMHIDPhaseDataset(Dataset):
-#     """
-#     Computes (MHI, dPhase) on-the-fly from videos.
-
-#     Options:
-#       - compute_dphase_only=True -> returns mhi=None, dphase tensor
-#       - otherwise returns both (or mhi only if compute_dphase=False)
-
-#     Returns per item:
-#       (mhi, dphase, label, path)
-#     where mhi or dphase may be None depending on config.
-#     """
-#     def __init__(
-#         self,
-#         root_dir: str,
-#         *,
-#         img_size: int = 224,
-#         mhi_frames: int = 32,
-#         mhi_windows: List[int] = (15,),
-#         diff_threshold: float = 25.0,
-
-#         dphase_hw: int = 112,
-#         dphase_frames: int = 128,
-#         dphase_clip: float = 3.0,
-
-#         compute_dphase: bool = True,
-#         compute_mhi: bool = True,
-
-#         out_dtype: torch.dtype = torch.float16,
-#     ):
-#         self.paths, self.labels, self.classnames = list_videos(root_dir)
-
-#         self.img_size = int(img_size)
-#         self.mhi_frames = int(mhi_frames)
-#         self.mhi_windows = list(mhi_windows)
-#         self.diff_threshold = float(diff_threshold)
-
-#         self.dphase_hw = int(dphase_hw)
-#         self.dphase_frames = int(dphase_frames)
-#         self.dphase_clip = float(dphase_clip)
-
-#         self.compute_mhi = bool(compute_mhi)
-#         self.compute_dphase = bool(compute_dphase)
-#         self.out_dtype = out_dtype
-
-#         if self.compute_mhi and len(self.mhi_windows) == 0:
-#             raise ValueError("mhi_windows must be non-empty when compute_mhi=True")
-
-#     def __len__(self) -> int:
-#         return len(self.paths)
-
-#     def __getitem__(self, idx: int):
-#         path = self.paths[idx]
-#         y = self.labels[idx]
-
-#         try:
-#             mhi, dphase = compute_mhi_and_dphase_stream(
-#                 path,
-#                 compute_mhi=self.compute_mhi,
-#                 compute_dphase=self.compute_dphase,
-#                 mhi_windows=self.mhi_windows,
-#                 diff_threshold=self.diff_threshold,
-#                 img_size=self.img_size,
-#                 mhi_frames=self.mhi_frames,
-#                 dphase_hw=self.dphase_hw,
-#                 dphase_frames=self.dphase_frames,
-#                 dphase_clip=self.dphase_clip,
-#                 out_dtype=self.out_dtype,
-#             )
-#         except Exception:
-#             # safe fallback
-#             mhi = None
-#             dphase = None
-#             if self.compute_mhi:
-#                 C = len(self.mhi_windows)
-#                 mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
-#             if self.compute_dphase:
-#                 dphase = torch.zeros((1, self.dphase_frames, self.dphase_hw, self.dphase_hw), dtype=self.out_dtype)
-
-#         return mhi, dphase, y, path
-
-
-# def collate_video_mhi_dphase(batch):
-#     mhis, dps, ys, paths = zip(*batch)
-
-#     # stack only those that exist
-#     mhi_out = None
-#     dp_out = None
-
-#     if mhis[0] is not None:
-#         mhi_out = torch.stack(mhis, 0)
-#     if dps[0] is not None:
-#         dp_out = torch.stack(dps, 0)
-
-#     return (
-#         mhi_out,
-#         dp_out,
-#         torch.tensor(ys, dtype=torch.long),
-#         list(paths),
-#     )
-
 
 # ----------------------------
 # Index helpers (pairs are (t-1, t))
