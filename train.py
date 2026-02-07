@@ -3,6 +3,7 @@ import sys
 from dataset import MotionTwoStreamZstdDataset, collate_motion, ResumableShuffleSampler
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
+from augment import temporal_splice_mixup
 from util import (
     build_warmup_cosine_scheduler,
     find_latest_ckpt,
@@ -22,6 +23,11 @@ import random
 import numpy as np
 from torch.utils.data import DataLoader
 import time
+
+
+def soft_target_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return -(targets.to(dtype=logits.dtype) * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -60,6 +66,9 @@ def main():
     ap.add_argument("--probability_affine", type=float, default=0.10, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
     ap.add_argument("--label_smoothing", type=float, default=0.0)
+    ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
+    ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
+    ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -223,6 +232,22 @@ def main():
 
             use_amp = (device.type == "cuda")
             with torch.autocast(device_type=device.type, enabled=use_amp):
+                labels_soft = None
+                use_temporal_mixup = (
+                    args.temporal_mixup_prob > 0.0 and
+                    np.random.rand() < float(args.temporal_mixup_prob)
+                )
+                if use_temporal_mixup:
+                    mhi_top, flow_bot, labels_soft = temporal_splice_mixup(
+                        mhi_top,
+                        flow_bot,
+                        labels,
+                        num_classes=num_classes,
+                        label_smoothing=args.label_smoothing,
+                        y_min_frac=args.temporal_mixup_y_min,
+                        y_max_frac=args.temporal_mixup_y_max,
+                    )
+
                 out = model(mhi_top, flow_bot)
 
                 s = logit_scale().exp()
@@ -230,7 +255,9 @@ def main():
                 def ce_from_emb(emb):
                     emb = F.normalize(emb, dim=-1)
                     logits = s * (emb @ clip_text_bank.t())
-                    return F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
+                    if labels_soft is None:
+                        return F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
+                    return soft_target_cross_entropy(logits, labels_soft)
 
                 loss_fuse = ce_from_emb(out["emb_fuse"])
                 loss_top  = ce_from_emb(out["emb_top"])
