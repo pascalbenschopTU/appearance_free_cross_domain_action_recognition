@@ -786,38 +786,22 @@ def main():
         split_out_dir = args.out_dir if not multi_split else os.path.join(args.out_dir, split_name)
         os.makedirs(split_out_dir, exist_ok=True)
 
-        # Build dataset for THIS split
-        if second_type == "dphase":
-            dataset = VideoMHIDPhaseDataset(
-                args.root_dir,
-                img_size=args.img_size,
-                mhi_frames=args.mhi_frames,
-                mhi_windows=mhi_windows,
-                diff_threshold=args.diff_threshold,
-                dphase_hw=args.flow_hw,
-                dphase_frames=args.flow_frames,
-                compute_mhi=not compute_second_only,
-                compute_dphase=True,
-                out_dtype=torch.float16,
-            )
-            collate_fn = collate_video_mhi_dphase
-        else:
-            dataset = VideoMotionDataset(
-                args.root_dir,
-                img_size=img_size,
-                flow_hw=flow_hw,
-                mhi_frames=mhi_frames,
-                flow_frames=flow_frames,
-                mhi_windows=mhi_windows,
-                diff_threshold=diff_threshold,
-                fb_params=fb_params,
-                flow_max_disp=flow_max_disp,
-                flow_normalize=True,
-                out_dtype=torch.float16,
-                dataset_split_txt=manifest_path,
-                class_id_to_label_csv=args.class_id_to_label_csv,
-            )
-            collate_fn = collate_video_motion
+        dataset = VideoMotionDataset(
+            args.root_dir,
+            img_size=img_size,
+            flow_hw=flow_hw,
+            mhi_frames=mhi_frames,
+            flow_frames=flow_frames,
+            mhi_windows=mhi_windows,
+            diff_threshold=diff_threshold,
+            fb_params=fb_params,
+            flow_max_disp=flow_max_disp,
+            flow_normalize=True,
+            out_dtype=torch.float16,
+            dataset_split_txt=manifest_path,
+            class_id_to_label_csv=args.class_id_to_label_csv,
+        )
+        collate_fn = collate_video_motion
 
         dataloader = DataLoader(
             dataset,
