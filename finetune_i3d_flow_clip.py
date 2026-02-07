@@ -261,12 +261,18 @@ def main():
     ap.add_argument("--tb_dir", type=str, default="runs")
     ap.add_argument("--ckpt_dir", type=str, default="checkpoints")
 
+    # Augmentation
+    ap.add_argument("--flip_aug_only", action="store_true", help="Disable all motion augmentations.")
+
     args = ap.parse_args()
     set_seed(args.seed)
 
     if args.i3d_flow_ckpt is None:
         print(f"Required flow checkpoint")
         return
+    if args.img_size <= 0:
+        args.img_size = 224
+        print("[WARN] --img_size was <= 0; setting to 224 for flow-only safety.", flush=True)
     if args.eval_every_after is None:
         args.eval_every_after = args.eval_every
 
@@ -287,6 +293,23 @@ def main():
     if not mhi_windows:
         raise ValueError("mhi_windows must contain at least one integer.")
 
+    if args.flip_aug_only:
+        p_hflip = 0.5
+        p_max_drop_frame = 0.0
+        p_affine = 0.0
+        p_rot = 0.0
+        p_scl = 0.0
+        p_shr = 0.0
+        p_trn = 0.0
+    else:
+        p_hflip = 0.5
+        p_max_drop_frame = 0.10
+        p_affine = 0.25
+        p_rot = 0.30
+        p_scl = 0.30
+        p_shr = 0.10
+        p_trn = 0.30
+
     train_dataset = MotionTwoStreamZstdDataset(
         root_dir=args.root_dir,
         img_size=args.img_size,
@@ -295,7 +318,13 @@ def main():
         flow_frames=args.flow_frames,
         mhi_windows=mhi_windows,
         out_dtype=data_dtype,
-        p_hflip=0.5,
+        p_hflip=p_hflip,
+        p_max_drop_frame=p_max_drop_frame,
+        p_affine=p_affine,
+        p_rot=p_rot,
+        p_scl=p_scl,
+        p_shr=p_shr,
+        p_trn=p_trn,
         seed=args.seed,
         dataset_split_txt=train_manifest,
         class_id_to_label_csv=args.class_id_to_label_csv,
@@ -321,6 +350,12 @@ def main():
             mhi_windows=mhi_windows,
             out_dtype=data_dtype,
             p_hflip=0.0,
+            p_max_drop_frame=0.0,
+            p_affine=0.0,
+            p_rot=0.0,
+            p_scl=0.0,
+            p_shr=0.0,
+            p_trn=0.0,
             seed=args.seed,
             dataset_split_txt=eval_manifest,
             class_id_to_label_csv=args.class_id_to_label_csv,
