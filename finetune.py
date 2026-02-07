@@ -31,6 +31,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import MotionTwoStreamZstdDataset, collate_motion, VideoMotionDataset, collate_video_motion
 from model import TwoStreamI3D_CLIP
+from augment import temporal_splice_mixup
 
 from util import (
     # training utilities
@@ -45,7 +46,7 @@ from util import (
     extract_motion_config_from_ckpt, # ckpt arg extraction helper
 )
 
-from eval import evaluate_one_split, BASE_TEMPLATES
+from eval import evaluate_one_split
 
 
 # -----------------------------
@@ -78,7 +79,9 @@ def unfreeze_named_submodules(root: nn.Module, name_substrings: List[str]):
         return
     for name, m in root.named_modules():
         if any(s in name for s in name_substrings):
-            for p in m.parameters(recurse=False):
+            # recurse=True is required here because container modules
+            # (e.g., mixed_4b) hold trainable params in child submodules.
+            for p in m.parameters(recurse=True):
                 p.requires_grad_(True)
 
 
@@ -270,6 +273,10 @@ def main():
     ap.add_argument("--freeze_backbone", action="store_true", default=True)
     ap.add_argument("--no_freeze_backbone", action="store_false", dest="freeze_backbone")
     ap.add_argument("--unfreeze_modules", type=str, default="", help="e.g. 'mixed_5b,mixed_5c'")
+    ap.add_argument("--freeze_bn_stats", action="store_true", default=True,
+                    help="Keep BatchNorm layers in eval mode (no running-stat updates).")
+    ap.add_argument("--no_freeze_bn_stats", action="store_false", dest="freeze_bn_stats",
+                    help="Allow BatchNorm running stats to adapt during finetuning.")
 
     # Training
     ap.add_argument("--batch_size", type=int, default=16)
@@ -282,6 +289,9 @@ def main():
     ap.add_argument("--label_smoothing", type=float, default=0.0)
     ap.add_argument("--mixup_alpha", type=float, default=0.0)
     ap.add_argument("--mixup_prob", type=float, default=0.0)
+    ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
+    ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
+    ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -438,10 +448,9 @@ def main():
     if unfreeze_list:
         unfreeze_named_submodules(model.top, unfreeze_list)
         unfreeze_named_submodules(model.bot, unfreeze_list)
-        model.top.eval()
-        model.bot.eval()
 
-    force_bn_eval(model)
+    if args.freeze_bn_stats:
+        force_bn_eval(model)
 
     # Optimizer
     trainable_params = get_trainable_params(model, extra_modules=[logit_scale])
@@ -483,7 +492,8 @@ def main():
         if args.freeze_backbone:
             model.top.eval()
             model.bot.eval()
-        force_bn_eval(model)
+        if args.freeze_bn_stats:
+            force_bn_eval(model)
 
         run_clip = 0.0
         run_align = 0.0
@@ -498,8 +508,23 @@ def main():
             use_amp = (device.type == "cuda")
 
             with torch.autocast(device_type="cuda", enabled=use_amp):
+                labels_soft = None
+                use_temporal_mixup = (
+                    args.temporal_mixup_prob > 0.0 and
+                    np.random.rand() < float(args.temporal_mixup_prob)
+                )
                 use_mixup = (args.mixup_alpha > 0) and (args.mixup_prob > 0) and (np.random.rand() < args.mixup_prob)
-                if use_mixup:
+                if use_temporal_mixup:
+                    mhi_top, flow_bot, labels_soft = temporal_splice_mixup(
+                        mhi_top,
+                        flow_bot,
+                        labels,
+                        num_classes=num_classes,
+                        label_smoothing=args.label_smoothing,
+                        y_min_frac=args.temporal_mixup_y_min,
+                        y_max_frac=args.temporal_mixup_y_max,
+                    )
+                elif use_mixup:
                     mhi_top, flow_bot, labels_soft = mixup_batch(
                         mhi_top,
                         flow_bot,
@@ -508,11 +533,12 @@ def main():
                         alpha=args.mixup_alpha,
                         label_smoothing=args.label_smoothing,
                     )
+
                 out = model(mhi_top, flow_bot)
 
                 video = F.normalize(out["emb_fuse"], dim=-1)
                 logits = logit_scale().exp() * (video @ clip_text_bank.t())
-                if use_mixup:
+                if labels_soft is not None:
                     log_probs = F.log_softmax(logits, dim=-1)
                     clip_loss = -(labels_soft * log_probs).sum(dim=-1).mean()
                 else:

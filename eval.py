@@ -188,15 +188,6 @@ def aggregate_metrics(per_split: Dict[str, Dict[str, float]]) -> Dict[str, Dict[
 # Templates for CLIP
 # -----------------------------
 
-BASE_TEMPLATES = [
-    "{}",
-    "a video of {}",
-    "a clip of {}",
-    "the action of {}",
-    "someone is {}",
-    "a person is {}",
-]
-
 CLIP_TEMPLATES = [
     "{}",
     "a video of {}",
@@ -206,20 +197,6 @@ CLIP_TEMPLATES = [
     "the action of {}",
     "a clip of {}",
 ]
-
-MOTION_TEMPLATES = [
-    "{}",
-    "the motion pattern of {}",
-    "the movement of {}",
-    "optical flow of {}",
-    "optical flow showing {}",
-    "a motion history image of {}",
-    "a motion silhouette of {}",
-    "temporal motion of {}",
-    "the dynamics of {}",
-    "a person performing {} (motion only)",
-]
-
 
 # -----------------------------
 # Utility
@@ -632,7 +609,6 @@ def main():
     ap.add_argument("--fb_flags", type=int, default=0)
 
     # Text bank options
-    ap.add_argument("--text_mode",type=str,default="clip_templates",choices=["clip_templates", "base_templates", "motion_templates"])
     ap.add_argument("--class_text_json", type=str, default="")
     ap.add_argument("--use_heads", type=str, default="fuse")
     ap.add_argument("--head_weights", type=str, default="1.0")
@@ -709,12 +685,7 @@ def main():
     for p in clip_model.parameters():
         p.requires_grad_(False)
 
-    if args.text_mode == "clip_templates":
-        templates = CLIP_TEMPLATES
-    elif args.text_mode == "base_templates":
-        templates = BASE_TEMPLATES
-    else:
-        templates = MOTION_TEMPLATES
+    templates = CLIP_TEMPLATES
 
     class_texts = None
     if args.class_text_json.strip():
@@ -845,7 +816,6 @@ def main():
             "num_samples": int(len(dataset)),
             "num_classes": int(num_classes),
             "classnames": classnames,
-            "text_mode": args.text_mode,
             "use_heads": parse_list(args.use_heads),
             "head_weights": parse_floats(args.head_weights),
             "logit_scale_motion": float(scale_motion),
