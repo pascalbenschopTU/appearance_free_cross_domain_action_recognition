@@ -174,7 +174,8 @@ def temporal_splice_mixup(
     """
     Temporal splice mixup:
       - pair each sample with a different sample from the batch
-      - sample a split Y in the MHI timeline (middle range by default)
+      - sample one split Y in the MHI timeline (middle range by default)
+        and apply it to all samples in the batch
       - fill [0:Y) from sample A and [Y:Tm) from paired sample B
       - select each segment by linspace so both source clips are covered
       - apply analogous split on second stream timeline (Tf)
@@ -204,34 +205,28 @@ def temporal_splice_mixup(
     if y_lo > y_hi:
         y_lo = y_hi = max(1, min(tm - 1, tm // 2))
 
-    cuts_mhi = torch.randint(y_lo, y_hi + 1, (batch_size,), device=mhi.device)
+    cut_mhi = int(torch.randint(y_lo, y_hi + 1, (1,), device=mhi.device).item())
     tf_per_tm = float(tf) / float(max(1, tm))
-    cuts_second = torch.round(cuts_mhi.to(torch.float32) * tf_per_tm).to(torch.long).clamp_(1, tf - 1)
+    cut_second = int(round(float(cut_mhi) * tf_per_tm))
+    cut_second = max(1, min(tf - 1, cut_second))
 
     pair_idx = _random_partner_indices(batch_size, mhi.device)
-    mhi_pair = mhi[pair_idx]
-    second_pair = second[pair_idx]
 
+    idx_m_a = _linspace_indices(tm, cut_mhi, mhi.device)
+    idx_m_b = _linspace_indices(tm, tm - cut_mhi, mhi.device)
     mhi_mix = torch.empty_like(mhi)
+    mhi_mix[:, :, :cut_mhi] = mhi.index_select(2, idx_m_a)
+    mhi_mix[:, :, cut_mhi:] = mhi.index_select(0, pair_idx).index_select(2, idx_m_b)
+
+    idx_s_a = _linspace_indices(tf, cut_second, second.device)
+    idx_s_b = _linspace_indices(tf, tf - cut_second, second.device)
     second_mix = torch.empty_like(second)
-
-    for i in range(batch_size):
-        cut_m = int(cuts_mhi[i].item())
-        cut_s = int(cuts_second[i].item())
-
-        idx_m_a = _linspace_indices(tm, cut_m, mhi.device)
-        idx_m_b = _linspace_indices(tm, tm - cut_m, mhi.device)
-        mhi_mix[i, :, :cut_m] = mhi[i].index_select(1, idx_m_a)
-        mhi_mix[i, :, cut_m:] = mhi_pair[i].index_select(1, idx_m_b)
-
-        idx_s_a = _linspace_indices(tf, cut_s, second.device)
-        idx_s_b = _linspace_indices(tf, tf - cut_s, second.device)
-        second_mix[i, :, :cut_s] = second[i].index_select(1, idx_s_a)
-        second_mix[i, :, cut_s:] = second_pair[i].index_select(1, idx_s_b)
+    second_mix[:, :, :cut_second] = second.index_select(2, idx_s_a)
+    second_mix[:, :, cut_second:] = second.index_select(0, pair_idx).index_select(2, idx_s_b)
 
     y2 = y1[pair_idx]
-    lam = cuts_mhi.to(torch.float32) / float(tm)
-    y_mix = lam.unsqueeze(1) * y1 + (1.0 - lam).unsqueeze(1) * y2
+    lam = float(cut_mhi) / float(tm)
+    y_mix = lam * y1 + (1.0 - lam) * y2
     return mhi_mix, second_mix, y_mix
 
 # ---------------------------

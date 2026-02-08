@@ -61,9 +61,9 @@ def main():
     ap.add_argument("--use_stems", action="store_true")
     ap.add_argument("--compute_second_only", action="store_true")
     ap.add_argument("--use_nonlinear_projection", action="store_true")
-    ap.add_argument("--probability_hflip", type=float, default=0.25)
-    ap.add_argument("--max_probability_drop_frame", type=float, default=0.10)
-    ap.add_argument("--probability_affine", type=float, default=0.10, help="rotate,translate,scale,shear")
+    ap.add_argument("--probability_hflip", type=float, default=0.5)
+    ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
+    ap.add_argument("--probability_affine", type=float, default=0.0, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
     ap.add_argument("--label_smoothing", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
@@ -260,10 +260,16 @@ def main():
                     return soft_target_cross_entropy(logits, labels_soft)
 
                 loss_fuse = ce_from_emb(out["emb_fuse"])
-                loss_top  = ce_from_emb(out["emb_top"])
-                loss_bot  = ce_from_emb(out["emb_bot"])
+                if args.lambda_top > 0 or args.lambda_bot > 0:
+                    loss_top  = ce_from_emb(out["emb_top"])
+                    loss_bot  = ce_from_emb(out["emb_bot"])
 
-                loss = args.lambda_fuse * loss_fuse + args.lambda_top * loss_top + args.lambda_bot * loss_bot
+                    loss = args.lambda_fuse * loss_fuse + args.lambda_top * loss_top + args.lambda_bot * loss_bot
+                else:
+                    # Keep tensor scalars so downstream logging via .item() is always valid.
+                    loss_top = torch.zeros((), device=loss_fuse.device, dtype=loss_fuse.dtype)
+                    loss_bot = torch.zeros((), device=loss_fuse.device, dtype=loss_fuse.dtype)
+                    loss = loss_fuse
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -281,15 +287,16 @@ def main():
 
             # Logging
             with torch.no_grad():
-                try:
-                    writer.add_scalar("loss/total", float(loss.item()), global_step)
-                    writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
-                    writer.add_scalar("loss/top", float(loss_top.item()), global_step)
-                    writer.add_scalar("loss/bot", float(loss_bot.item()), global_step)
-                    writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
-                    writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
-                except Exception as e:
-                    print(f"Writing failed: {e}", file=sys.stderr)
+                if global_step % 5 == 0:
+                    try:
+                        writer.add_scalar("loss/total", float(loss.item()), global_step)
+                        writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
+                        writer.add_scalar("loss/top", float(loss_top.item()), global_step)
+                        writer.add_scalar("loss/bot", float(loss_bot.item()), global_step)
+                        writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
+                        writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
+                    except Exception as e:
+                        print(f"Writing failed: {e}", file=sys.stderr)
 
                 running_clip_loss += float(loss.item())
                 n_logs += 1
