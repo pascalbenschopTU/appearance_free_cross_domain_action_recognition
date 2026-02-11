@@ -267,6 +267,7 @@ def main():
     ap.add_argument("-c", "--class_id_to_label_csv", type=str, default=None)
     ap.add_argument("--eval_root_dir", type=str, default=None)
     ap.add_argument("--eval_manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
+    ap.add_argument("--eval_class_id_to_label_csv", type=str,default=None)
 
     # Pretrained
     ap.add_argument("-p", "--pretrained_ckpt", type=str, required=True, help="checkpoint path OR directory")
@@ -411,6 +412,11 @@ def main():
     )
 
     if args.eval_root_dir is not None:
+        eval_class_id_to_label_csv = (
+            args.eval_class_id_to_label_csv
+            if args.eval_class_id_to_label_csv is not None
+            else args.class_id_to_label_csv
+        )
         eval_dataset = VideoMotionDataset(
             args.eval_root_dir,
             img_size=ckpt_cfg.img_size,
@@ -424,7 +430,7 @@ def main():
             flow_normalize=True,
             out_dtype=data_dtype,
             dataset_split_txt=args.eval_manifest,
-            class_id_to_label_csv=args.class_id_to_label_csv,
+            class_id_to_label_csv=eval_class_id_to_label_csv,
         )
         eval_subset = make_fixed_subset(eval_dataset, k=400, seed=args.seed)
 
