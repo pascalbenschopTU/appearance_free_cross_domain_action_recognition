@@ -268,6 +268,9 @@ def main():
     ap.add_argument("--embed_dim", type=int, default=None)
     ap.add_argument("--fuse", type=str, default=None, choices=[None, "avg_then_proj", "concat"])
     ap.add_argument("--dropout", type=float, default=None)
+    ap.add_argument("--active_branch", type=str, default=None, choices=["both", "first", "second"],
+                    help="None -> inherit from pretrained checkpoint")
+    ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
 
     # Finetune behavior
     ap.add_argument("--freeze_backbone", action="store_true", default=True)
@@ -353,11 +356,19 @@ def main():
     embed_dim = args.embed_dim if args.embed_dim is not None else ckpt_cfg.embed_dim
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
     dropout = args.dropout if args.dropout is not None else ckpt_cfg.dropout
+    active_branch = args.active_branch if args.active_branch is not None else ckpt_cfg.active_branch
+    if args.compute_second_only:
+        if args.active_branch not in (None, "second"):
+            raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
+        active_branch = "second"
+    args.active_branch = active_branch
+    args.compute_second_only = (active_branch == "second")
 
     print(
         "[CONFIG] "
         f"img_size={img_size} mhi_frames={mhi_frames} flow_frames={flow_frames} flow_hw={flow_hw} "
         f"mhi_windows={mhi_windows_str} embed_dim={embed_dim} fuse={fuse} dropout={dropout} "
+        f"active_branch={active_branch} "
         f"manifest={manifest_path}"
     )
 
@@ -424,11 +435,19 @@ def main():
     # Model
     model = TwoStreamI3D_CLIP(
         mhi_channels=len(mhi_windows),
+        second_channels=ckpt_cfg.second_channels,
         embed_dim=embed_dim,
         fuse=fuse,
         dropout=dropout,
         init_scratch=False,
+        use_stems=ckpt_cfg.use_stems,
+        use_nonlinear_projection=ckpt_cfg.use_nonlinear_projection,
+        active_branch=active_branch,
     ).to(device)
+
+    if args.lambda_align > 0 and not (getattr(model, "has_top", True) and getattr(model, "has_bot", True)):
+        print("[WARN] lambda_align > 0 but active_branch is single-stream. Setting lambda_align=0.")
+        args.lambda_align = 0.0
 
     # Load pretrained weights
     pretrained_ckpt = load_pretrained_weights(
@@ -440,14 +459,18 @@ def main():
 
     # Freeze trunks
     if args.freeze_backbone:
-        freeze_module(model.top)
-        freeze_module(model.bot)
+        if getattr(model, "top", None) is not None:
+            freeze_module(model.top)
+        if getattr(model, "bot", None) is not None:
+            freeze_module(model.bot)
 
     # Optional unfreeze
     unfreeze_list = [s.strip() for s in args.unfreeze_modules.split(",") if s.strip()]
     if unfreeze_list:
-        unfreeze_named_submodules(model.top, unfreeze_list)
-        unfreeze_named_submodules(model.bot, unfreeze_list)
+        if getattr(model, "top", None) is not None:
+            unfreeze_named_submodules(model.top, unfreeze_list)
+        if getattr(model, "bot", None) is not None:
+            unfreeze_named_submodules(model.bot, unfreeze_list)
 
     if args.freeze_bn_stats:
         force_bn_eval(model)
@@ -490,8 +513,10 @@ def main():
 
         model.train()
         if args.freeze_backbone:
-            model.top.eval()
-            model.bot.eval()
+            if getattr(model, "top", None) is not None:
+                model.top.eval()
+            if getattr(model, "bot", None) is not None:
+                model.bot.eval()
         if args.freeze_bn_stats:
             force_bn_eval(model)
 

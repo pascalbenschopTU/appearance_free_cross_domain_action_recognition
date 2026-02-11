@@ -772,6 +772,7 @@ class MotionCkptConfig:
     # Streams
     second_type: str = "flow"  # flow | dphase
     use_stems: bool = False
+    active_branch: str = "both"  # both | first | second
     compute_second_only: bool = False
     use_nonlinear_projection: bool = False
 
@@ -797,7 +798,7 @@ class MotionCkptConfig:
 
     @property
     def second_channels(self) -> int:
-        return 1 if self.second_type == "dphase" else 2
+        return 1 if self.second_type in ("dphase", "phase") else 2
 
     @property
     def mhi_channels(self) -> int:
@@ -831,6 +832,11 @@ def extract_motion_config_from_ckpt(
     mhi_windows_str = str(_get(ckpt_args, "mhi_windows", ",".join(map(str, base.mhi_windows))))
     mhi_windows = tuple(int(x) for x in mhi_windows_str.split(",") if x.strip())
 
+    legacy_second_only = bool(_get(ckpt_args, "compute_second_only", base.compute_second_only))
+    active_branch = str(_get(ckpt_args, "active_branch", "second" if legacy_second_only else base.active_branch))
+    if active_branch not in ("both", "first", "second"):
+        active_branch = base.active_branch
+
     cfg = MotionCkptConfig(
         model=str(_get(ckpt_args, "model", base.model)),
         embed_dim=int(_get(ckpt_args, "embed_dim", base.embed_dim)),
@@ -839,7 +845,8 @@ def extract_motion_config_from_ckpt(
 
         second_type=str(_get(ckpt_args, "second_type", base.second_type)),
         use_stems=bool(_get(ckpt_args, "use_stems", base.use_stems)),
-        compute_second_only=bool(_get(ckpt_args, "compute_second_only", base.compute_second_only)),
+        active_branch=active_branch,
+        compute_second_only=(active_branch == "second"),
         use_nonlinear_projection=bool(_get(ckpt_args, "use_nonlinear_projection", base.use_nonlinear_projection)),
 
         img_size=int(_get(ckpt_args, "img_size", base.img_size)),

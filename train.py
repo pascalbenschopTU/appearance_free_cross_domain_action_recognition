@@ -59,7 +59,8 @@ def main():
     ap.add_argument("--lambda_bot", type=float, default=0.0)
     ap.add_argument("--lambda_fuse", type=float, default=1.0)
     ap.add_argument("--use_stems", action="store_true")
-    ap.add_argument("--compute_second_only", action="store_true")
+    ap.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
+    ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
     ap.add_argument("--use_nonlinear_projection", action="store_true")
     ap.add_argument("--probability_hflip", type=float, default=0.5)
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
@@ -83,6 +84,12 @@ def main():
 
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
+
+    if args.compute_second_only:
+        if args.active_branch not in ("both", "second"):
+            raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
+        args.active_branch = "second"
+    args.compute_second_only = (args.active_branch == "second")
 
     print(args)
     start_time = time.time()
@@ -153,6 +160,14 @@ def main():
         for p in logit_scale.parameters():
             p.requires_grad_(False)
     num_classes = len(dataset.classnames)
+
+    if args.active_branch == "first" and args.lambda_bot > 0:
+        print("[WARN] lambda_bot > 0 while active_branch=first. Setting lambda_bot=0.")
+        args.lambda_bot = 0.0
+    if args.active_branch == "second" and args.lambda_top > 0:
+        print("[WARN] lambda_top > 0 while active_branch=second. Setting lambda_top=0.")
+        args.lambda_top = 0.0
+
     # Student model
     if args.model == "i3d":
         model = TwoStreamI3D_CLIP(
@@ -162,8 +177,8 @@ def main():
             fuse=args.fuse, 
             dropout=args.dropout,
             use_stems=args.use_stems,
-            compute_second_only=args.compute_second_only,
             use_nonlinear_projection=args.use_nonlinear_projection,
+            active_branch=args.active_branch,
         ).to(device)
     elif args.model == "x3d":
         model = TwoStreamE2S_X3D_CLIP(
@@ -175,6 +190,8 @@ def main():
             flow_hw=args.flow_hw,
             embed_dim=args.embed_dim,
             fuse=args.fuse,
+            dropout=args.dropout,
+            active_branch=args.active_branch,
             use_nonlinear_projection=args.use_nonlinear_projection,
         ).to(device)
 

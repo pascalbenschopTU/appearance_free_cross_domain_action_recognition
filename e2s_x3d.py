@@ -83,12 +83,28 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
         bot_head_dim_out: int = 2048,
         compute_second_only: bool = False,
         use_nonlinear_projection: bool = False,
+        active_branch: str = "both",
     ):
         super().__init__()
-        self.compute_second_only = compute_second_only
+        if compute_second_only:
+            if active_branch not in ("both", "second"):
+                raise ValueError("Conflicting branch settings: compute_second_only=True and active_branch!='second'")
+            active_branch = "second"
+        if active_branch not in ("both", "first", "second"):
+            raise ValueError(f"active_branch must be one of: both, first, second (got: {active_branch})")
+
+        self.active_branch = active_branch
+        self.has_top = active_branch in ("both", "first")
+        self.has_bot = active_branch in ("both", "second")
+        self.compute_second_only = (active_branch == "second")
         self.fuse = fuse
 
-        if not compute_second_only:
+        self.top = None
+        self.bot = None
+        self.proj_top = None
+        self.proj_bot = None
+
+        if self.has_top:
             self.top = build_x3d_embedder(
                 in_ch=mhi_channels,
                 clip_len=mhi_frames,
@@ -99,23 +115,28 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
                 depth_factor=top_depth_factor,
                 head_dim_out=top_head_dim_out,
             )
-        self.bot = build_x3d_embedder(
-            in_ch=flow_channels,
-            clip_len=flow_frames,
-            crop=flow_hw,
-            output_dim=embed_dim*2,
-            dropout=dropout,
-            width_factor=bot_width_factor,
-            depth_factor=bot_depth_factor,
-            head_dim_out=bot_head_dim_out,
-        )
+        if self.has_bot:
+            self.bot = build_x3d_embedder(
+                in_ch=flow_channels,
+                clip_len=flow_frames,
+                crop=flow_hw,
+                output_dim=embed_dim*2,
+                dropout=dropout,
+                width_factor=bot_width_factor,
+                depth_factor=bot_depth_factor,
+                head_dim_out=bot_head_dim_out,
+            )
 
         if use_nonlinear_projection:
-            self.proj_top = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
-            self.proj_bot = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
+            if self.has_top:
+                self.proj_top = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
+            if self.has_bot:
+                self.proj_bot = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
         else:
-            self.proj_top = nn.Linear(embed_dim*2, embed_dim)
-            self.proj_bot = nn.Linear(embed_dim*2, embed_dim)
+            if self.has_top:
+                self.proj_top = nn.Linear(embed_dim*2, embed_dim)
+            if self.has_bot:
+                self.proj_bot = nn.Linear(embed_dim*2, embed_dim)
 
         if fuse == "concat":
             if use_nonlinear_projection:
@@ -128,14 +149,25 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
             raise ValueError("fuse must be one of: concat, avg_then_proj")
 
     def forward(self, mhi_bcthw: torch.Tensor, flow_bcthw: torch.Tensor):
-        eb = self.bot(flow_bcthw)
-        if (not self.compute_second_only) and (mhi_bcthw is not None):
-            et = self.top(mhi_bcthw)
-        else:
-            et = torch.zeros_like(eb)
+        et = None
+        eb = None
 
-        et = self.proj_top(et)
-        eb = self.proj_bot(eb)
+        if self.has_top:
+            if mhi_bcthw is None:
+                raise ValueError("active_branch requires first/top branch, but mhi input is None")
+            et = self.proj_top(self.top(mhi_bcthw))
+
+        if self.has_bot:
+            if flow_bcthw is None:
+                raise ValueError("active_branch requires second/bot branch, but flow input is None")
+            eb = self.proj_bot(self.bot(flow_bcthw))
+
+        if et is None and eb is None:
+            raise RuntimeError("Model has no active branches. Set active_branch to both, first, or second.")
+        if et is None:
+            et = torch.zeros_like(eb)
+        if eb is None:
+            eb = torch.zeros_like(et)
 
         if self.fuse == "concat":
             ef = self.proj_fuse(torch.cat([et, eb], dim=-1))

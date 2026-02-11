@@ -613,6 +613,9 @@ def main():
     ap.add_argument("--use_heads", type=str, default="fuse")
     ap.add_argument("--head_weights", type=str, default="1.0")
     ap.add_argument("--logit_scale", type=float, default=0.0)
+    ap.add_argument("--active_branch", type=str, default=None, choices=["both", "first", "second"],
+                    help="None -> use checkpoint setting")
+    ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
 
     ap.add_argument("--no_rgb", action="store_true", help="Skip CLIP RGB embeddings; evaluate motion-only only")
     ap.add_argument("--rgb_frames", type=int, default=1)
@@ -648,9 +651,20 @@ def main():
     dropout = float(_get(ckpt_args, "dropout", 0.0))
     second_type = str(_get(ckpt_args, "second_type", "flow"))
     use_stems = bool(_get(ckpt_args, "use_stems", False))
-    compute_second_only = bool(_get(ckpt_args, "compute_second_only", False))
+    ckpt_compute_second_only = bool(_get(ckpt_args, "compute_second_only", False))
+    active_branch = str(_get(ckpt_args, "active_branch", "second" if ckpt_compute_second_only else "both"))
+    if active_branch not in ("both", "first", "second"):
+        active_branch = "both"
+    if args.active_branch is not None:
+        active_branch = args.active_branch
+    if args.compute_second_only:
+        if args.active_branch not in (None, "second"):
+            raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
+        active_branch = "second"
+    args.active_branch = active_branch
+    args.compute_second_only = (active_branch == "second")
     use_nonlinear_projection = bool(_get(ckpt_args, "use_nonlinear_projection", False))
-    second_channels = 1 if second_type == "dphase" else 2
+    second_channels = 1 if second_type in ("dphase", "phase") else 2
     selected_model = str(_get(ckpt_args, "model", "i3d"))
 
     # input size, frames
@@ -705,8 +719,8 @@ def main():
             fuse=fuse, 
             dropout=dropout,
             use_stems=use_stems,
-            compute_second_only=compute_second_only,
             use_nonlinear_projection=use_nonlinear_projection,
+            active_branch=active_branch,
         ).to(device)
     elif selected_model == "x3d":
         print("selected x3d model", flush=True)
@@ -719,6 +733,9 @@ def main():
             flow_hw=flow_hw,
             embed_dim=embed_dim,
             fuse=fuse,
+            dropout=dropout,
+            use_nonlinear_projection=use_nonlinear_projection,
+            active_branch=active_branch,
         ).to(device)
     model.eval()
 
@@ -818,6 +835,7 @@ def main():
             "classnames": classnames,
             "use_heads": parse_list(args.use_heads),
             "head_weights": parse_floats(args.head_weights),
+            "active_branch": active_branch,
             "logit_scale_motion": float(scale_motion),
             "rgb_frames": int(args.rgb_frames),
             "rgb_sampling": args.rgb_sampling,

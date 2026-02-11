@@ -307,9 +307,20 @@ class TwoStreamI3D_CLIP(nn.Module):
         init_scratch: bool = True,
         compute_second_only: bool = False,
         use_nonlinear_projection: bool = False,
+        active_branch: str = "both",
     ):        
         super().__init__()
-        self.compute_second_only = compute_second_only
+        if compute_second_only:
+            if active_branch not in ("both", "second"):
+                raise ValueError("Conflicting branch settings: compute_second_only=True and active_branch!='second'")
+            active_branch = "second"
+        if active_branch not in ("both", "first", "second"):
+            raise ValueError(f"active_branch must be one of: both, first, second (got: {active_branch})")
+
+        self.active_branch = active_branch
+        self.has_top = active_branch in ("both", "first")
+        self.has_bot = active_branch in ("both", "second")
+        self.compute_second_only = (active_branch == "second")
         if use_stems:
             top_stem = InputStem3D(
                 in_channels=mhi_channels,
@@ -332,16 +343,26 @@ class TwoStreamI3D_CLIP(nn.Module):
             top_stem = None
             bot_stem = None
 
-        if not self.compute_second_only:
+        self.top = None
+        self.bot = None
+        self.proj_top = None
+        self.proj_bot = None
+
+        if self.has_top:
             self.top = I3DFeature(in_channels=mhi_channels, dropout_prob=dropout, stem=top_stem)
-        self.bot = I3DFeature(in_channels=second_channels, dropout_prob=dropout, stem=bot_stem)
+        if self.has_bot:
+            self.bot = I3DFeature(in_channels=second_channels, dropout_prob=dropout, stem=bot_stem)
 
         if use_nonlinear_projection:
-            self.proj_top = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
-            self.proj_bot = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
+            if self.has_top:
+                self.proj_top = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
+            if self.has_bot:
+                self.proj_bot = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
         else:
-            self.proj_top = nn.Linear(1024, embed_dim)
-            self.proj_bot = nn.Linear(1024, embed_dim)
+            if self.has_top:
+                self.proj_top = nn.Linear(1024, embed_dim)
+            if self.has_bot:
+                self.proj_bot = nn.Linear(1024, embed_dim)
 
         self.fuse = fuse
         if fuse == "concat":
@@ -359,13 +380,27 @@ class TwoStreamI3D_CLIP(nn.Module):
 
 
     def forward(self, mhi_bcthw, flow_bcthw):
-        fb = self.bot(flow_bcthw)  # (B,1024)
-        eb = self.proj_bot(fb)     # (B,512)
-        if (not self.compute_second_only) and (mhi_bcthw is not None):
-            ft = self.top(mhi_bcthw)   # (B,1024)
-            et = self.proj_top(ft)     # (B,512)
-        else:
+        et = None
+        eb = None
+
+        if self.has_top:
+            if mhi_bcthw is None:
+                raise ValueError("active_branch requires first/top branch, but mhi input is None")
+            ft = self.top(mhi_bcthw)    # (B,1024)
+            et = self.proj_top(ft)      # (B,512)
+
+        if self.has_bot:
+            if flow_bcthw is None:
+                raise ValueError("active_branch requires second/bot branch, but flow input is None")
+            fb = self.bot(flow_bcthw)   # (B,1024)
+            eb = self.proj_bot(fb)      # (B,512)
+
+        if et is None and eb is None:
+            raise RuntimeError("Model has no active branches. Set active_branch to both, first, or second.")
+        if et is None:
             et = torch.zeros_like(eb)
+        if eb is None:
+            eb = torch.zeros_like(et)
 
 
         if self.fuse == "concat":
