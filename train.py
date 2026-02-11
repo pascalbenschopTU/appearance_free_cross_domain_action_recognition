@@ -69,6 +69,8 @@ def main():
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
+    ap.add_argument("--unfreeze_logit_scale", action="store_true",
+                    help="Freeze logit_scale parameter while keeping it in the optimizer param list for checkpoint compatibility.")
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -108,7 +110,6 @@ def main():
     second_type = args.second_type.lower()
     in_ch_second = 1 if second_type in ("dphase", "phase") else 2
 
-
     # Dataset / loader (frames are resized to img_size here)
     dataset = MotionTwoStreamZstdDataset(
         root_dir=args.root_dir,
@@ -133,7 +134,6 @@ def main():
         collate_fn=collate_motion,
         drop_last=True,
     )
-
     
     class_texts = None
     if args.class_text_json.strip():
@@ -148,6 +148,10 @@ def main():
         dtype=torch.float16,
         class_texts=class_texts,
     )
+    # Frozen by default
+    if not args.unfreeze_logit_scale:
+        for p in logit_scale.parameters():
+            p.requires_grad_(False)
     num_classes = len(dataset.classnames)
     # Student model
     if args.model == "i3d":
