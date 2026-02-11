@@ -698,66 +698,6 @@ def split_name_from_manifest(manifest_path: Optional[str]) -> str:
     return os.path.splitext(os.path.basename(manifest_path))[0]
 
 
-def read_manifest_paths(
-    manifest_path: str,
-    *,
-    root_dir: Optional[str] = None,
-    allow_missing: bool = False,
-) -> List[str]:
-    """
-    Reads a split manifest and returns a list of video file paths.
-
-    Supports common formats:
-    - one path per line
-    - "path label" or "path,label" (takes first token/field)
-    - relative paths resolved against root_dir if provided
-
-    Skips blank lines and '#' comments.
-    """
-    paths: List[str] = []
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            # Take first field: split on comma first (csv-like), else whitespace
-            if "," in line:
-                p = line.split(",")[0].strip()
-            else:
-                p = line.split()[0].strip()
-
-            if root_dir and not os.path.isabs(p):
-                p = os.path.join(root_dir, p)
-
-            p = os.path.abspath(p)
-            if allow_missing or os.path.exists(p):
-                paths.append(p)
-
-    return paths
-
-
-def collect_split_files(
-    manifests: Optional[Sequence[str]],
-    *,
-    root_dir: Optional[str] = None,
-    allow_missing: bool = False,
-) -> Dict[str, List[str]]:
-    """
-    Given `--manifests` args, return dict {split_name: [files...]}.
-    If manifests is empty/None, returns {"all": []} (caller decides behavior).
-    """
-    mpaths = expand_manifest_args(manifests)
-    if not mpaths:
-        return {"all": []}
-
-    out: Dict[str, List[str]] = {}
-    for mp in mpaths:
-        name = split_name_from_manifest(mp)
-        out[name] = read_manifest_paths(mp, root_dir=root_dir, allow_missing=allow_missing)
-    return out
-
-
 # -----------------------------
 # Checkpoint arg extraction
 # -----------------------------

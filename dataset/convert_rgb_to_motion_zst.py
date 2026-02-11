@@ -105,10 +105,12 @@ def save_zstd_features(
     with open(out_zst_path, "wb") as f:
         f.write(comp)
 
-def _resolve(p: str, base_dir: str) -> str:
+def _resolve(p: str, base_dir: Optional[str] = None) -> str:
     p = os.path.expanduser(p.strip())
     if os.path.isabs(p):
         return os.path.normpath(p)
+    if not base_dir:
+        base_dir = os.getcwd()
     return os.path.normpath(os.path.join(base_dir, p))
 
 
@@ -338,17 +340,6 @@ def write_roi_debug_artifacts(
             cv2.putText(vis, f"{roi_mode}: no ROI (full frame fallback)", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
         cv2.imwrite(img_path, vis)
 
-    meta = {
-        "video": video_path,
-        "roi_mode": roi_mode,
-        "roi_xyxy": list(roi_xyxy) if roi_xyxy is not None else None,
-        "frame_hw": [int(h), int(w)] if h is not None and w is not None else None,
-        "debug_image": img_path if ok else None,
-    }
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False)
-
-
 # -----------------------------
 # Feature computation (MHI + Farneback flow) [CPU]
 # -----------------------------
@@ -521,7 +512,21 @@ def iter_videos_glob(patterns: List[str]) -> List[str]:
     vids.sort()
     return vids
 
-def iter_videos_manifest(manifest_path: str):
+def _parse_txt_manifest_line(line: str) -> Tuple[str, Optional[int]]:
+    """
+    Parse one TXT manifest line, allowing spaces in paths:
+      1) path
+      2) path with spaces <int_class>
+    """
+    s = line.strip()
+    # Greedy path + trailing integer class id
+    m = re.match(r"^(.*\S)\s+(-?\d+)\s*$", s)
+    if m:
+        return m.group(1), int(m.group(2))
+    return s, None
+
+
+def iter_videos_manifest(manifest_path: str, base_dir: Optional[str] = None):
     """
     Manifest formats supported:
 
@@ -534,6 +539,10 @@ def iter_videos_manifest(manifest_path: str):
         videos: List[str]
         labels: Dict[str, int]
     """
+    manifest_path = os.path.abspath(manifest_path)
+    if base_dir is None:
+        base_dir = os.path.dirname(manifest_path)
+
     mp = manifest_path.lower()
     videos = []
     labels = {}
@@ -545,16 +554,8 @@ def iter_videos_manifest(manifest_path: str):
                 if not line or line.startswith("#"):
                     continue
 
-                parts = line.split()
-                if len(parts) == 1:
-                    vp = (parts[0])
-                    cls = None
-                else:
-                    vp = (parts[0])
-                    try:
-                        cls = int(parts[1])
-                    except ValueError:
-                        raise ValueError(f"{manifest_path}:{ln} invalid class id: {parts[1]}")
+                vp_raw, cls = _parse_txt_manifest_line(line)
+                vp = _resolve(vp_raw, base_dir=base_dir)
 
                 videos.append(vp)
                 if cls is not None:
@@ -569,7 +570,7 @@ def iter_videos_manifest(manifest_path: str):
                 p = obj.get("path") or obj.get("video") or obj.get("filepath")
                 if not p:
                     continue
-                vp = (p)
+                vp = _resolve(str(p), base_dir=base_dir)
                 videos.append(vp)
                 if "class" in obj:
                     labels[vp] = int(obj["class"])
@@ -583,7 +584,7 @@ def iter_videos_manifest(manifest_path: str):
                 p = row.get("path") or row.get("video") or row.get("filepath")
                 if not p:
                     continue
-                vp = _resolve(p)
+                vp = _resolve(p, base_dir=base_dir)
                 videos.append(vp)
                 if "class" in row and row["class"] != "":
                     labels[vp] = int(row["class"])
@@ -594,6 +595,68 @@ def iter_videos_manifest(manifest_path: str):
         raise ValueError(f"Unsupported manifest type: {manifest_path}")
 
     return videos, labels
+
+
+def _norm_path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def select_manifest_videos_under_root(
+    root_dir: str,
+    root_videos: List[str],
+    manifest_videos: List[str],
+    manifest_labels: Dict[str, int],
+) -> Tuple[List[str], Dict[str, int]]:
+    """
+    Match manifest entries against discovered videos under root_dir.
+    Supports manifest entries as:
+      - absolute paths
+      - relative paths under root_dir
+      - bare filenames (only if unique)
+    """
+    abs_lookup: Dict[str, str] = {_norm_path_key(v): v for v in root_videos}
+    rel_lookup: Dict[str, str] = {}
+    base_lookup: Dict[str, List[str]] = {}
+
+    for v in root_videos:
+        rel_key = safe_relpath_under(v, root_dir).replace("\\", "/").strip().lower()
+        rel_lookup[rel_key] = v
+        base_lookup.setdefault(os.path.basename(v).strip().lower(), []).append(v)
+
+    selected: List[str] = []
+    resolved_labels: Dict[str, int] = {}
+
+    for entry in manifest_videos:
+        resolved = None
+        abs_key = _norm_path_key(entry)
+        if abs_key in abs_lookup:
+            resolved = abs_lookup[abs_key]
+        else:
+            rel_key = entry.replace("\\", "/").strip()
+            if os.path.isabs(rel_key):
+                rel_key = safe_relpath_under(rel_key, root_dir)
+            rel_key = rel_key.lstrip("./").lower()
+            if rel_key in rel_lookup:
+                resolved = rel_lookup[rel_key]
+            else:
+                bkey = os.path.basename(entry).strip().lower()
+                candidates = base_lookup.get(bkey, [])
+                if len(candidates) == 1:
+                    resolved = candidates[0]
+                elif len(candidates) > 1:
+                    raise RuntimeError(
+                        f"Ambiguous manifest basename '{entry}', matches:\n" + "\n".join(candidates)
+                    )
+
+        if resolved is None:
+            print(f"Manifest file not found under root_dir: {entry}", file=sys.stderr)
+            continue
+
+        selected.append(resolved)
+        if entry in manifest_labels:
+            resolved_labels[resolved] = manifest_labels[entry]
+
+    return selected, resolved_labels
 
 def extract_label(
     video_path: str,
@@ -637,6 +700,10 @@ def safe_relpath_under(video_path: str, rel_root: str) -> str:
         rel = re.sub(r"[^A-Za-z0-9._/-]+", "_", ap.replace("\\", "/").lstrip("/"))
         return rel
 
+def _sanitize_output_relpath(path_like: str) -> str:
+    """Only replace spaces with underscores in generated output paths."""
+    return "/".join(part.replace(" ", "_") for part in path_like.replace("\\", "/").split("/"))
+
 def out_path_for_video(
     video_path: str,
     rel_root: str,
@@ -646,19 +713,20 @@ def out_path_for_video(
 ) -> str:
     rel = safe_relpath_under(video_path, rel_root)
     rel_noext = os.path.splitext(rel)[0]
+    rel_noext = _sanitize_output_relpath(rel_noext)
 
     if out_layout == "mirror":
         return os.path.join(out_root, rel_noext + ".zst")
 
     if out_layout == "by_label":
-        lab = label or "unknown"
+        lab = _sanitize_output_relpath(label or "unknown")
         return os.path.join(out_root, lab, rel_noext + ".zst")
 
     if out_layout == "flat":
         # collision-safe name: hash of full resolved path + basename
         ap = os.path.abspath(video_path).encode("utf-8")
         h = hashlib.blake2b(ap, digest_size=8).hexdigest()
-        base = os.path.splitext(os.path.basename(video_path))[0]
+        base = _sanitize_output_relpath(os.path.splitext(os.path.basename(video_path))[0])
         fn = f"{h}_{base}.zst"
         return os.path.join(out_root, fn)
 
@@ -839,11 +907,13 @@ def main():
         )
 
     # choose discovery mode
-    mode_count = sum(x is not None and x != [] for x in [args.root_dir, args.glob, args.manifest])
-    if mode_count == 0:
+    if args.root_dir is None and (args.glob is None or len(args.glob) == 0) and args.manifest is None:
         raise SystemExit("Provide one of: --root_dir OR --glob OR --manifest")
+    if args.glob and (args.root_dir is not None or args.manifest is not None):
+        raise SystemExit("--glob cannot be combined with --root_dir or --manifest")
 
     exts = _norm_exts(args.exts)
+    manifest_label_by_video: Dict[str, int] = {}
 
     if args.root_dir is not None:
         root_dir = os.path.abspath(args.root_dir)
@@ -851,43 +921,27 @@ def main():
         default_rel_root = root_dir
         if args.manifest:
             manifest = os.path.abspath(args.manifest)
-            videos_to_select, labels = iter_videos_manifest(manifest)
-
-            video_map = {}
-            label_map = {}
-            for vp in videos:
-                bn = os.path.basename(vp).strip().lower()
-                video_map.setdefault(bn, []).append(vp)
-                label_map.setdefault(bn, []).append(vp)
-
-            selected_videos = []
-            resolved_labels = {}
-
-            for name in videos_to_select:
-                lower_name = name.strip().lower()
-                if lower_name not in video_map:
-                    print(f"Manifest file not found under root_dir: {name}", file=sys.stderr)
-                    continue
-
-                matches = video_map[lower_name]
-                if len(matches) > 1:
-                    raise RuntimeError(
-                        f"Ambiguous filename '{lower_name}', matches:\n" + "\n".join(matches)
-                    )
-
-                vp = matches[0]
-                selected_videos.append(vp)
-
-                if name in labels:
-                    resolved_labels[vp] = label_map[lower_name]
-
-            videos = selected_videos
-            labels = resolved_labels
+            manifest_videos, manifest_labels = iter_videos_manifest(manifest, base_dir=root_dir)
+            videos, manifest_label_by_video = select_manifest_videos_under_root(
+                root_dir=root_dir,
+                root_videos=videos,
+                manifest_videos=manifest_videos,
+                manifest_labels=manifest_labels,
+            )
 
     elif args.glob is not None and len(args.glob) > 0:
         videos = iter_videos_glob(args.glob)
         # for glob mode, rel_root defaults to common prefix if possible
         default_rel_root = os.path.commonpath([os.path.abspath(v) for v in videos]) if videos else os.getcwd()
+    else:
+        manifest = os.path.abspath(args.manifest)
+        manifest_base = os.path.abspath(args.root_dir) if args.root_dir else os.path.dirname(manifest)
+        videos, manifest_label_by_video = iter_videos_manifest(manifest, base_dir=manifest_base)
+        if args.root_dir:
+            root_dir = os.path.abspath(args.root_dir)
+            default_rel_root = root_dir
+        else:
+            default_rel_root = manifest_base
 
     if not videos:
         print("No videos found.")
@@ -936,7 +990,10 @@ def main():
 
     tasks = []
     for vp in videos:
-        label = extract_label(vp, rel_root, args.label_mode, args.label_relpart_idx)
+        if vp in manifest_label_by_video:
+            label = str(manifest_label_by_video[vp])
+        else:
+            label = extract_label(vp, rel_root, args.label_mode, args.label_relpart_idx)
         op = out_path_for_video(vp, rel_root, out_root, args.out_layout, label=label)
         tasks.append((vp, op, label, cfg))
 
