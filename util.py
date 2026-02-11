@@ -247,22 +247,28 @@ def build_text_bank(
     """
     Builds (num_classes, 512) text bank.
     class_texts (optional) can provide multiple strings per class. We average all embeddings.
+    If class_texts provided for a class, templates are applied to each variant.
     """
     all_class_embs = []
     for raw in classnames:
         normalized_classname = normalize_classname_ucf(raw)
         prompts = []
-        for t in templates:
-            prompts.append(t.format(normalized_classname))
-
-        # If user provides extra texts, use them; else just the normalized name.
+        # If user provides extra texts, use them with templates; else use normalized name with templates.
         variants = []
         if class_texts is not None and raw in class_texts:
             variants = [normalize_classname_ucf(v) if v == raw else v for v in class_texts[raw]]
             variants = [v.strip() for v in variants if v.strip()]
             for v in variants:
-                prompts.append(v)
+                for t in templates:
+                    prompts.append(t.format(v))
+        else:
+            for t in templates:
+                prompts.append(t.format(normalized_classname))
+        if not prompts:
+            for t in templates:
+                prompts.append(t.format(normalized_classname))
 
+        print(f"Class {raw} Prompts: {prompts}")
         tok = tokenize_fn(prompts).to(device)
         feats = clip_model.encode_text(tok)  # (P,512)
         if l2_normalize:

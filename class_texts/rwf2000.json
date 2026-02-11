@@ -1,18 +1,14 @@
 {
-  "Fighting": [
-    "fighting",
-    "two people fighting",
-    "a person punching another person",
-    "a person kicking another person",
-    "sparring in combat sports",
-    "a brawl between people"
+  "Fight": [
+    "fight",
+    "punch",
+    "jab",
+    "kick"
   ],
-  "Non Fighting": [
-    "walking",
-    "standing and talking",
-    "people interacting",
-    "everyday activity",
-    "normal human behavior",
-    "people moving around"
+  "NonFight": [
+    "walk",
+    "stand",
+    "dancing",
+    "hug"
   ]
 }

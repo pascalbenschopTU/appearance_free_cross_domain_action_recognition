@@ -205,6 +205,19 @@ def eval_on_validation_split(
     clip_text_bank,
     use_amp=True,
 ):
+    if clip_text_bank is not None and clip_text_bank.shape[0] != len(eval_dataset.classnames):
+        print(
+            f"[WARN] clip_text_bank classes ({clip_text_bank.shape[0]}) "
+            f"!= eval classes ({len(eval_dataset.classnames)}); rebuilding text bank for eval.",
+            flush=True
+        )
+        clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
+            dataset_classnames=eval_dataset.classnames,
+            device=device,
+            init_temp=0.07,
+            dtype=clip_text_bank.dtype,
+        )
+
     base_json = {
         "root_dir": args.root_dir,
         "split": "validation",
@@ -252,7 +265,7 @@ def main():
     ap.add_argument("-r", "--root_dir", type=str, required=True)
     ap.add_argument("-m", "--manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
     ap.add_argument("-c", "--class_id_to_label_csv", type=str, default=None)
-    ap.add_argument("--eval_root_dir", type=str, required=True)
+    ap.add_argument("--eval_root_dir", type=str, default=None)
     ap.add_argument("--eval_manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
 
     # Pretrained
@@ -355,6 +368,7 @@ def main():
 
     embed_dim = args.embed_dim if args.embed_dim is not None else ckpt_cfg.embed_dim
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
+    if args.fuse is None: args.fuse = fuse
     dropout = args.dropout if args.dropout is not None else ckpt_cfg.dropout
     active_branch = args.active_branch if args.active_branch is not None else ckpt_cfg.active_branch
     if args.compute_second_only:
@@ -396,32 +410,35 @@ def main():
         drop_last=True,
     )
 
-    eval_dataset = VideoMotionDataset(
-        args.eval_root_dir,
-        img_size=ckpt_cfg.img_size,
-        flow_hw=ckpt_cfg.flow_hw,
-        mhi_frames=ckpt_cfg.mhi_frames,
-        flow_frames=ckpt_cfg.flow_frames,
-        mhi_windows=list(ckpt_cfg.mhi_windows),
-        diff_threshold=ckpt_cfg.diff_threshold,
-        fb_params=ckpt_cfg.fb_params,
-        flow_max_disp=ckpt_cfg.flow_max_disp,
-        flow_normalize=True,
-        out_dtype=data_dtype,
-        dataset_split_txt=args.eval_manifest,
-        class_id_to_label_csv=args.class_id_to_label_csv,
-    )
-    eval_subset = make_fixed_subset(eval_dataset, k=400, seed=args.seed)
+    if args.eval_root_dir is not None:
+        eval_dataset = VideoMotionDataset(
+            args.eval_root_dir,
+            img_size=ckpt_cfg.img_size,
+            flow_hw=ckpt_cfg.flow_hw,
+            mhi_frames=ckpt_cfg.mhi_frames,
+            flow_frames=ckpt_cfg.flow_frames,
+            mhi_windows=list(ckpt_cfg.mhi_windows),
+            diff_threshold=ckpt_cfg.diff_threshold,
+            fb_params=ckpt_cfg.fb_params,
+            flow_max_disp=ckpt_cfg.flow_max_disp,
+            flow_normalize=True,
+            out_dtype=data_dtype,
+            dataset_split_txt=args.eval_manifest,
+            class_id_to_label_csv=args.class_id_to_label_csv,
+        )
+        eval_subset = make_fixed_subset(eval_dataset, k=400, seed=args.seed)
 
-    eval_dataloader = DataLoader(
-        eval_subset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        collate_fn=collate_video_motion,
-        drop_last=False,
-    )
+        eval_dataloader = DataLoader(
+            eval_subset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
+            collate_fn=collate_video_motion,
+            drop_last=False,
+        )
+    else: 
+        eval_dataloader = None
 
     # Text bank for NEW classes
     clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
