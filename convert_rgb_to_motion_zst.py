@@ -34,7 +34,7 @@ import hashlib
 import argparse
 import sys
 import traceback
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -42,11 +42,19 @@ import torch
 import zstandard as zstd
 from multiprocessing import get_context
 
+try:
+    from ultralytics import YOLO  # type: ignore
+    _YOLO_IMPORT_ERR = None
+except Exception as _e:
+    YOLO = None
+    _YOLO_IMPORT_ERR = _e
+
 
 # -----------------------------
 # Zstd feature blob format
 # -----------------------------
 MAGIC = b"MHIFLOW1"  # 8 bytes
+_YOLO_MODEL_CACHE: Dict[str, Any] = {}
 
 def quantize_u8_i8(
     mhi_out: torch.Tensor,
@@ -104,6 +112,243 @@ def _resolve(p: str, base_dir: str) -> str:
     return os.path.normpath(os.path.join(base_dir, p))
 
 
+def _square_bbox_xyxy(
+    x1: int, y1: int, x2: int, y2: int, frame_w: int, frame_h: int
+) -> Tuple[int, int, int, int]:
+    """Return the smallest in-frame square bbox that fully contains (x1,y1,x2,y2)."""
+    x1 = int(np.clip(x1, 0, max(0, frame_w - 1)))
+    y1 = int(np.clip(y1, 0, max(0, frame_h - 1)))
+    x2 = int(np.clip(x2, x1 + 1, frame_w))
+    y2 = int(np.clip(y2, y1 + 1, frame_h))
+
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    side = max(bw, bh)
+
+    cx = 0.5 * (x1 + x2)
+    cy = 0.5 * (y1 + y2)
+    sx1 = int(round(cx - side / 2.0))
+    sy1 = int(round(cy - side / 2.0))
+    sx2 = sx1 + side
+    sy2 = sy1 + side
+
+    if sx1 < 0:
+        sx2 -= sx1
+        sx1 = 0
+    if sy1 < 0:
+        sy2 -= sy1
+        sy1 = 0
+    if sx2 > frame_w:
+        shift = sx2 - frame_w
+        sx1 -= shift
+        sx2 = frame_w
+    if sy2 > frame_h:
+        shift = sy2 - frame_h
+        sy1 -= shift
+        sy2 = frame_h
+
+    sx1 = int(max(0, sx1))
+    sy1 = int(max(0, sy1))
+    sx2 = int(min(frame_w, sx2))
+    sy2 = int(min(frame_h, sy2))
+    if sx2 <= sx1 or sy2 <= sy1:
+        return 0, 0, frame_w, frame_h
+    return sx1, sy1, sx2, sy2
+
+
+def _get_yolo_model(model_name: str):
+    if YOLO is None:
+        raise RuntimeError(
+            f"YOLO not available. Install ultralytics. Import error: {_YOLO_IMPORT_ERR!r}"
+        )
+    model = _YOLO_MODEL_CACHE.get(model_name)
+    if model is None:
+        model = YOLO(model_name)
+        _YOLO_MODEL_CACHE[model_name] = model
+    return model
+
+
+def detect_square_roi_yolo_person(
+    path: str,
+    model_name: str = "yolo11n.pt",
+    stride: int = 3,
+    conf: float = 0.25,
+    device: Optional[str] = None,
+) -> Optional[Tuple[int, int, int, int]]:
+    """Detect person boxes through the video and return a square union ROI."""
+    model = _get_yolo_model(model_name)
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video for ROI detection: {path}")
+
+    stride = max(1, int(stride))
+    union_x1 = union_y1 = None
+    union_x2 = union_y2 = None
+    frame_h = frame_w = None
+
+    t = -1
+    while True:
+        ok, frame_bgr = cap.read()
+        if not ok:
+            break
+        t += 1
+        if t % stride != 0:
+            continue
+
+        if frame_h is None or frame_w is None:
+            frame_h, frame_w = frame_bgr.shape[:2]
+
+        results = model.predict(
+            source=frame_bgr,
+            classes=[0],  # COCO person class
+            conf=float(conf),
+            device=device,
+            verbose=False,
+        )
+        if not results:
+            continue
+        boxes = results[0].boxes
+        if boxes is None or boxes.xyxy is None or len(boxes.xyxy) == 0:
+            continue
+
+        for b in boxes.xyxy.cpu().numpy():
+            x1, y1, x2, y2 = b[:4]
+            x1i = int(max(0, np.floor(x1)))
+            y1i = int(max(0, np.floor(y1)))
+            x2i = int(np.ceil(x2))
+            y2i = int(np.ceil(y2))
+            if x2i <= x1i or y2i <= y1i:
+                continue
+            if union_x1 is None:
+                union_x1, union_y1, union_x2, union_y2 = x1i, y1i, x2i, y2i
+            else:
+                union_x1 = min(union_x1, x1i)
+                union_y1 = min(union_y1, y1i)
+                union_x2 = max(union_x2, x2i)
+                union_y2 = max(union_y2, y2i)
+
+    cap.release()
+
+    if union_x1 is None or frame_h is None or frame_w is None:
+        return None
+
+    return _square_bbox_xyxy(union_x1, union_y1, union_x2, union_y2, frame_w, frame_h)
+
+
+def detect_square_roi_largest_motion(
+    path: str,
+    threshold: float,
+    stride: int = 1,
+    min_area: int = 64,
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Find a square ROI around the dominant motion region from frame differences.
+    """
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video for ROI detection: {path}")
+
+    stride = max(1, int(stride))
+    prev_gray = None
+    acc = None
+    frame_h = frame_w = None
+    t = -1
+
+    while True:
+        ok, frame_bgr = cap.read()
+        if not ok:
+            break
+        t += 1
+        if t % stride != 0:
+            continue
+
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        if frame_h is None or frame_w is None:
+            frame_h, frame_w = gray.shape[:2]
+            acc = np.zeros((frame_h, frame_w), dtype=np.float32)
+
+        if prev_gray is not None:
+            diff = cv2.absdiff(gray, prev_gray)
+            mask = (diff > float(threshold)).astype(np.uint8)
+            acc += mask
+        prev_gray = gray
+
+    cap.release()
+
+    if acc is None or float(acc.max()) <= 0.0 or frame_h is None or frame_w is None:
+        return None
+
+    motion_any = (acc > 0).astype(np.uint8)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(motion_any, connectivity=8)
+    if n_labels <= 1:
+        return None
+
+    label_ids = labels.reshape(-1)
+    weights = acc.reshape(-1)
+    scores = np.bincount(label_ids, weights=weights, minlength=n_labels)
+    areas = stats[:, cv2.CC_STAT_AREA].astype(np.float32)
+    scores[areas < float(max(1, int(min_area)))] = 0.0
+    scores[0] = 0.0  # background
+    best = int(np.argmax(scores))
+    if best <= 0 or float(scores[best]) <= 0.0:
+        return None
+
+    x = int(stats[best, cv2.CC_STAT_LEFT])
+    y = int(stats[best, cv2.CC_STAT_TOP])
+    w = int(stats[best, cv2.CC_STAT_WIDTH])
+    h = int(stats[best, cv2.CC_STAT_HEIGHT])
+    return _square_bbox_xyxy(x, y, x + w, y + h, frame_w, frame_h)
+
+
+def _debug_stem_for_video(video_path: str) -> str:
+    ap = os.path.abspath(video_path).encode("utf-8")
+    h = hashlib.blake2b(ap, digest_size=8).hexdigest()
+    base = os.path.splitext(os.path.basename(video_path))[0]
+    return f"{h}_{base}"
+
+
+def write_roi_debug_artifacts(
+    video_path: str,
+    roi_xyxy: Optional[Tuple[int, int, int, int]],
+    roi_mode: str,
+    out_dir: str,
+):
+    """
+    Write a debug image and JSON sidecar for ROI verification.
+    Image is the first frame with ROI rectangle overlaid (if available).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    stem = _debug_stem_for_video(video_path)
+    img_path = os.path.join(out_dir, stem + ".jpg")
+    meta_path = os.path.join(out_dir, stem + ".json")
+
+    cap = cv2.VideoCapture(video_path)
+    ok, frame = cap.read()
+    cap.release()
+
+    h = w = None
+    if ok and frame is not None:
+        h, w = frame.shape[:2]
+        vis = frame.copy()
+        if roi_xyxy is not None:
+            x1, y1, x2, y2 = roi_xyxy
+            cv2.rectangle(vis, (x1, y1), (x2 - 1, y2 - 1), (0, 255, 0), 2)
+            cv2.putText(vis, f"{roi_mode} ROI", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+        else:
+            cv2.putText(vis, f"{roi_mode}: no ROI (full frame fallback)", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.imwrite(img_path, vis)
+
+    meta = {
+        "video": video_path,
+        "roi_mode": roi_mode,
+        "roi_xyxy": list(roi_xyxy) if roi_xyxy is not None else None,
+        "frame_hw": [int(h), int(w)] if h is not None and w is not None else None,
+        "debug_image": img_path if ok else None,
+    }
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+
+
 # -----------------------------
 # Feature computation (MHI + Farneback flow) [CPU]
 # -----------------------------
@@ -151,6 +396,7 @@ def compute_mhi_and_flow_stream_cpu(
     flow_max_disp: float = 20.0,
     flow_normalize: bool = True,
     out_dtype: torch.dtype = torch.float16,
+    roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     fb_params = fb_params or {}
 
@@ -201,7 +447,14 @@ def compute_mhi_and_flow_stream_cpu(
         if t > last_needed:
             break
 
-        frame224 = cv2.resize(frame_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        frame_src = frame_bgr
+        if roi_xyxy is not None:
+            x1, y1, x2, y2 = roi_xyxy
+            cropped = frame_bgr[y1:y2, x1:x2]
+            if cropped.shape[0] > 1 and cropped.shape[1] > 1:
+                frame_src = cropped
+
+        frame224 = cv2.resize(frame_src, (img_size, img_size), interpolation=cv2.INTER_AREA)
         frame112 = cv2.resize(frame224, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
 
         gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
@@ -431,6 +684,35 @@ def _worker_one(task):
         if (not cfg["overwrite"]) and os.path.exists(op):
             return True, vp, op, label, "skipped"
 
+        roi_xyxy = None
+        if cfg["roi_mode"] == "yolo_person":
+            roi_xyxy = detect_square_roi_yolo_person(
+                path=vp,
+                model_name=cfg["yolo_model"],
+                stride=cfg["roi_stride"],
+                conf=cfg["yolo_conf"],
+                device=cfg["yolo_device"],
+            )
+        elif cfg["roi_mode"] == "largest_motion":
+            roi_xyxy = detect_square_roi_largest_motion(
+                path=vp,
+                threshold=cfg["motion_roi_threshold"],
+                stride=cfg["roi_stride"],
+                min_area=cfg["motion_roi_min_area"],
+            )
+
+        if cfg["roi_debug_dir"]:
+            try:
+                write_roi_debug_artifacts(
+                    video_path=vp,
+                    roi_xyxy=roi_xyxy,
+                    roi_mode=cfg["roi_mode"],
+                    out_dir=cfg["roi_debug_dir"],
+                )
+            except Exception:
+                # Debug artifacts should not break feature extraction.
+                pass
+
         mhi_out, flows = compute_mhi_and_flow_stream_cpu(
             path=vp,
             mhi_windows=cfg["mhi_windows"],
@@ -443,6 +725,7 @@ def _worker_one(task):
             flow_max_disp=cfg["flow_max_disp"],
             flow_normalize=cfg["flow_normalize"],
             out_dtype=cfg["out_dtype"],
+            roi_xyxy=roi_xyxy,
         )
 
         save_zstd_features(
@@ -510,6 +793,30 @@ def main():
 
     p.add_argument("--flow_clip", type=float, default=1.0, help="Quant clip for stored flow (default 1.0)")
 
+    # optional pre-crop ROI (does not change default behavior)
+    p.add_argument(
+        "--roi_mode",
+        choices=["none", "yolo_person", "largest_motion"],
+        default="none",
+        help="Optional static crop ROI before MHI/flow extraction",
+    )
+    p.add_argument("--roi_stride", type=int, default=3, help="Frame stride for ROI prepass")
+    p.add_argument("--yolo_model", default="yolo11n.pt", help="YOLO model name/path (ultralytics)")
+    p.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO confidence threshold")
+    p.add_argument("--yolo_device", default=None, help="YOLO device, e.g. cpu or 0")
+    p.add_argument(
+        "--motion_roi_threshold",
+        type=float,
+        default=None,
+        help="Threshold for largest_motion ROI (default: --diff_threshold)",
+    )
+    p.add_argument("--motion_roi_min_area", type=int, default=64, help="Min CC area for largest_motion ROI")
+    p.add_argument(
+        "--roi_debug_dir",
+        default=None,
+        help="Optional dir for ROI debug artifacts (.jpg + .json per video)",
+    )
+
     # Farneback params
     p.add_argument("--fb_pyr_scale", type=float, default=0.5)
     p.add_argument("--fb_levels", type=int, default=3)
@@ -525,6 +832,11 @@ def main():
     p.add_argument("--write_index", default=None, help="Write jsonl index (path, out, label, status)")
 
     args = p.parse_args()
+
+    if args.roi_mode == "yolo_person" and YOLO is None:
+        raise SystemExit(
+            f"--roi_mode yolo_person requires ultralytics/YOLO. Import failed: {_YOLO_IMPORT_ERR!r}"
+        )
 
     # choose discovery mode
     mode_count = sum(x is not None and x != [] for x in [args.root_dir, args.glob, args.manifest])
@@ -612,6 +924,14 @@ def main():
         flow_normalize=bool(args.flow_normalize),
         flow_clip=float(args.flow_clip),
         fb_params=fb_params,
+        roi_mode=str(args.roi_mode),
+        roi_stride=max(1, int(args.roi_stride)),
+        yolo_model=str(args.yolo_model),
+        yolo_conf=float(args.yolo_conf),
+        yolo_device=args.yolo_device,
+        motion_roi_threshold=float(args.motion_roi_threshold) if args.motion_roi_threshold is not None else float(args.diff_threshold),
+        motion_roi_min_area=int(args.motion_roi_min_area),
+        roi_debug_dir=os.path.abspath(args.roi_debug_dir) if args.roi_debug_dir else None,
     )
 
     tasks = []
