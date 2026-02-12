@@ -268,7 +268,6 @@ def build_text_bank(
             for t in templates:
                 prompts.append(t.format(normalized_classname))
 
-        print(f"Class {raw} Prompts: {prompts}")
         tok = tokenize_fn(prompts).to(device)
         feats = clip_model.encode_text(tok)  # (P,512)
         if l2_normalize:

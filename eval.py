@@ -252,12 +252,12 @@ def save_cm_csv(cm: np.ndarray, classnames: List[str], out_csv: str):
             w.writerow([cname] + cm[i].tolist())
 
 
-def save_per_class_csv(classnames, precision, recall, f1, support, out_csv):
+def save_per_class_csv(classnames, precision, recall, f1, support, top1_acc, out_csv):
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["class", "support", "precision", "recall", "f1"])
-        for c, s, p, r, ff in zip(classnames, support, precision, recall, f1):
-            w.writerow([c, int(s), float(p), float(r), float(ff)])
+        w.writerow(["class", "support", "precision", "recall", "f1", "top1_acc"])
+        for c, s, p, r, ff, a1 in zip(classnames, support, precision, recall, f1, top1_acc):
+            w.writerow([c, int(s), float(p), float(r), float(ff), float(a1)])
 
 def compute_metrics_and_artifacts(
     *,
@@ -273,6 +273,7 @@ def compute_metrics_and_artifacts(
     num_classes = len(classnames)
     cm = confusion_matrix(y_true, y_pred, num_classes)
     precision, recall, f1, support = prf_from_cm(cm)
+    top1_acc = np.divide(np.diag(cm).astype(np.float64), support + 1e-12)
 
     acc1 = top1_correct / len(y_true)
     acc5 = top5_correct / len(y_true)
@@ -306,7 +307,7 @@ def compute_metrics_and_artifacts(
     # CSVs
     save_cm_csv(cm, classnames, os.path.join(out_dir, f"confusion_{tag}.csv"))
     save_per_class_csv(
-        classnames, precision, recall, f1, support,
+        classnames, precision, recall, f1, support, top1_acc,
         os.path.join(out_dir, f"per_class_{tag}.csv")
     )
 

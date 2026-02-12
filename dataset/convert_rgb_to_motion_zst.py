@@ -769,7 +769,7 @@ def _worker_one(task):
                 min_area=cfg["motion_roi_min_area"],
             )
 
-        if cfg["roi_debug_dir"]:
+        if cfg["roi_debug_dir"] and np.random.rand() < 0.05:
             try:
                 write_roi_debug_artifacts(
                     video_path=vp,

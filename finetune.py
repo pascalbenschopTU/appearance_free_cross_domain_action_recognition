@@ -17,6 +17,7 @@ CLI behavior:
 """
 
 import argparse
+import json
 import os
 import random
 import time
@@ -252,7 +253,29 @@ def eval_on_validation_split(
         base_json = base_json,
     )
 
-    return float(metrics["motion_only"]["top1"])
+    return metrics
+
+
+def _json_safe(obj):
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    if torch.is_tensor(obj):
+        if obj.numel() == 1:
+            return obj.item()
+        return obj.detach().cpu().tolist()
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return str(obj)
+
+
+def append_eval_log(eval_log_path: str, entry: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(eval_log_path), exist_ok=True)
+    with open(eval_log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(_json_safe(entry)) + "\n")
 
 # -----------------------------
 # Main
@@ -339,6 +362,8 @@ def main():
     args.ckpt_dir = os.path.join(args.out_dir, args.ckpt_dir)
     args.eval_dir = os.path.join(args.out_dir, args.eval_dir)
     os.makedirs(args.ckpt_dir, exist_ok=True)
+    os.makedirs(args.eval_dir, exist_ok=True)
+    eval_log_path = os.path.join(args.eval_dir, "eval_log.jsonl")
 
     writer = SummaryWriter(log_dir=args.tb_dir)
     set_seed(args.seed)
@@ -529,6 +554,32 @@ def main():
 
     start_epoch = global_step // max(1, steps_per_epoch)
     start_time = time.time()
+    use_amp = (device.type == "cuda")
+
+    if eval_dataloader is not None:
+        zero_shot_metrics = eval_on_validation_split(
+            args=args,
+            model=model,
+            eval_dataset=eval_dataset,
+            eval_dataloader=eval_dataloader,
+            device=device,
+            logit_scale_value=logit_scale().exp(),
+            clip_text_bank=clip_text_bank,
+            use_amp=use_amp,
+        )
+        zero_shot_top1 = float(zero_shot_metrics["motion_only"]["top1"])
+        append_eval_log(
+            eval_log_path,
+            {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "tag": "zero_shot",
+                "epoch": -1,
+                "global_step": global_step,
+                "top1": zero_shot_top1,
+                "metrics": zero_shot_metrics,
+            },
+        )
+        print(f"[ZERO_SHOT] top1={zero_shot_top1:.4f}", flush=True)
 
     for epoch in range(start_epoch, args.epochs):
         if hasattr(dataset, "set_epoch"):
@@ -553,8 +604,6 @@ def main():
             labels = labels.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            use_amp = (device.type == "cuda")
-
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 labels_soft = None
                 use_temporal_mixup = (
@@ -680,7 +729,7 @@ def main():
         )
         top_1_acc = None
         if do_eval:
-            top_1_acc = eval_on_validation_split(
+            eval_metrics = eval_on_validation_split(
                 args=args,
                 model=model,
                 eval_dataset=eval_dataset,
@@ -689,6 +738,18 @@ def main():
                 logit_scale_value=logit_scale().exp(),
                 clip_text_bank=clip_text_bank,
                 use_amp=use_amp
+            )
+            top_1_acc = float(eval_metrics["motion_only"]["top1"])
+            append_eval_log(
+                eval_log_path,
+                {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "tag": "epoch_eval",
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "top1": top_1_acc,
+                    "metrics": eval_metrics,
+                },
             )
             print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
             if top_1_acc > best_top1_acc:
