@@ -5,12 +5,23 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 import zstandard as zstd
 import os, json, struct
+import sys
 import numpy as np
 from pathlib import Path
 from typing import Dict, Tuple, List, Optional
 
 from augment import select_flow_mhi_indices, random_motion_augment
 from util import list_videos, classnames_from_id_csv, sample_unique_indices, aligned_indices_from_superset_unique
+
+_DATASET_UTILS_DIR = Path(__file__).resolve().parent / "dataset"
+if str(_DATASET_UTILS_DIR) not in sys.path:
+    sys.path.append(str(_DATASET_UTILS_DIR))
+
+from cropping_util import (
+    detect_square_roi_largest_motion,
+    detect_square_roi_yolo_person,
+    crop_frame_by_roi,
+)
 
 import warnings
 warnings.filterwarnings(
@@ -289,6 +300,7 @@ def compute_mhi_and_flow_stream(
     flow_max_disp: float,
     flow_normalize: bool,
     out_dtype=torch.float16,
+    roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Returns:
@@ -342,7 +354,8 @@ def compute_mhi_and_flow_stream(
         if t > last_needed:
             break
 
-        frame224 = cv2.resize(frame_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        frame_src = crop_frame_by_roi(frame_bgr, roi_xyxy)
+        frame224 = cv2.resize(frame_src, (img_size, img_size), interpolation=cv2.INTER_AREA)
         frame112 = cv2.resize(frame224, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
         # frame112 = frame224
 
@@ -393,6 +406,14 @@ class VideoMotionDataset(Dataset):
         fb_params: Dict,
         flow_max_disp: float,
         flow_normalize: bool,
+        roi_mode: str = "none",
+        roi_stride: int = 3,
+        motion_roi_threshold: Optional[float] = None,
+        motion_roi_min_area: int = 64,
+        yolo_model: str = "yolo11n.pt",
+        yolo_conf: float = 0.25,
+        yolo_device: Optional[str] = None,
+        cache_roi: bool = True,
         out_dtype=torch.float16,
         dataset_split_txt=None,
         class_id_to_label_csv=None
@@ -409,14 +430,55 @@ class VideoMotionDataset(Dataset):
         self.fb_params = fb_params
         self.flow_max_disp = flow_max_disp
         self.flow_normalize = flow_normalize
+        self.roi_mode = str(roi_mode)
+        self.roi_stride = max(1, int(roi_stride))
+        self.motion_roi_threshold = (
+            float(diff_threshold) if motion_roi_threshold is None else float(motion_roi_threshold)
+        )
+        self.motion_roi_min_area = int(motion_roi_min_area)
+        self.yolo_model = str(yolo_model)
+        self.yolo_conf = float(yolo_conf)
+        self.yolo_device = yolo_device
+        if self.roi_mode not in ("none", "largest_motion", "yolo_person"):
+            raise ValueError(f"Unsupported roi_mode for VideoMotionDataset: {self.roi_mode}")
+        self._roi_cache = {} if cache_roi else None
         self.out_dtype = out_dtype
 
     def __len__(self): return len(self.paths)
+
+    def _get_roi_xyxy(self, path: str) -> Optional[Tuple[int, int, int, int]]:
+        if self.roi_mode == "none":
+            return None
+        if self._roi_cache is not None and path in self._roi_cache:
+            return self._roi_cache[path]
+        roi_xyxy = None
+        try:
+            if self.roi_mode == "largest_motion":
+                roi_xyxy = detect_square_roi_largest_motion(
+                    path=path,
+                    threshold=self.motion_roi_threshold,
+                    stride=self.roi_stride,
+                    min_area=self.motion_roi_min_area,
+                )
+            elif self.roi_mode == "yolo_person":
+                roi_xyxy = detect_square_roi_yolo_person(
+                    path=path,
+                    model_name=self.yolo_model,
+                    stride=self.roi_stride,
+                    conf=self.yolo_conf,
+                    device=self.yolo_device,
+                )
+        except Exception:
+            roi_xyxy = None
+        if self._roi_cache is not None:
+            self._roi_cache[path] = roi_xyxy
+        return roi_xyxy
 
     def __getitem__(self, idx):
         path = self.paths[idx]
         y = self.labels[idx]
         try:
+            roi_xyxy = self._get_roi_xyxy(path)
             mhi, flow = compute_mhi_and_flow_stream(
                 path,
                 mhi_windows=self.mhi_windows,
@@ -428,6 +490,7 @@ class VideoMotionDataset(Dataset):
                 fb_params=self.fb_params,
                 flow_max_disp=self.flow_max_disp,
                 flow_normalize=self.flow_normalize,
+                roi_xyxy=roi_xyxy,
                 out_dtype=self.out_dtype,
             )
         except Exception:

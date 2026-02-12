@@ -2,3 +2,4 @@ __pycache__/
 eval_out/
 out/
 run_scripts.txt
+*.pt

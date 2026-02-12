@@ -599,6 +599,19 @@ def main():
     ap.add_argument("--mhi_windows", type=str, default="15")
     ap.add_argument("--diff_threshold", type=float, default=25.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
+    ap.add_argument(
+        "--roi_mode",
+        type=str,
+        default="none",
+        choices=["none", "largest_motion", "yolo_person"],
+        help="Optional ROI pre-crop mode for VideoMotionDataset",
+    )
+    ap.add_argument("--roi_stride", type=int, default=3, help="Frame stride for ROI prepass")
+    ap.add_argument("--motion_roi_threshold", type=float, default=None, help="Threshold for largest_motion ROI (default: --diff_threshold)")
+    ap.add_argument("--motion_roi_min_area", type=int, default=64, help="Min CC area for largest_motion ROI")
+    ap.add_argument("--yolo_model", type=str, default="yolo11n.pt", help="YOLO model name/path (ultralytics)")
+    ap.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO confidence threshold")
+    ap.add_argument("--yolo_device", type=str, default=None, help="YOLO device, e.g. cpu or 0")
 
     # Farneback params
     ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
@@ -786,6 +799,13 @@ def main():
             fb_params=fb_params,
             flow_max_disp=flow_max_disp,
             flow_normalize=True,
+            roi_mode=args.roi_mode,
+            roi_stride=max(1, int(args.roi_stride)),
+            motion_roi_threshold=args.motion_roi_threshold,
+            motion_roi_min_area=int(args.motion_roi_min_area),
+            yolo_model=args.yolo_model,
+            yolo_conf=float(args.yolo_conf),
+            yolo_device=args.yolo_device,
             out_dtype=torch.float16,
             dataset_split_txt=manifest_path,
             class_id_to_label_csv=args.class_id_to_label_csv,
