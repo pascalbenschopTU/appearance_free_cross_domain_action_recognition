@@ -413,7 +413,6 @@ class VideoMotionDataset(Dataset):
         yolo_model: str = "yolo11n.pt",
         yolo_conf: float = 0.25,
         yolo_device: Optional[str] = None,
-        cache_roi: bool = True,
         out_dtype=torch.float16,
         dataset_split_txt=None,
         class_id_to_label_csv=None
@@ -441,7 +440,6 @@ class VideoMotionDataset(Dataset):
         self.yolo_device = yolo_device
         if self.roi_mode not in ("none", "largest_motion", "yolo_person"):
             raise ValueError(f"Unsupported roi_mode for VideoMotionDataset: {self.roi_mode}")
-        self._roi_cache = {} if cache_roi else None
         self.out_dtype = out_dtype
 
     def __len__(self): return len(self.paths)
@@ -449,8 +447,6 @@ class VideoMotionDataset(Dataset):
     def _get_roi_xyxy(self, path: str) -> Optional[Tuple[int, int, int, int]]:
         if self.roi_mode == "none":
             return None
-        if self._roi_cache is not None and path in self._roi_cache:
-            return self._roi_cache[path]
         roi_xyxy = None
         try:
             if self.roi_mode == "largest_motion":
@@ -470,8 +466,6 @@ class VideoMotionDataset(Dataset):
                 )
         except Exception:
             roi_xyxy = None
-        if self._roi_cache is not None:
-            self._roi_cache[path] = roi_xyxy
         return roi_xyxy
 
     def __getitem__(self, idx):

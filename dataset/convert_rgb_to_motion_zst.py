@@ -230,9 +230,6 @@ def compute_mhi_and_flow_stream_cpu(
     flow_set = set(map(int, flow_idx.numpy()))
     mhi_set = set(map(int, mhi_idx.numpy()))
 
-    # if num_frames < flow_frames:
-    #     # print(f"Num frames {num_frames} < flow_frames {flow_frames}, sampled: {flow_set}", file=sys.stderr)
-
     flow_pos = {int(t): i for i, t in enumerate(flow_idx.tolist())}
     mhi_pos = {int(t): i for i, t in enumerate(mhi_idx.tolist())}
 
@@ -664,7 +661,7 @@ def main():
     p.add_argument("--flow_frames", type=int, default=128)
     p.add_argument("--flow_max_disp", type=float, default=20.0)
 
-    # normalize toggle (fixed)
+    # flow normalization
     g = p.add_mutually_exclusive_group()
     g.add_argument("--flow_normalize", dest="flow_normalize", action="store_true", help="Normalize flow by flow_max_disp (default)")
     g.add_argument("--no_flow_normalize", dest="flow_normalize", action="store_false", help="Do not normalize flow")
@@ -673,28 +670,14 @@ def main():
     p.add_argument("--flow_clip", type=float, default=1.0, help="Quant clip for stored flow (default 1.0)")
 
     # optional pre-crop ROI (does not change default behavior)
-    p.add_argument(
-        "--roi_mode",
-        choices=["none", "yolo_person", "largest_motion"],
-        default="none",
-        help="Optional static crop ROI before MHI/flow extraction",
-    )
+    p.add_argument("--roi_mode", choices=["none", "yolo_person", "largest_motion"],default="none",help="Optional crop ROI before MHI/flow extraction")
     p.add_argument("--roi_stride", type=int, default=3, help="Frame stride for ROI prepass")
-    p.add_argument("--yolo_model", default="yolo11n.pt", help="YOLO model name/path (ultralytics)")
+    p.add_argument("--yolo_model", default="out/yolo11n.pt", help="YOLO model name/path (ultralytics)")
     p.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO confidence threshold")
     p.add_argument("--yolo_device", default=None, help="YOLO device, e.g. cpu or 0")
-    p.add_argument(
-        "--motion_roi_threshold",
-        type=float,
-        default=None,
-        help="Threshold for largest_motion ROI (default: --diff_threshold)",
-    )
+    p.add_argument("--motion_roi_threshold",type=float,default=None,help="Threshold for largest_motion ROI (default: --diff_threshold)")
     p.add_argument("--motion_roi_min_area", type=int, default=64, help="Min CC area for largest_motion ROI")
-    p.add_argument(
-        "--roi_debug_dir",
-        default=None,
-        help="Optional dir for ROI debug artifacts (.jpg + .json per video)",
-    )
+    p.add_argument("--roi_debug_dir",default=None,help="Optional dir for ROI debug artifacts (.jpg + .json per video)")
 
     # Farneback params
     p.add_argument("--fb_pyr_scale", type=float, default=0.5)
