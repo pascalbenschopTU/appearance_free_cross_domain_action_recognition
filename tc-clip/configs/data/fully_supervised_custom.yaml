@@ -1,0 +1,23 @@
+#@package _global_
+data:
+  train:
+    dataset_name: custom_train
+    root: ${custom.root}
+    num_classes: ${custom.num_classes}
+    label_file: ${custom.label_file}
+    ann_file: ${custom.train_ann_file}
+  val:
+    dataset_name: custom_val
+    root: ${custom.root}
+    num_classes: ${custom.num_classes}
+    label_file: ${custom.label_file}
+    ann_file: ${custom.val_ann_file}
+  test:
+    - name: custom_test
+      protocol: top1
+      dataset_list:
+      - dataset_name: custom_test
+        root: ${custom.root}
+        num_classes: ${custom.num_classes}
+        label_file: ${custom.label_file}
+        ann_file: ${custom.test_ann_file}

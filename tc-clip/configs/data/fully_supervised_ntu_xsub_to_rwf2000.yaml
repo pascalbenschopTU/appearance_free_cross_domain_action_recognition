@@ -1,0 +1,32 @@
+#@package _global_
+data:
+  train:
+    dataset_name: ntu60_xsub_train
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.train_xsub}
+  val:
+    dataset_name: ntu60_xsub_val
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.val_xsub}
+  test:
+    - name: ntu60_xsub_val
+      protocol: top1
+      dataset_list:
+      - dataset_name: ntu60_xsub_val
+        root: ${ntu60.root}
+        num_classes: ${ntu60.num_classes.default}
+        label_file: ${ntu60.label_files.default}
+        ann_file: ${ntu60.ann_files.val_xsub}
+
+    - name: rwf2000_all
+      protocol: top1
+      dataset_list:
+      - dataset_name: rwf2000_all
+        root: ${rwf2000.root}
+        num_classes: ${rwf2000.num_classes.default}
+        label_file: ${rwf2000.label_files.default}
+        ann_file: ${rwf2000.ann_files.all}

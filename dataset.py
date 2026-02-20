@@ -671,8 +671,12 @@ class VideoMHIFramesDataset(Dataset):
         mhi_windows: List[int],
         diff_threshold: float,
         out_mhi_dtype=torch.float16,
+        dataset_split_txt=None,
+        class_id_to_label_csv=None,
     ):
-        self.paths, self.labels, self.classnames = list_videos(root_dir)
+        self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
+        if dataset_split_txt is not None and class_id_to_label_csv is not None:
+            self.classnames = classnames_from_id_csv(class_id_to_label_csv, self.labels)
         self.img_size = img_size
         self.flow_hw = flow_hw
         self.mhi_frames = mhi_frames

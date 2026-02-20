@@ -1,0 +1,19 @@
+{
+  "Fight": [
+    "punch slap",
+    "kick",
+    "push",
+    "hit attack"
+  ],
+  "NonFight": [
+    "walk toward",
+    "walk apart",
+    "stand up",
+    "sit down",
+    "jump",
+    "wave hand",
+    "hug",
+    "handshake",
+    "point finger"
+  ]
+}

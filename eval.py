@@ -409,6 +409,10 @@ def evaluate_one_split(
     classnames: List[str],
     out_dir: str,
     base_json: Dict,
+    flow_backend: str = "farneback",
+    raft_model=None,
+    raft_flow_clip: float = 1.0,
+    raft_amp: bool = True,
 ):
     # -----------------------------
     # Accumulators (3 main modes + per-head breakdowns)
@@ -455,7 +459,20 @@ def evaluate_one_split(
 
             if mhi is not None:
                 mhi = mhi.to(device, non_blocking=True)
-            second = second.to(device, non_blocking=True)
+            if flow_backend == "raft_large":
+                if raft_model is None:
+                    raise RuntimeError("flow_backend='raft_large' requires a loaded RAFT model.")
+                second = raft_flow_from_paired_frames_batched(
+                    pairs_u8=second,
+                    raft_model=raft_model,
+                    device=device.type if device.type == "cuda" else str(device),
+                    use_amp=bool(raft_amp),
+                    out_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+                )
+                if raft_flow_clip and raft_flow_clip > 0:
+                    second = torch.clamp(second, min=-float(raft_flow_clip), max=float(raft_flow_clip))
+            else:
+                second = second.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
             with torch.autocast(device_type=device.type, enabled=autocast_on):
@@ -600,6 +617,21 @@ def main():
     ap.add_argument("--diff_threshold", type=float, default=25.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
     ap.add_argument(
+        "--flow_backend",
+        type=str,
+        default="farneback",
+        choices=["farneback", "raft_large"],
+        help="Flow extractor for on-the-fly evaluation.",
+    )
+    ap.add_argument(
+        "--raft_flow_clip",
+        type=float,
+        default=1.0,
+        help="Clip RAFT flow to [-x, x] before model input (default: 1.0, matching RAFT zst conversion). Set <=0 to disable.",
+    )
+    ap.add_argument("--raft_amp", action="store_true", default=True, help="Use AMP for RAFT inference on CUDA.")
+    ap.add_argument("--no_raft_amp", action="store_false", dest="raft_amp", help="Disable AMP for RAFT inference.")
+    ap.add_argument(
         "--roi_mode",
         type=str,
         default="none",
@@ -650,6 +682,7 @@ def main():
 
     device = torch.device(args.device)
     autocast_on = (device.type == "cuda")
+    args.flow_backend = str(args.flow_backend).lower()
 
     ckpt = torch.load(args.ckpt, map_location=device)
     ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
@@ -694,6 +727,16 @@ def main():
     diff_threshold = float(_get(ckpt_args, "diff_threshold", args.diff_threshold))
     flow_max_disp  = float(_get(ckpt_args, "flow_max_disp", args.flow_max_disp))
 
+    if args.flow_backend == "raft_large":
+        if device.type != "cuda":
+            raise RuntimeError("--flow_backend raft_large requires CUDA for practical runtime.")
+        if flow_hw < 128 or (flow_hw % 8) != 0:
+            raise ValueError(
+                f"flow_hw must be >=128 and divisible by 8 for raft_large. Got flow_hw={flow_hw}."
+            )
+        if args.roi_mode != "none":
+            raise ValueError("--roi_mode is currently only supported with --flow_backend farneback.")
+
     # ---- farneback params ----
     fb_params = dict(
         pyr_scale=float(_get(ckpt_args, "fb_pyr_scale", args.fb_pyr_scale)),
@@ -714,6 +757,7 @@ def main():
         p.requires_grad_(False)
 
     templates = CLIP_TEMPLATES
+    raft_model = build_raft_large(str(device)) if args.flow_backend == "raft_large" else None
 
     class_texts = None
     if args.class_text_json.strip():
@@ -788,28 +832,42 @@ def main():
         split_out_dir = args.out_dir if not multi_split else os.path.join(args.out_dir, split_name)
         os.makedirs(split_out_dir, exist_ok=True)
 
-        dataset = VideoMotionDataset(
-            args.root_dir,
-            img_size=img_size,
-            flow_hw=flow_hw,
-            mhi_frames=mhi_frames,
-            flow_frames=flow_frames,
-            mhi_windows=mhi_windows,
-            diff_threshold=diff_threshold,
-            fb_params=fb_params,
-            flow_max_disp=flow_max_disp,
-            flow_normalize=True,
-            roi_mode=args.roi_mode,
-            roi_stride=max(1, int(args.roi_stride)),
-            motion_roi_threshold=args.motion_roi_threshold,
-            motion_roi_min_area=int(args.motion_roi_min_area),
-            yolo_model=args.yolo_model,
-            yolo_conf=float(args.yolo_conf),
-            yolo_device=args.yolo_device,
-            out_dtype=torch.float16,
-            dataset_split_txt=manifest_path,
-            class_id_to_label_csv=args.class_id_to_label_csv,
-        )
+        if args.flow_backend == "raft_large":
+            dataset = VideoMHIFramesDataset(
+                args.root_dir,
+                img_size=img_size,
+                flow_hw=flow_hw,
+                mhi_frames=mhi_frames,
+                flow_pairs=flow_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=diff_threshold,
+                out_mhi_dtype=torch.float16,
+                dataset_split_txt=manifest_path,
+                class_id_to_label_csv=args.class_id_to_label_csv,
+            )
+        else:
+            dataset = VideoMotionDataset(
+                args.root_dir,
+                img_size=img_size,
+                flow_hw=flow_hw,
+                mhi_frames=mhi_frames,
+                flow_frames=flow_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=diff_threshold,
+                fb_params=fb_params,
+                flow_max_disp=flow_max_disp,
+                flow_normalize=True,
+                roi_mode=args.roi_mode,
+                roi_stride=max(1, int(args.roi_stride)),
+                motion_roi_threshold=args.motion_roi_threshold,
+                motion_roi_min_area=int(args.motion_roi_min_area),
+                yolo_model=args.yolo_model,
+                yolo_conf=float(args.yolo_conf),
+                yolo_device=args.yolo_device,
+                out_dtype=torch.float16,
+                dataset_split_txt=manifest_path,
+                class_id_to_label_csv=args.class_id_to_label_csv,
+            )
         collate_fn = collate_video_motion
 
         dataloader = DataLoader(
@@ -857,6 +915,8 @@ def main():
             "use_heads": parse_list(args.use_heads),
             "head_weights": parse_floats(args.head_weights),
             "active_branch": active_branch,
+            "flow_backend": args.flow_backend,
+            "raft_flow_clip": float(args.raft_flow_clip),
             "logit_scale_motion": float(scale_motion),
             "rgb_frames": int(args.rgb_frames),
             "rgb_sampling": args.rgb_sampling,
@@ -882,6 +942,10 @@ def main():
             classnames=classnames,
             out_dir=split_out_dir,
             base_json=base_json,
+            flow_backend=args.flow_backend,
+            raft_model=raft_model,
+            raft_flow_clip=float(args.raft_flow_clip),
+            raft_amp=bool(args.raft_amp),
         )
 
         # collect for aggregation

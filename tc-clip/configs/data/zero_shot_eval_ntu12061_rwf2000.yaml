@@ -1,0 +1,34 @@
+#@package _global_
+data:
+  train:
+    dataset_name: ntu60_xsub_train
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.train_xsub}
+  val:
+    dataset_name: ntu60_xsub_val
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.val_xsub}
+  test:
+    - name: rwf2000_all
+      protocol: top1
+      dataset_list:
+      - dataset_name: rwf2000_all
+        root: ${rwf2000.root}
+        num_classes: ${rwf2000.num_classes.default}
+        label_file: ${rwf2000.label_files.default}
+        ann_file: ${rwf2000.ann_files.all}
+        grouped_text_file: ${rwf2000.label_files.ntu_grouped_text}
+        eval_group_reduce: max
+
+    - name: ntu120_61_120_all
+      protocol: top1
+      dataset_list:
+      - dataset_name: ntu120_61_120_all
+        root: ${ntu120_61_120.root}
+        num_classes: ${ntu120_61_120.num_classes.default}
+        label_file: ${ntu120_61_120.label_files.default}
+        ann_file: ${ntu120_61_120.ann_files.all}

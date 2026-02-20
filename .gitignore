@@ -3,3 +3,4 @@ eval_out/
 out/
 run_scripts.txt
 *.pt
+*.pth

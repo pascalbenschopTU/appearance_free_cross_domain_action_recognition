@@ -23,10 +23,130 @@ import random
 import numpy as np
 from torch.utils.data import DataLoader
 import time
+from typing import Optional
 
 
 def soft_target_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     return -(targets.to(dtype=logits.dtype) * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+
+
+def sample_random_non_self_partners(batch_size: int, device: torch.device) -> torch.Tensor:
+    if batch_size < 2:
+        return torch.zeros((batch_size,), device=device, dtype=torch.long)
+    idx = torch.arange(batch_size, device=device)
+    partners = torch.randint(0, batch_size - 1, (batch_size,), device=device)
+    return partners + (partners >= idx).long()
+
+
+def sample_semantic_partners_in_batch(
+    labels: torch.Tensor,
+    clip_text_bank: torch.Tensor,
+    *,
+    topk: int = 1,
+    min_sim: float = -1.0,
+    class_text_sim: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    batch_size = labels.size(0)
+    if batch_size < 2:
+        return torch.zeros((batch_size,), device=labels.device, dtype=torch.long)
+
+    topk = max(1, min(int(topk), batch_size - 1))
+    fallback = sample_random_non_self_partners(batch_size, labels.device)
+
+    with torch.no_grad():
+        if class_text_sim is not None:
+            sim = class_text_sim.index_select(0, labels).index_select(1, labels).clone()
+        else:
+            t = F.normalize(clip_text_bank[labels], dim=-1).float()
+            sim = t @ t.t()
+        sim.fill_diagonal_(-float("inf"))
+        if min_sim > -1.0:
+            sim = sim.masked_fill(sim < min_sim, -float("inf"))
+        top_vals, top_idx = torch.topk(sim, k=topk, dim=1, largest=True)
+        valid_mask = torch.isfinite(top_vals)
+        valid_counts = valid_mask.sum(dim=1)
+        has_valid = valid_counts > 0
+        if not has_valid.any():
+            return fallback
+
+        rand_unit = torch.rand(batch_size, device=labels.device)
+        rand_pos = torch.floor(rand_unit * valid_counts.clamp_min(1).to(rand_unit.dtype)).long()
+        picked = top_idx[torch.arange(batch_size, device=labels.device), rand_pos]
+        partners = fallback.clone()
+        partners[has_valid] = picked[has_valid]
+        return partners
+
+
+def representation_mix_consistency_loss(
+    video_emb: torch.Tensor,
+    labels: torch.Tensor,
+    clip_text_bank: torch.Tensor,
+    *,
+    alpha: float,
+    semantic_mix: bool,
+    semantic_topk: int,
+    semantic_min_sim: float,
+    labels_soft: Optional[torch.Tensor] = None,
+    class_text_sim: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    v = F.normalize(video_emb, dim=-1).float()
+    if labels_soft is None:
+        t = clip_text_bank[labels]
+    else:
+        t = labels_soft.to(device=v.device, dtype=clip_text_bank.dtype) @ clip_text_bank
+    t = F.normalize(t, dim=-1).float()
+
+    batch_size = v.size(0)
+    if batch_size < 2:
+        return v.new_zeros(())
+
+    if semantic_mix and labels_soft is None:
+        partners = sample_semantic_partners_in_batch(
+            labels,
+            clip_text_bank,
+            topk=semantic_topk,
+            min_sim=semantic_min_sim,
+            class_text_sim=class_text_sim,
+        )
+    else:
+        partners = sample_random_non_self_partners(batch_size, v.device)
+
+    lam = torch.distributions.Beta(alpha, alpha).sample((batch_size,)).to(device=v.device, dtype=v.dtype).unsqueeze(1)
+    v_mix = F.normalize(lam * v + (1.0 - lam) * v[partners], dim=-1)
+    t_mix = F.normalize(lam * t + (1.0 - lam) * t[partners], dim=-1)
+
+    return (1.0 - (v_mix * t_mix).sum(dim=-1)).mean()
+
+
+def supervised_contrastive_loss(
+    video_emb: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    temperature: float,
+) -> torch.Tensor:
+    z = F.normalize(video_emb, dim=-1).float()
+    batch_size = z.size(0)
+    if batch_size < 2:
+        return z.new_zeros(())
+    if torch.unique(labels).numel() == batch_size:
+        return z.new_zeros(())
+
+    logits = (z @ z.t()) / max(float(temperature), 1e-6)
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    self_mask = torch.eye(batch_size, device=z.device, dtype=torch.bool)
+    non_self_mask = ~self_mask
+    exp_logits = torch.exp(logits) * non_self_mask
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
+
+    positive_mask = labels[:, None].eq(labels[None, :]) & non_self_mask
+    positive_count = positive_mask.sum(dim=1)
+    valid = positive_count > 0
+    if not valid.any():
+        return z.new_zeros(())
+
+    mean_log_prob_pos = (log_prob * positive_mask).sum(dim=1) / positive_count.clamp_min(1)
+    return -mean_log_prob_pos[valid].mean()
 
 
 def main():
@@ -42,6 +162,18 @@ def main():
 
     # MHI params
     ap.add_argument("--mhi_windows", type=str, default="15", help="comma list, e.g. 5,25")
+
+    # Motion extraction params (metadata only when training from precomputed .zst features).
+    # eval.py will prefer these values from the checkpoint when computing motion on-the-fly.
+    ap.add_argument("--diff_threshold", type=float, default=25.0)
+    ap.add_argument("--flow_max_disp", type=float, default=20.0)
+    ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
+    ap.add_argument("--fb_levels", type=int, default=3)
+    ap.add_argument("--fb_winsize", type=int, default=15)
+    ap.add_argument("--fb_iterations", type=int, default=3)
+    ap.add_argument("--fb_poly_n", type=int, default=5)
+    ap.add_argument("--fb_poly_sigma", type=float, default=1.2)
+    ap.add_argument("--fb_flags", type=int, default=0)
 
     # Model / training
     ap.add_argument("--embed_dim", type=int, default=512)
@@ -70,6 +202,13 @@ def main():
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
+    ap.add_argument("--lambda_rep_mix", type=float, default=0.0, help="Weight for representation-space mix consistency loss.")
+    ap.add_argument("--rep_mix_alpha", type=float, default=0.4, help="Beta(alpha, alpha) parameter for representation-space mix.")
+    ap.add_argument("--rep_mix_semantic", action="store_true", help="Select representation-mix partners from semantically close classes within the current batch.")
+    ap.add_argument("--rep_mix_semantic_topk", type=int, default=3, help="Randomly choose among top-k semantic partners found in-batch.")
+    ap.add_argument("--rep_mix_semantic_min_sim", type=float, default=-1.0, help="Minimum cosine similarity for semantic partner candidates; values <= -1 disable filtering.")
+    ap.add_argument("--lambda_supcon", type=float, default=0.0, help="Weight for supervised contrastive loss on fused embeddings.")
+    ap.add_argument("--supcon_temp", type=float, default=0.07, help="Temperature for supervised contrastive loss.")
     ap.add_argument("--unfreeze_logit_scale", action="store_true",
                     help="Freeze logit_scale parameter while keeping it in the optimizer param list for checkpoint compatibility.")
 
@@ -155,6 +294,10 @@ def main():
         dtype=torch.float16,
         class_texts=class_texts,
     )
+    class_text_sim = None
+    if args.rep_mix_semantic:
+        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+        class_text_sim = (t_norm @ t_norm.t()).detach()
     # Frozen by default
     if not args.unfreeze_logit_scale:
         for p in logit_scale.parameters():
@@ -167,6 +310,14 @@ def main():
     if args.active_branch == "second" and args.lambda_top > 0:
         print("[WARN] lambda_top > 0 while active_branch=second. Setting lambda_top=0.")
         args.lambda_top = 0.0
+    if args.lambda_rep_mix > 0 and args.rep_mix_alpha <= 0:
+        raise ValueError("--rep_mix_alpha must be > 0 when --lambda_rep_mix > 0")
+    if args.rep_mix_semantic_topk <= 0:
+        raise ValueError("--rep_mix_semantic_topk must be >= 1")
+    if args.lambda_supcon > 0 and args.supcon_temp <= 0:
+        raise ValueError("--supcon_temp must be > 0 when --lambda_supcon > 0")
+    if args.lambda_supcon > 0:
+        print("[INFO] SupCon uses in-batch same-class positives; with many classes and batch size 16, some steps may have no positive pairs.")
 
     # Student model
     if args.model == "i3d":
@@ -234,13 +385,19 @@ def main():
         start_epoch = ckpt["epoch"] + 1
         start_in_epoch = 0
 
+    global_running_total_loss = 0.0
     global_running_clip_loss = 0.0
+    global_running_rep_mix_loss = 0.0
+    global_running_supcon_loss = 0.0
     global_n_logs = 0
 
     for epoch in range(start_epoch, args.epochs):
         dataset.set_epoch(epoch)
         model.train()
+        running_total_loss = 0.0
         running_clip_loss = 0.0
+        running_rep_mix_loss = 0.0
+        running_supcon_loss = 0.0
         n_logs = 0
 
         for step_in_epoch, (mhi_top, flow_bot, labels, cnames) in enumerate(loader):
@@ -285,12 +442,38 @@ def main():
                     loss_top  = ce_from_emb(out["emb_top"])
                     loss_bot  = ce_from_emb(out["emb_bot"])
 
-                    loss = args.lambda_fuse * loss_fuse + args.lambda_top * loss_top + args.lambda_bot * loss_bot
+                    loss_clip = args.lambda_fuse * loss_fuse + args.lambda_top * loss_top + args.lambda_bot * loss_bot
                 else:
                     # Keep tensor scalars so downstream logging via .item() is always valid.
                     loss_top = torch.zeros((), device=loss_fuse.device, dtype=loss_fuse.dtype)
                     loss_bot = torch.zeros((), device=loss_fuse.device, dtype=loss_fuse.dtype)
-                    loss = loss_fuse
+                    loss_clip = loss_fuse
+
+                if args.lambda_rep_mix > 0:
+                    loss_rep_mix = representation_mix_consistency_loss(
+                        out["emb_fuse"],
+                        labels,
+                        clip_text_bank,
+                        alpha=args.rep_mix_alpha,
+                        semantic_mix=args.rep_mix_semantic,
+                        semantic_topk=args.rep_mix_semantic_topk,
+                        semantic_min_sim=args.rep_mix_semantic_min_sim,
+                        labels_soft=labels_soft,
+                        class_text_sim=class_text_sim,
+                    ).to(dtype=loss_clip.dtype)
+                else:
+                    loss_rep_mix = torch.zeros((), device=loss_clip.device, dtype=loss_clip.dtype)
+
+                if args.lambda_supcon > 0 and labels_soft is None:
+                    loss_supcon = supervised_contrastive_loss(
+                        out["emb_fuse"],
+                        labels,
+                        temperature=args.supcon_temp,
+                    ).to(dtype=loss_clip.dtype)
+                else:
+                    loss_supcon = torch.zeros((), device=loss_clip.device, dtype=loss_clip.dtype)
+
+                loss = loss_clip + args.lambda_rep_mix * loss_rep_mix + args.lambda_supcon * loss_supcon
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -311,33 +494,48 @@ def main():
                 if global_step % 5 == 0:
                     try:
                         writer.add_scalar("loss/total", float(loss.item()), global_step)
+                        writer.add_scalar("loss/clip", float(loss_clip.item()), global_step)
                         writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
                         writer.add_scalar("loss/top", float(loss_top.item()), global_step)
                         writer.add_scalar("loss/bot", float(loss_bot.item()), global_step)
+                        writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
+                        writer.add_scalar("loss/supcon", float(loss_supcon.item()), global_step)
                         writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
                         writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
                     except Exception as e:
                         print(f"Writing failed: {e}", file=sys.stderr)
 
-                running_clip_loss += float(loss.item())
+                running_total_loss += float(loss.item())
+                running_clip_loss += float(loss_clip.item())
+                running_rep_mix_loss += float(loss_rep_mix.item())
+                running_supcon_loss += float(loss_supcon.item())
                 n_logs += 1
-                global_running_clip_loss += float(loss.item())
+                global_running_total_loss += float(loss.item())
+                global_running_clip_loss += float(loss_clip.item())
+                global_running_rep_mix_loss += float(loss_rep_mix.item())
+                global_running_supcon_loss += float(loss_supcon.item())
                 global_n_logs += 1
 
                 if (global_step % args.log_every) == 0:
                     learning_rate = opt.param_groups[0]["lr"]
                     elapsed = time.time() - start_time
-                    running_avg = global_running_clip_loss / max(global_n_logs, 1)
+                    running_avg_total = global_running_total_loss / max(global_n_logs, 1)
+                    running_avg_clip = global_running_clip_loss / max(global_n_logs, 1)
+                    running_avg_rep_mix = global_running_rep_mix_loss / max(global_n_logs, 1)
+                    running_avg_supcon = global_running_supcon_loss / max(global_n_logs, 1)
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:06d} lr {learning_rate:.6f}] "
-                        f"clip_loss={running_avg:.4f} "
+                        f"loss={running_avg_total:.4f} "
+                        f"clip={running_avg_clip:.4f} "
+                        f"rep_mix={running_avg_rep_mix:.4f} "
+                        f"supcon={running_avg_supcon:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
                     print(msg, flush=True)
 
-                current_clip_loss = running_clip_loss/n_logs
-                if args.save_every > 0 and (global_step % args.save_every) == 0 and current_clip_loss < best_loss:
-                    best_loss = current_clip_loss
+                current_total_loss = running_total_loss / n_logs
+                if args.save_every > 0 and (global_step % args.save_every) == 0 and current_total_loss < best_loss:
+                    best_loss = current_total_loss
                     ckpt_path = os.path.join(
                         args.ckpt_dir,
                         f"checkpoint_latest.pt"
@@ -359,11 +557,17 @@ def main():
 
         # epoch summary
         if n_logs > 0:
-            msg = f"[EPOCH {epoch:03d}] clip_loss={running_clip_loss/n_logs:.4f}"
+            msg = (
+                f"[EPOCH {epoch:03d}] "
+                f"loss={running_total_loss/n_logs:.4f} "
+                f"clip={running_clip_loss/n_logs:.4f} "
+                f"rep_mix={running_rep_mix_loss/n_logs:.4f} "
+                f"supcon={running_supcon_loss/n_logs:.4f}"
+            )
             print(msg)
 
-            epoch_clip_loss = running_clip_loss / max(n_logs, 1)
-            ckpt_path = os.path.join(args.ckpt_dir, f"checkpoint_epoch_{epoch:03d}_loss{epoch_clip_loss:.4f}.pt")
+            epoch_total_loss = running_total_loss / max(n_logs, 1)
+            ckpt_path = os.path.join(args.ckpt_dir, f"checkpoint_epoch_{epoch:03d}_loss{epoch_total_loss:.4f}.pt")
             
             payload = make_ckpt_payload(
                 epoch=epoch,
