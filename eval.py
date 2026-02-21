@@ -29,6 +29,7 @@ import csv
 import json
 import time
 import argparse
+import contextlib
 from typing import List, Dict, Optional
 import glob
 import math
@@ -475,7 +476,12 @@ def evaluate_one_split(
                 second = second.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            with torch.autocast(device_type=device.type, enabled=autocast_on):
+            amp_ctx = (
+                torch.autocast(device_type=device.type, enabled=True)
+                if autocast_on
+                else contextlib.nullcontext()
+            )
+            with amp_ctx:
                 out = model(mhi, second)
 
                 logits_by_head = {}
@@ -614,7 +620,7 @@ def main():
     ap.add_argument("--flow_frames", type=int, default=128)
     ap.add_argument("--flow_hw", type=int, default=112)
     ap.add_argument("--mhi_windows", type=str, default="15")
-    ap.add_argument("--diff_threshold", type=float, default=25.0)
+    ap.add_argument("--diff_threshold", type=float, default=15.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
     ap.add_argument(
         "--flow_backend",
@@ -647,11 +653,11 @@ def main():
 
     # Farneback params
     ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
-    ap.add_argument("--fb_levels", type=int, default=5) #3
-    ap.add_argument("--fb_winsize", type=int, default=21) #15
-    ap.add_argument("--fb_iterations", type=int, default=5) #3
-    ap.add_argument("--fb_poly_n", type=int, default=7) # 5
-    ap.add_argument("--fb_poly_sigma", type=float, default=1.5) # 1.2
+    ap.add_argument("--fb_levels", type=int, default=3) #3
+    ap.add_argument("--fb_winsize", type=int, default=15) #15
+    ap.add_argument("--fb_iterations", type=int, default=3) #3
+    ap.add_argument("--fb_poly_n", type=int, default=5) # 5
+    ap.add_argument("--fb_poly_sigma", type=float, default=1.2) # 1.2
     ap.add_argument("--fb_flags", type=int, default=0)
 
     # Text bank options
@@ -724,7 +730,8 @@ def main():
     mhi_windows_str = str(_get(ckpt_args, "mhi_windows", args.mhi_windows))
     mhi_windows = [int(x) for x in mhi_windows_str.split(",") if x.strip()]
 
-    diff_threshold = float(_get(ckpt_args, "diff_threshold", args.diff_threshold))
+    # diff_threshold = float(_get(ckpt_args, "diff_threshold", args.diff_threshold))
+    diff_threshold = float(args.diff_threshold)
     flow_max_disp  = float(_get(ckpt_args, "flow_max_disp", args.flow_max_disp))
 
     if args.flow_backend == "raft_large":
