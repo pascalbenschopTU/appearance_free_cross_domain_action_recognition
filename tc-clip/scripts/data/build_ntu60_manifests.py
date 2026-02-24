@@ -17,7 +17,7 @@ from collections import defaultdict
 import random
 
 
-NTU60_ACTION_NAMES = [
+NTU120_ACTION_NAMES = [
     "drink water",
     "eat meal/snack",
     "brushing teeth",
@@ -78,6 +78,66 @@ NTU60_ACTION_NAMES = [
     "handshaking",
     "walking towards each other",
     "walking apart from each other",
+    "put on headphone",
+    "take off headphone",
+    "shoot at basket",
+    "bounce ball",
+    "tennis bat swing",
+    "juggle table tennis ball",
+    "hush (quiet)",
+    "flick hair",
+    "thumb up",
+    "thumb down",
+    "make ok sign",
+    "make victory sign",
+    "staple book",
+    "counting money",
+    "cutting nails",
+    "cutting paper (using scissors)",
+    "snapping fingers",
+    "open bottle",
+    "sniff (smell)",
+    "squat down",
+    "toss a coin",
+    "fold paper",
+    "ball up paper",
+    "play magic cube",
+    "apply cream on face",
+    "apply cream on hand back",
+    "put on bag",
+    "take off bag",
+    "put something into bag",
+    "take something out of bag",
+    "open a box",
+    "move heavy objects",
+    "shake fist",
+    "throw up cap/hat",
+    "hands up",
+    "cross arms",
+    "arm circles",
+    "arm swings",
+    "running on the spot",
+    "butt kicks (kick backward)",
+    "cross toe touch",
+    "side kick",
+    "yawn",
+    "stretch oneself",
+    "blow nose",
+    "hit other person with something",
+    "wield knife towards other person",
+    "knock over other person (hit with body)",
+    "grab other person's stuff",
+    "shoot at other person with a gun",
+    "step on foot",
+    "high-five",
+    "cheers and drink",
+    "carry something with other person",
+    "take a photo of other person",
+    "follow other person",
+    "whisper in other person's ear",
+    "exchange things with other person",
+    "support somebody with hand",
+    "finger-guessing game (rock-paper-scissors)"
 ]
 
 # Standard NTU60 splits.
@@ -165,8 +225,8 @@ def write_labels_csv(action_ids, out_path):
         w = csv.writer(f)
         w.writerow(["id", "name"])
         for i, action_id in enumerate(action_ids):
-            if 1 <= action_id <= len(NTU60_ACTION_NAMES):
-                name = NTU60_ACTION_NAMES[action_id - 1]
+            if 1 <= action_id <= len(NTU120_ACTION_NAMES):
+                name = NTU120_ACTION_NAMES[action_id - 1]
             else:
                 name = f"action_{action_id:03d}"
             w.writerow([i, name])
@@ -267,9 +327,8 @@ def main():
     if missing:
         print(f"warning_missing_actions: {missing[:10]}{'...' if len(missing) > 10 else ''}")
 
-    valid_actions = [a for a in action_ids if a in seen_actions] if seen_actions else action_ids
-    if not valid_actions:
-        valid_actions = action_ids
+    # Keep the requested action range in labels, even when some actions are missing in this root.
+    valid_actions = action_ids
     labels_out = args.labels_out
     if labels_out:
         labels_out = os.path.abspath(labels_out)
