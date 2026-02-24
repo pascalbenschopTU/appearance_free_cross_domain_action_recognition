@@ -419,11 +419,11 @@ def _parse_dataset_split_txt(txt_path: str) -> List[Tuple[str, int]]:
             ln = ln.strip()
             if not ln or ln.startswith("#"):
                 continue
-            parts = ln.split()
-            if len(parts) < 2:
+            try:
+                fname, label_str = ln.rsplit(maxsplit=1)
+            except ValueError:
                 raise ValueError(f"Bad line in {txt_path!r}: {ln!r} (expected: <filename> <label>)")
-            fname = parts[0]
-            label = int(parts[1])
+            label = int(label_str)
             items.append((fname, label))
     if not items:
         raise ValueError(f"No entries found in dataset_split_txt: {txt_path}")
@@ -454,21 +454,40 @@ def list_videos(
 
         rel_map: Dict[str, str] = {}                 # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
         stem_map: Dict[str, List[str]] = {}          # "c" (lower) -> ["/abs/.../c.zst", ...]
+        dir_stem_map: Dict[Tuple[str, str], List[str]] = {}  # ("a/b", "c") -> ["/abs/.../a/b/c.zst", ...]
 
         for p in all_vids:
             rel = p.relative_to(root).as_posix()
             rel_map[rel] = str(p)
             stem_map.setdefault(p.stem.lower(), []).append(str(p))
+            parent = p.parent.relative_to(root).as_posix().lower()
+            key = ("" if parent == "." else parent, p.stem.lower())
+            dir_stem_map.setdefault(key, []).append(str(p))
 
         paths: List[str] = []
         labels: List[int] = []
         for fname, y in txt_items:
-            # 1) Direct join root/fname (works if fname includes subdirs, or if stored at root)
-            candidate = (root / fname).resolve()
-            if candidate.exists() and candidate.is_file():
-                paths.append(str(candidate))
-                labels.append(int(y))
-                continue
+            abs_candidate = None
+            fname_path = Path(fname)
+            if fname_path.is_absolute():
+                abs_candidate = fname_path.resolve()
+                # Only short-circuit absolute entries when they already point under root.
+                # Otherwise prefer resolving to files inside root (e.g., motion features with same stems).
+                try:
+                    abs_candidate.relative_to(root)
+                    if abs_candidate.exists() and abs_candidate.is_file():
+                        paths.append(str(abs_candidate))
+                        labels.append(int(y))
+                        continue
+                except ValueError:
+                    pass
+            else:
+                # 1) Direct join root/fname (works if fname includes subdirs, or if stored at root)
+                candidate = (root / fname).resolve()
+                if candidate.exists() and candidate.is_file():
+                    paths.append(str(candidate))
+                    labels.append(int(y))
+                    continue
 
             # Normalize to forward-slash relpath for matching
             fname_norm = fname.replace("\\", "/").lstrip("./")
@@ -479,8 +498,22 @@ def list_videos(
                 labels.append(int(y))
                 continue
 
-            # 3) Stem-only match (basename without extension), case-insensitive
+            # 3) Same relative directory + same stem (ignoring extension)
             stem = Path(fname_norm).stem.lower()
+            parent = Path(fname_norm).parent.as_posix().lower()
+            key = ("" if parent == "." else parent, stem)
+            dir_hits = dir_stem_map.get(key, [])
+            if len(dir_hits) == 1:
+                paths.append(dir_hits[0])
+                labels.append(int(y))
+                continue
+            if len(dir_hits) > 1:
+                raise ValueError(
+                    f"Ambiguous dir+stem match for {fname!r} (dir={key[0]!r}, stem={stem!r}): "
+                    f"found {len(dir_hits)} files under {root_dir}."
+                )
+
+            # 4) Stem-only match (basename without extension), case-insensitive
             hits = stem_map.get(stem, [])
             if len(hits) == 1:
                 paths.append(hits[0])
@@ -491,6 +524,12 @@ def list_videos(
                     f"Ambiguous stem match for {fname!r} (stem={stem!r}): found {len(hits)} files under {root_dir}. "
                     f"Use relative paths in the txt to disambiguate."
                 )
+
+            # 5) Fallback to absolute entry when nothing under root could be matched.
+            if abs_candidate is not None and abs_candidate.exists() and abs_candidate.is_file():
+                paths.append(str(abs_candidate))
+                labels.append(int(y))
+                continue
 
             print(
                 f"[WARN] Missing file in split '{dataset_split_txt}': could not resolve {fname!r} under root_dir={root_dir!r}. "
