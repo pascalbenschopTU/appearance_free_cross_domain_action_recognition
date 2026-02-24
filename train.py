@@ -3,7 +3,12 @@ import sys
 from dataset import MotionTwoStreamZstdDataset, collate_motion, ResumableShuffleSampler
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from augment import temporal_splice_mixup
+from augment import (
+    temporal_splice_mixup,
+    soft_target_cross_entropy,
+    representation_mix_consistency_loss,
+    supervised_contrastive_loss,
+)
 from util import (
     build_warmup_cosine_scheduler,
     find_latest_ckpt,
@@ -23,130 +28,6 @@ import random
 import numpy as np
 from torch.utils.data import DataLoader
 import time
-from typing import Optional
-
-
-def soft_target_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    return -(targets.to(dtype=logits.dtype) * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-
-
-def sample_random_non_self_partners(batch_size: int, device: torch.device) -> torch.Tensor:
-    if batch_size < 2:
-        return torch.zeros((batch_size,), device=device, dtype=torch.long)
-    idx = torch.arange(batch_size, device=device)
-    partners = torch.randint(0, batch_size - 1, (batch_size,), device=device)
-    return partners + (partners >= idx).long()
-
-
-def sample_semantic_partners_in_batch(
-    labels: torch.Tensor,
-    clip_text_bank: torch.Tensor,
-    *,
-    topk: int = 1,
-    min_sim: float = -1.0,
-    class_text_sim: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    batch_size = labels.size(0)
-    if batch_size < 2:
-        return torch.zeros((batch_size,), device=labels.device, dtype=torch.long)
-
-    topk = max(1, min(int(topk), batch_size - 1))
-    fallback = sample_random_non_self_partners(batch_size, labels.device)
-
-    with torch.no_grad():
-        if class_text_sim is not None:
-            sim = class_text_sim.index_select(0, labels).index_select(1, labels).clone()
-        else:
-            t = F.normalize(clip_text_bank[labels], dim=-1).float()
-            sim = t @ t.t()
-        sim.fill_diagonal_(-float("inf"))
-        if min_sim > -1.0:
-            sim = sim.masked_fill(sim < min_sim, -float("inf"))
-        top_vals, top_idx = torch.topk(sim, k=topk, dim=1, largest=True)
-        valid_mask = torch.isfinite(top_vals)
-        valid_counts = valid_mask.sum(dim=1)
-        has_valid = valid_counts > 0
-        if not has_valid.any():
-            return fallback
-
-        rand_unit = torch.rand(batch_size, device=labels.device)
-        rand_pos = torch.floor(rand_unit * valid_counts.clamp_min(1).to(rand_unit.dtype)).long()
-        picked = top_idx[torch.arange(batch_size, device=labels.device), rand_pos]
-        partners = fallback.clone()
-        partners[has_valid] = picked[has_valid]
-        return partners
-
-
-def representation_mix_consistency_loss(
-    video_emb: torch.Tensor,
-    labels: torch.Tensor,
-    clip_text_bank: torch.Tensor,
-    *,
-    alpha: float,
-    semantic_mix: bool,
-    semantic_topk: int,
-    semantic_min_sim: float,
-    labels_soft: Optional[torch.Tensor] = None,
-    class_text_sim: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    v = F.normalize(video_emb, dim=-1).float()
-    if labels_soft is None:
-        t = clip_text_bank[labels]
-    else:
-        t = labels_soft.to(device=v.device, dtype=clip_text_bank.dtype) @ clip_text_bank
-    t = F.normalize(t, dim=-1).float()
-
-    batch_size = v.size(0)
-    if batch_size < 2:
-        return v.new_zeros(())
-
-    if semantic_mix and labels_soft is None:
-        partners = sample_semantic_partners_in_batch(
-            labels,
-            clip_text_bank,
-            topk=semantic_topk,
-            min_sim=semantic_min_sim,
-            class_text_sim=class_text_sim,
-        )
-    else:
-        partners = sample_random_non_self_partners(batch_size, v.device)
-
-    lam = torch.distributions.Beta(alpha, alpha).sample((batch_size,)).to(device=v.device, dtype=v.dtype).unsqueeze(1)
-    v_mix = F.normalize(lam * v + (1.0 - lam) * v[partners], dim=-1)
-    t_mix = F.normalize(lam * t + (1.0 - lam) * t[partners], dim=-1)
-
-    return (1.0 - (v_mix * t_mix).sum(dim=-1)).mean()
-
-
-def supervised_contrastive_loss(
-    video_emb: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    temperature: float,
-) -> torch.Tensor:
-    z = F.normalize(video_emb, dim=-1).float()
-    batch_size = z.size(0)
-    if batch_size < 2:
-        return z.new_zeros(())
-    if torch.unique(labels).numel() == batch_size:
-        return z.new_zeros(())
-
-    logits = (z @ z.t()) / max(float(temperature), 1e-6)
-    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
-
-    self_mask = torch.eye(batch_size, device=z.device, dtype=torch.bool)
-    non_self_mask = ~self_mask
-    exp_logits = torch.exp(logits) * non_self_mask
-    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
-
-    positive_mask = labels[:, None].eq(labels[None, :]) & non_self_mask
-    positive_count = positive_mask.sum(dim=1)
-    valid = positive_count > 0
-    if not valid.any():
-        return z.new_zeros(())
-
-    mean_log_prob_pos = (log_prob * positive_mask).sum(dim=1) / positive_count.clamp_min(1)
-    return -mean_log_prob_pos[valid].mean()
 
 
 def main():
@@ -160,12 +41,9 @@ def main():
     ap.add_argument("--flow_hw", type=int, default=112)
     ap.add_argument("--second_type", type=str, default="flow")
 
-    # MHI params
+    # MHI & flow params
     ap.add_argument("--mhi_windows", type=str, default="15", help="comma list, e.g. 5,25")
-
-    # Motion extraction params (metadata only when training from precomputed .zst features).
-    # eval.py will prefer these values from the checkpoint when computing motion on-the-fly.
-    ap.add_argument("--diff_threshold", type=float, default=25.0)
+    ap.add_argument("--diff_threshold", type=float, default=15.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
     ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
     ap.add_argument("--fb_levels", type=int, default=3)

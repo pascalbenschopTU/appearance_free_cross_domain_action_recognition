@@ -32,17 +32,20 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import MotionTwoStreamZstdDataset, collate_motion, VideoMotionDataset, collate_video_motion
 from model import TwoStreamI3D_CLIP
-from augment import temporal_splice_mixup
+from augment import (
+    temporal_splice_mixup,
+    mixup_batch,
+    soft_target_cross_entropy,
+    representation_mix_consistency_loss,
+)
 
 from util import (
     # training utilities
     build_clip_text_bank_and_logit_scale,
     build_warmup_cosine_scheduler,
     make_ckpt_payload,
-    # checkpoint utilities (provided by you)
     find_latest_ckpt,
     load_checkpoint,
-    # moved from eval (you said you put all functions in util)
     expand_manifest_args,            # optional; used for glob support
     extract_motion_config_from_ckpt, # ckpt arg extraction helper
 )
@@ -94,38 +97,18 @@ def get_trainable_params(model: nn.Module, extra_modules: Optional[List[nn.Modul
     return params
 
 
-def smooth_one_hot(labels: torch.Tensor, num_classes: int, smoothing: float) -> torch.Tensor:
-    if smoothing <= 0.0:
-        return F.one_hot(labels, num_classes=num_classes).float()
-    off_value = smoothing / num_classes
-    on_value = 1.0 - smoothing + off_value
-    return torch.full(
-        (labels.size(0), num_classes),
-        off_value,
-        device=labels.device,
-        dtype=torch.float32,
-    ).scatter_(1, labels.view(-1, 1), on_value)
+def _norm_label_name(name: str) -> str:
+    return str(name).strip().lower().replace("_", " ").replace("-", " ")
 
 
-def mixup_batch(
-    mhi: torch.Tensor,
-    flow: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    num_classes: int,
-    alpha: float,
-    label_smoothing: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    lam = torch.distributions.Beta(alpha, alpha).sample().to(device=labels.device, dtype=mhi.dtype)
-    rand_index = torch.randperm(labels.size(0), device=labels.device)
-
-    mhi_mix = lam * mhi + (1.0 - lam) * mhi[rand_index]
-    flow_mix = lam * flow + (1.0 - lam) * flow[rand_index]
-
-    y1 = smooth_one_hot(labels, num_classes=num_classes, smoothing=label_smoothing)
-    y2 = y1[rand_index]
-    y_mix = lam * y1 + (1.0 - lam) * y2
-    return mhi_mix, flow_mix, y_mix
+def _load_class_text_file(class_text_file: str) -> Dict[str, List[Any]]:
+    with open(class_text_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "groups" in data and isinstance(data["groups"], dict):
+        data = data["groups"]
+    if not isinstance(data, dict):
+        raise ValueError(f"Class-text file must be a dict (or have dict at 'groups'): {class_text_file}")
+    return data
 
 
 def resolve_ckpt_path(path_or_dir: str) -> str:
@@ -204,9 +187,18 @@ def eval_on_validation_split(
     device,
     logit_scale_value,
     clip_text_bank,
+    eval_class_texts=None,
     use_amp=True,
 ):
-    if clip_text_bank is not None and clip_text_bank.shape[0] != len(eval_dataset.classnames):
+    if eval_class_texts is not None:
+        clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
+            dataset_classnames=eval_dataset.classnames,
+            device=device,
+            init_temp=0.07,
+            dtype=clip_text_bank.dtype if clip_text_bank is not None else torch.float16,
+            class_texts=eval_class_texts,
+        )
+    elif clip_text_bank is not None and clip_text_bank.shape[0] != len(eval_dataset.classnames):
         print(
             f"[WARN] clip_text_bank classes ({clip_text_bank.shape[0]}) "
             f"!= eval classes ({len(eval_dataset.classnames)}); rebuilding text bank for eval.",
@@ -277,6 +269,35 @@ def append_eval_log(eval_log_path: str, entry: Dict[str, Any]) -> None:
     with open(eval_log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(_json_safe(entry)) + "\n")
 
+
+def _build_eval_class_texts_from_groups(
+    class_text_groups: Dict[str, List[Any]],
+    eval_classnames: List[str],
+    primary_classnames: List[str],
+) -> Dict[str, List[str]]:
+    groups_lower = {str(k).strip().lower(): v for k, v in class_text_groups.items()}
+    out: Dict[str, List[str]] = {}
+    for i, cname in enumerate(eval_classnames):
+        values = class_text_groups.get(cname, None)
+        if values is None:
+            values = class_text_groups.get(str(i), None)
+        if values is None:
+            values = groups_lower.get(str(cname).strip().lower(), None)
+        if values is None:
+            continue
+        prompts: List[str] = []
+        for v in values:
+            if isinstance(v, int):
+                if 0 <= v < len(primary_classnames):
+                    prompts.append(str(primary_classnames[v]))
+            elif isinstance(v, str):
+                t = v.strip()
+                if t:
+                    prompts.append(t)
+        if prompts:
+            out[cname] = prompts
+    return out
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -291,9 +312,10 @@ def main():
     ap.add_argument("--eval_root_dir", type=str, default=None)
     ap.add_argument("--eval_manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
     ap.add_argument("--eval_class_id_to_label_csv", type=str,default=None)
+    ap.add_argument("--eval_class_text_json",type=str,default=None,help="Optional JSON mapping eval classes to prompt lists (used to build eval text bank).")
 
     # Pretrained
-    ap.add_argument("-p", "--pretrained_ckpt", type=str, required=True, help="checkpoint path OR directory")
+    ap.add_argument("-p", "--pretrained_ckpt", type=str, default=None, help="checkpoint path OR directory (optional; omit for scratch training)")
 
     # If not provided, inherit from ckpt['args']
     ap.add_argument("--img_size", type=int, default=None)
@@ -301,6 +323,8 @@ def main():
     ap.add_argument("--flow_frames", type=int, default=None)
     ap.add_argument("--flow_hw", type=int, default=None)
     ap.add_argument("--mhi_windows", type=str, default=None, help="comma list, e.g. 5,25 (None -> inherit)")
+    ap.add_argument("--diff_threshold", type=float, default=15.0, help="diff threshold for mhi")
+
 
     ap.add_argument("--embed_dim", type=int, default=None)
     ap.add_argument("--fuse", type=str, default=None, choices=[None, "avg_then_proj", "concat"])
@@ -329,20 +353,27 @@ def main():
     ap.add_argument("--label_smoothing", type=float, default=0.0)
     ap.add_argument("--mixup_alpha", type=float, default=0.0)
     ap.add_argument("--mixup_prob", type=float, default=0.0)
+    ap.add_argument("--p_affine", type=float, default=0.25, help="Probability of applying geometric affine augmentation in MotionTwoStreamZstdDataset.")
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
+    ap.add_argument("--lambda_rep_mix", type=float, default=0.0, help="Weight for representation-space mix consistency loss.")
+    ap.add_argument("--rep_mix_alpha", type=float, default=0.4, help="Beta(alpha, alpha) parameter for representation-space mix.")
+    ap.add_argument("--rep_mix_semantic", action="store_true", help="Select representation-mix partners from semantically close classes within the current batch.")
+    ap.add_argument("--rep_mix_semantic_topk", type=int, default=3, help="Randomly choose among top-k semantic partners found in-batch.")
+    ap.add_argument("--rep_mix_semantic_min_sim", type=float, default=-1.0, help="Minimum cosine similarity for semantic partner candidates; values <= -1 disable filtering.")
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
     ap.add_argument("--save_every", type=int, default=200)
+    ap.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
     ap.add_argument("--seed", type=int, default=0)
 
     ap.add_argument("--out_dir", type=str, default="out/finetune")
     ap.add_argument("--tb_dir", type=str, default="runs")
     ap.add_argument("--ckpt_dir", type=str, default="checkpoints")
     ap.add_argument("--eval_dir", type=str, default="eval_out")
-    ap.add_argument("--eval_skip_epochs", type=int, default=15, help="Skip eval for the first N epochs.")
+    ap.add_argument("--eval_skip_epochs", type=int, default=5, help="Skip eval for the first N epochs.")
     ap.add_argument("--eval_every", type=int, default=1, help="Eval interval after the skip.")
 
     _default_device = (
@@ -375,11 +406,11 @@ def main():
     data_dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     # Resolve paths
-    pretrained_path = resolve_ckpt_path(args.pretrained_ckpt)
+    pretrained_path = resolve_ckpt_path(args.pretrained_ckpt) if args.pretrained_ckpt else None
     manifest_path = resolve_single_manifest(args.manifest)
 
     # Read pretrained ckpt args -> defaults
-    pretrained_ckpt_raw = torch.load(pretrained_path, map_location=device)
+    pretrained_ckpt_raw = torch.load(pretrained_path, map_location=device) if pretrained_path else {}
     ckpt_cfg = extract_motion_config_from_ckpt(pretrained_ckpt_raw)
 
     # Inherit data/model settings if not set
@@ -391,6 +422,7 @@ def main():
     mhi_windows = [int(x) for x in mhi_windows_str.split(",") if x.strip()]
     if not mhi_windows:
         raise ValueError("mhi_windows must contain at least one integer (e.g. '15' or '5,25')")
+    diff_threshold = args.diff_threshold if args.diff_threshold is not None else ckpt_cfg.diff_threshold
 
     embed_dim = args.embed_dim if args.embed_dim is not None else ckpt_cfg.embed_dim
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
@@ -403,12 +435,15 @@ def main():
         active_branch = "second"
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
+    if pretrained_path is None and args.freeze_backbone:
+        print("[WARN] --pretrained_ckpt not provided; overriding to --no_freeze_backbone for scratch training.")
+        args.freeze_backbone = False
 
     print(
         "[CONFIG] "
         f"img_size={img_size} mhi_frames={mhi_frames} flow_frames={flow_frames} flow_hw={flow_hw} "
         f"mhi_windows={mhi_windows_str} embed_dim={embed_dim} fuse={fuse} dropout={dropout} "
-        f"active_branch={active_branch} "
+        f"active_branch={active_branch} p_affine={args.p_affine} "
         f"manifest={manifest_path}"
     )
 
@@ -422,6 +457,7 @@ def main():
         mhi_windows=mhi_windows,
         out_dtype=data_dtype,
         p_hflip=0.5,
+        p_affine=args.p_affine,
         seed=args.seed,
         dataset_split_txt=manifest_path,
         class_id_to_label_csv=args.class_id_to_label_csv,
@@ -448,8 +484,8 @@ def main():
             flow_hw=ckpt_cfg.flow_hw,
             mhi_frames=ckpt_cfg.mhi_frames,
             flow_frames=ckpt_cfg.flow_frames,
-            mhi_windows=list(ckpt_cfg.mhi_windows),
-            diff_threshold=ckpt_cfg.diff_threshold,
+            mhi_windows=mhi_windows,
+            diff_threshold=diff_threshold,
             fb_params=ckpt_cfg.fb_params,
             flow_max_disp=ckpt_cfg.flow_max_disp,
             flow_normalize=True,
@@ -468,8 +504,22 @@ def main():
             collate_fn=collate_video_motion,
             drop_last=False,
         )
+        eval_class_texts = None
+        if args.eval_class_text_json:
+            class_text_groups = _load_class_text_file(args.eval_class_text_json)
+            eval_class_texts = _build_eval_class_texts_from_groups(
+                class_text_groups,
+                eval_dataset.classnames,
+                dataset.classnames,
+            )
+            print(
+                f"[EVAL] custom prompts available for {len(eval_class_texts)}/"
+                f"{len(eval_dataset.classnames)} eval classes from {args.eval_class_text_json}",
+                flush=True,
+            )
     else: 
         eval_dataloader = None
+        eval_class_texts = None
 
     # Text bank for NEW classes
     clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
@@ -478,6 +528,10 @@ def main():
         init_temp=0.07,
         dtype=data_dtype,
     )
+    class_text_sim = None
+    if args.rep_mix_semantic:
+        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+        class_text_sim = (t_norm @ t_norm.t()).detach()
     num_classes = len(dataset.classnames)
 
     # Model
@@ -487,7 +541,7 @@ def main():
         embed_dim=embed_dim,
         fuse=fuse,
         dropout=dropout,
-        init_scratch=False,
+        init_scratch=(pretrained_path is None),
         use_stems=ckpt_cfg.use_stems,
         use_nonlinear_projection=ckpt_cfg.use_nonlinear_projection,
         active_branch=active_branch,
@@ -496,14 +550,22 @@ def main():
     if args.lambda_align > 0 and not (getattr(model, "has_top", True) and getattr(model, "has_bot", True)):
         print("[WARN] lambda_align > 0 but active_branch is single-stream. Setting lambda_align=0.")
         args.lambda_align = 0.0
+    if args.lambda_rep_mix > 0 and args.rep_mix_alpha <= 0:
+        raise ValueError("--rep_mix_alpha must be > 0 when --lambda_rep_mix > 0")
+    if args.rep_mix_semantic_topk <= 0:
+        raise ValueError("--rep_mix_semantic_topk must be >= 1")
 
     # Load pretrained weights
-    pretrained_ckpt = load_pretrained_weights(
-        ckpt_path=pretrained_path,
-        device=device,
-        model=model,
-        logit_scale=logit_scale,
-    )
+    pretrained_ckpt = {}
+    if pretrained_path is not None:
+        pretrained_ckpt = load_pretrained_weights(
+            ckpt_path=pretrained_path,
+            device=device,
+            model=model,
+            logit_scale=logit_scale,
+        )
+    else:
+        print("[PRETRAIN] no checkpoint provided; model initialized from scratch.")
 
     # Freeze trunks
     if args.freeze_backbone:
@@ -539,6 +601,8 @@ def main():
 
     steps_per_epoch = len(loader)
     total_steps = steps_per_epoch * args.epochs
+    if args.max_updates > 0:
+        total_steps = min(total_steps, int(args.max_updates))
     scheduler = build_warmup_cosine_scheduler(
         opt,
         base_lr=args.lr,
@@ -565,6 +629,7 @@ def main():
             device=device,
             logit_scale_value=logit_scale().exp(),
             clip_text_bank=clip_text_bank,
+            eval_class_texts=eval_class_texts,
             use_amp=use_amp,
         )
         zero_shot_top1 = float(zero_shot_metrics["motion_only"]["top1"])
@@ -596,9 +661,16 @@ def main():
 
         run_clip = 0.0
         run_align = 0.0
+        run_rep_mix = 0.0
         n_logs = 0
 
+        step_in_epoch = -1
+        stop_training = False
         for step_in_epoch, (mhi_top, flow_bot, labels, _cnames) in enumerate(loader):
+            if args.max_updates > 0 and global_step >= int(args.max_updates):
+                stop_training = True
+                break
+
             mhi_top = mhi_top.to(device, non_blocking=True)
             flow_bot = flow_bot.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -632,23 +704,39 @@ def main():
                     )
 
                 out = model(mhi_top, flow_bot)
-
                 video = F.normalize(out["emb_fuse"], dim=-1)
                 logits = logit_scale().exp() * (video @ clip_text_bank.t())
+
                 if labels_soft is not None:
-                    log_probs = F.log_softmax(logits, dim=-1)
-                    clip_loss = -(labels_soft * log_probs).sum(dim=-1).mean()
+                    clip_loss = soft_target_cross_entropy(logits, labels_soft)
                 else:
                     clip_loss = F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
+
+                if args.lambda_rep_mix > 0:
+                    loss_rep_mix = representation_mix_consistency_loss(
+                        out["emb_fuse"],
+                        labels,
+                        clip_text_bank,
+                        alpha=args.rep_mix_alpha,
+                        semantic_mix=args.rep_mix_semantic,
+                        semantic_topk=args.rep_mix_semantic_topk,
+                        semantic_min_sim=args.rep_mix_semantic_min_sim,
+                        labels_soft=labels_soft,
+                        class_text_sim=class_text_sim,
+                    ).to(dtype=clip_loss.dtype)
+                else:
+                    loss_rep_mix = torch.zeros((), device=clip_loss.device, dtype=clip_loss.dtype)
 
                 if args.lambda_align > 0:
                     et = F.normalize(out["emb_top"], dim=-1)
                     eb = F.normalize(out["emb_bot"], dim=-1)
                     align_loss = (1.0 - (et * eb).sum(dim=-1)).mean()
-                    loss = clip_loss + args.lambda_align * align_loss
                 else:
                     align_loss = None
-                    loss = clip_loss
+
+                loss = clip_loss + args.lambda_rep_mix * loss_rep_mix
+                if align_loss is not None:
+                    loss = loss + args.lambda_align * align_loss
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -668,29 +756,39 @@ def main():
             with torch.no_grad():
                 writer.add_scalar("loss/total", float(loss.item()), global_step)
                 writer.add_scalar("loss/clip", float(clip_loss.item()), global_step)
+                writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
                 writer.add_scalar("lr", opt.param_groups[0]["lr"], global_step)
                 if align_loss is not None:
                     writer.add_scalar("loss/align", float(align_loss.item()), global_step)
 
                 run_clip += float(clip_loss.item())
                 run_align += float(align_loss.item()) if align_loss is not None else 0.0
+                run_rep_mix += float(loss_rep_mix.item())
                 n_logs += 1
 
                 if (global_step % args.log_every) == 0:
                     elapsed = time.time() - start_time
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:07d}] "
-                        f"lr={opt.param_groups[0]['lr']:.6f} clip_loss={run_clip/n_logs:.4f} "
+                        f"lr={opt.param_groups[0]['lr']:.6f} "
+                        f"clip_loss={run_clip/n_logs:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
                     if align_loss is not None:
                         msg += f" align_loss={run_align/n_logs:.4f}"
+                    if args.lambda_rep_mix > 0:
+                        msg += f" rep_mix={run_rep_mix/n_logs:.4f}"
                     print(msg, flush=True)
+
+        if stop_training:
+            print(f"[STOP] reached max_updates={args.max_updates}", flush=True)
 
         if n_logs > 0:
             msg = f"[EPOCH {epoch:03d}] clip_loss={run_clip/n_logs:.4f}"
             if args.lambda_align > 0:
                 msg += f" align_loss={run_align/n_logs:.4f}"
+            if args.lambda_rep_mix > 0:
+                msg += f" rep_mix={run_rep_mix/n_logs:.4f}"
             print(msg, flush=True)
 
         # Save best (simple)
@@ -737,6 +835,7 @@ def main():
                 device=device,
                 logit_scale_value=logit_scale().exp(),
                 clip_text_bank=clip_text_bank,
+                eval_class_texts=eval_class_texts,
                 use_amp=use_amp
             )
             top_1_acc = float(eval_metrics["motion_only"]["top1"])
@@ -763,6 +862,9 @@ def main():
                 best_top1_acc = top_1_acc
         else:
             print(f"[EPOCH {epoch:03d}] eval skipped (schedule)", flush=True)
+
+        if stop_training:
+            break
 
 
 if __name__ == "__main__":
