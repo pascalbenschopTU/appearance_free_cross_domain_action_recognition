@@ -151,9 +151,22 @@ ntu60:
     val_xview: datasets_splits/custom/ntu60_xview_val.txt
     all: datasets_splits/custom/ntu60_all_all.txt
 
+ntu120:
+  dataset_name: ntu120
+  root: /YOUR/PATH/TO/DATASET/NTU/nturgb+d_rgb
+  num_classes:
+    default: 120
+  label_files:
+    default: labels/custom/ntu120_labels.csv
+  ann_files:
+    train_xsub: datasets_splits/custom/ntu120_xsub_train.txt
+    few_shot_train_xsub: datasets_splits/custom/ntu120_xsub_k${shot}_train.txt
+    val_xsub: datasets_splits/custom/ntu120_xsub_val.txt
+    all: datasets_splits/custom/ntu120_all_all.txt
+
 ntu120_61_120:
   dataset_name: ntu120_61_120
-  root: /YOUR/PATH/TO/DATASET/NTU/nturgb+d_rgb_s018/nturgb+d_rgb
+  root: /YOUR/PATH/TO/DATASET/NTU/nturgb+d_rgb
   num_classes:
     default: 60
   label_files:

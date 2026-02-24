@@ -191,13 +191,22 @@ class VideoDataset(BaseDataset):
         video_infos = []
         with open(self.ann_file, 'r') as fin:
             for line in fin:
-                line_split = line.strip().split()
+                line = line.strip()
+                if not line:
+                    continue
                 if self.multi_class:
+                    line_split = line.split()
                     assert self.num_classes is not None
                     filename, label = line_split[0], line_split[1:]
                     label = list(map(int, label))
                 else:
-                    filename, label = line_split
+                    try:
+                        filename, label = line.rsplit(maxsplit=1)
+                    except ValueError:
+                        raise ValueError(
+                            f"Bad annotation line in {self.ann_file!r}: {line!r} "
+                            "(expected: <filename> <label>)"
+                        )
                     label = int(label)
                 if self.data_prefix is not None:
                     filename = osp.join(self.data_prefix, filename)

@@ -1,0 +1,31 @@
+{
+  "Fight": [
+    "punching/slapping other person",
+    "kicking other person",
+    "pushing other person",
+    "kicking something"
+  ],
+  "NonFight": [
+    "walking towards each other",
+    "walking apart from each other",
+    "standing up (from sitting position)",
+    "sitting down",
+    "hopping (one foot jumping)",
+    "jump up",
+    "clapping",
+    "hand waving",
+    "hugging other person",
+    "handshaking",
+    "pat on back of other person",
+    "giving something to other person",
+    "point finger at the other person",
+    "pointing to something with finger",
+    "make a phone call/answer phone",
+    "playing with phone/tablet",
+    "taking a selfie",
+    "typing on a keyboard",
+    "reading",
+    "writing",
+    "cheer up"
+  ]
+}

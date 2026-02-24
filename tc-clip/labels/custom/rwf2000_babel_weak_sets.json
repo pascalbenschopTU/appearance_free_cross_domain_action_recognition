@@ -1,0 +1,27 @@
+{
+  "Fight": [
+    "punch",
+    "jab",
+    "kick",
+    "hit",
+    "boxing",
+    "fight",
+    "fighting",
+    "punching or slapping another person",
+    "kicking other person",
+    "pushing other person"
+  ],
+  "NonFight": [
+    "walk",
+    "walking",
+    "walking together",
+    "hug",
+    "hugging",
+    "holding_hands",
+    "grab",
+    "dancing",
+    "exchange",
+    "exchanging objects",
+    "handshaking"
+  ]
+}

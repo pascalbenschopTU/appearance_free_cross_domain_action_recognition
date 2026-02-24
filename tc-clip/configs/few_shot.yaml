@@ -41,7 +41,7 @@ distributed: true
 use_cudnn: true
 opt_level: O1
 auto_resume: false
-save_freq: 5 # 10
+save_freq: 1 # 10
 save_intermediate: false
 print_freq: 50
 final_test: false

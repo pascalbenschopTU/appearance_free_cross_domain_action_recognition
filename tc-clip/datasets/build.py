@@ -83,9 +83,7 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 
-def build_train_dataloader(logger, config):
-    logger.info("Building train dataloader")
-    target_data_config = config.data.train
+def _build_single_train_dataloader(logger, config, target_data_config):
     scale_resize = int(256 / 224 * config.input_size)
     flip = False if 'ssv2' in target_data_config.dataset_name else True
 
@@ -150,9 +148,16 @@ def build_train_dataloader(logger, config):
         worker_init_fn=init_fn
     )
 
-    class_names = [class_name for i, class_name in train_data.classes]
+    class_names = [class_name for _, class_name in train_data.classes]
 
     return train_data, train_loader, class_names
+
+
+def build_train_dataloader(logger, config, target_data_config=None):
+    if target_data_config is None:
+        target_data_config = config.data.train
+    logger.info(f"Building train dataloader for {target_data_config.dataset_name}")
+    return _build_single_train_dataloader(logger, config, target_data_config)
 
 
 def build_val_dataloader(logger, config, target_data_config):
