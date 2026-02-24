@@ -1,5 +1,5 @@
 import math
-from typing import Tuple
+from typing import Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -170,6 +170,7 @@ def temporal_splice_mixup(
     label_smoothing: float = 0.0,
     y_min_frac: float = 0.35,
     y_max_frac: float = 0.65,
+    enforce_dominant: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Temporal splice mixup:
@@ -206,6 +207,13 @@ def temporal_splice_mixup(
         y_lo = y_hi = max(1, min(tm - 1, tm // 2))
 
     cut_mhi = int(torch.randint(y_lo, y_hi + 1, (1,), device=mhi.device).item())
+    if enforce_dominant:
+        # Mirror cuts to keep the anchor sample dominant, akin to lam=max(lam, 1-lam) in basic mixup.
+        if cut_mhi * 2 < tm:
+            cut_mhi = tm - cut_mhi
+        elif cut_mhi * 2 == tm and tm > 2:
+            cut_mhi = min(tm - 1, cut_mhi + 1)
+
     tf_per_tm = float(tf) / float(max(1, tm))
     cut_second = int(round(float(cut_mhi) * tf_per_tm))
     cut_second = max(1, min(tf - 1, cut_second))
@@ -228,6 +236,153 @@ def temporal_splice_mixup(
     lam = float(cut_mhi) / float(tm)
     y_mix = lam * y1 + (1.0 - lam) * y2
     return mhi_mix, second_mix, y_mix
+
+
+def mixup_batch(
+    mhi: torch.Tensor,
+    second: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    num_classes: int,
+    alpha: float,
+    label_smoothing: float,
+    enforce_dominant: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    lam = torch.distributions.Beta(alpha, alpha).sample().to(device=labels.device, dtype=mhi.dtype)
+    if enforce_dominant:
+        lam = torch.maximum(lam, 1.0 - lam)
+    rand_index = torch.randperm(labels.size(0), device=labels.device)
+
+    mhi_mix = lam * mhi + (1.0 - lam) * mhi[rand_index]
+    second_mix = lam * second + (1.0 - lam) * second[rand_index]
+
+    y1 = smooth_one_hot(labels, num_classes=num_classes, smoothing=label_smoothing)
+    y2 = y1[rand_index]
+    y_mix = lam * y1 + (1.0 - lam) * y2
+    return mhi_mix, second_mix, y_mix
+
+
+def soft_target_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return -(targets.to(dtype=logits.dtype) * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+
+
+def sample_random_non_self_partners(batch_size: int, device: torch.device) -> torch.Tensor:
+    if batch_size < 2:
+        return torch.zeros((batch_size,), device=device, dtype=torch.long)
+    idx = torch.arange(batch_size, device=device)
+    partners = torch.randint(0, batch_size - 1, (batch_size,), device=device)
+    return partners + (partners >= idx).long()
+
+
+def sample_semantic_partners_in_batch(
+    labels: torch.Tensor,
+    clip_text_bank: torch.Tensor,
+    *,
+    topk: int = 1,
+    min_sim: float = -1.0,
+    class_text_sim: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    batch_size = labels.size(0)
+    if batch_size < 2:
+        return torch.zeros((batch_size,), device=labels.device, dtype=torch.long)
+
+    topk = max(1, min(int(topk), batch_size - 1))
+    fallback = sample_random_non_self_partners(batch_size, labels.device)
+
+    with torch.no_grad():
+        if class_text_sim is not None:
+            sim = class_text_sim.index_select(0, labels).index_select(1, labels).clone()
+        else:
+            t = F.normalize(clip_text_bank[labels], dim=-1).float()
+            sim = t @ t.t()
+        sim.fill_diagonal_(-float("inf"))
+        if min_sim > -1.0:
+            sim = sim.masked_fill(sim < min_sim, -float("inf"))
+        top_vals, top_idx = torch.topk(sim, k=topk, dim=1, largest=True)
+        valid_mask = torch.isfinite(top_vals)
+        valid_counts = valid_mask.sum(dim=1)
+        has_valid = valid_counts > 0
+        if not has_valid.any():
+            return fallback
+
+        rand_unit = torch.rand(batch_size, device=labels.device)
+        rand_pos = torch.floor(rand_unit * valid_counts.clamp_min(1).to(rand_unit.dtype)).long()
+        picked = top_idx[torch.arange(batch_size, device=labels.device), rand_pos]
+        partners = fallback.clone()
+        partners[has_valid] = picked[has_valid]
+        return partners
+
+
+def representation_mix_consistency_loss(
+    video_emb: torch.Tensor,
+    labels: torch.Tensor,
+    clip_text_bank: torch.Tensor,
+    *,
+    alpha: float,
+    semantic_mix: bool,
+    semantic_topk: int,
+    semantic_min_sim: float,
+    labels_soft: Optional[torch.Tensor] = None,
+    class_text_sim: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    v = F.normalize(video_emb, dim=-1).float()
+    if labels_soft is None:
+        t = clip_text_bank[labels]
+    else:
+        t = labels_soft.to(device=v.device, dtype=clip_text_bank.dtype) @ clip_text_bank
+    t = F.normalize(t, dim=-1).float()
+
+    batch_size = v.size(0)
+    if batch_size < 2:
+        return v.new_zeros(())
+
+    if semantic_mix and labels_soft is None:
+        partners = sample_semantic_partners_in_batch(
+            labels,
+            clip_text_bank,
+            topk=semantic_topk,
+            min_sim=semantic_min_sim,
+            class_text_sim=class_text_sim,
+        )
+    else:
+        partners = sample_random_non_self_partners(batch_size, v.device)
+
+    lam = torch.distributions.Beta(alpha, alpha).sample((batch_size,)).to(device=v.device, dtype=v.dtype).unsqueeze(1)
+    v_mix = F.normalize(lam * v + (1.0 - lam) * v[partners], dim=-1)
+    t_mix = F.normalize(lam * t + (1.0 - lam) * t[partners], dim=-1)
+
+    return (1.0 - (v_mix * t_mix).sum(dim=-1)).mean()
+
+
+def supervised_contrastive_loss(
+    video_emb: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    temperature: float,
+) -> torch.Tensor:
+    z = F.normalize(video_emb, dim=-1).float()
+    batch_size = z.size(0)
+    if batch_size < 2:
+        return z.new_zeros(())
+    if torch.unique(labels).numel() == batch_size:
+        return z.new_zeros(())
+
+    logits = (z @ z.t()) / max(float(temperature), 1e-6)
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    self_mask = torch.eye(batch_size, device=z.device, dtype=torch.bool)
+    non_self_mask = ~self_mask
+    exp_logits = torch.exp(logits) * non_self_mask
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
+
+    positive_mask = labels[:, None].eq(labels[None, :]) & non_self_mask
+    positive_count = positive_mask.sum(dim=1)
+    valid = positive_count > 0
+    if not valid.any():
+        return z.new_zeros(())
+
+    mean_log_prob_pos = (log_prob * positive_mask).sum(dim=1) / positive_count.clamp_min(1)
+    return -mean_log_prob_pos[valid].mean()
 
 # ---------------------------
 # Augmentation
