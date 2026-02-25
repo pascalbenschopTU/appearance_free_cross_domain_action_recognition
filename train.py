@@ -1,6 +1,12 @@
 import json
 import sys
-from dataset import MotionTwoStreamZstdDataset, collate_motion, ResumableShuffleSampler
+from dataset import (
+    MotionTwoStreamZstdDataset,
+    RGBVideoClipDataset,
+    collate_motion,
+    collate_rgb_clip,
+    ResumableShuffleSampler,
+)
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
 from augment import (
@@ -33,6 +39,7 @@ import time
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root_dir", type=str, required=True)
+    ap.add_argument("--input_modality", type=str, default="motion", choices=["motion", "rgb"])
 
     # Two-stream input size and temporal length
     ap.add_argument("--img_size", type=int, default=224)
@@ -40,6 +47,9 @@ def main():
     ap.add_argument("--flow_frames", type=int, default=128, help="frames to produce 128 flows")
     ap.add_argument("--flow_hw", type=int, default=112)
     ap.add_argument("--second_type", type=str, default="flow")
+    ap.add_argument("--rgb_frames", type=int, default=64)
+    ap.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
+    ap.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
 
     # MHI & flow params
     ap.add_argument("--mhi_windows", type=str, default="15", help="comma list, e.g. 5,25")
@@ -128,34 +138,63 @@ def main():
     device = torch.device(args.device)
 
     mhi_windows = [int(x) for x in args.mhi_windows.split(",") if x.strip()]
-    in_ch_mhi = len(mhi_windows)
-    if in_ch_mhi <= 0:
-        raise ValueError("mhi_windows must contain at least one integer, e.g. '5,25'")
     second_type = args.second_type.lower()
     in_ch_second = 1 if second_type in ("dphase", "phase") else 2
 
-    # Dataset / loader (frames are resized to img_size here)
-    dataset = MotionTwoStreamZstdDataset(
-        root_dir=args.root_dir,
-        img_size=args.img_size,
-        flow_hw=args.flow_hw,
-        mhi_frames=args.mhi_frames,
-        flow_frames=args.flow_frames,
-        mhi_windows=mhi_windows,
-        out_dtype=torch.float16,
-        in_ch_second=in_ch_second,
-        p_hflip=args.probability_hflip,
-        p_max_drop_frame=args.max_probability_drop_frame,
-        p_affine=args.probability_affine,
-        seed=args.seed,
-    )
+    if args.input_modality == "rgb":
+        if args.active_branch != "first":
+            print(f"[WARN] input_modality=rgb requires active_branch=first; overriding '{args.active_branch}' -> 'first'.")
+            args.active_branch = "first"
+        if args.compute_second_only:
+            raise ValueError("input_modality=rgb is incompatible with --compute_second_only/active_branch=second")
+        if (
+            args.probability_hflip != 0.5
+            or args.max_probability_drop_frame > 0
+            or args.probability_affine > 0
+        ):
+            print(
+                "[WARN] Motion-only augmentation flags are ignored for input_modality=rgb: "
+                "--probability_hflip, --max_probability_drop_frame, --probability_affine.",
+                flush=True,
+            )
+        in_ch_mhi = 3
+        dataset = RGBVideoClipDataset(
+            root_dir=args.root_dir,
+            rgb_frames=args.rgb_frames,
+            img_size=args.img_size,
+            sampling_mode=args.rgb_sampling,
+            rgb_norm=args.rgb_norm,
+            out_dtype=torch.float16,
+            seed=args.seed,
+        )
+        collate_fn = collate_rgb_clip
+    else:
+        in_ch_mhi = len(mhi_windows)
+        if in_ch_mhi <= 0:
+            raise ValueError("mhi_windows must contain at least one integer, e.g. '5,25'")
+        dataset = MotionTwoStreamZstdDataset(
+            root_dir=args.root_dir,
+            img_size=args.img_size,
+            flow_hw=args.flow_hw,
+            mhi_frames=args.mhi_frames,
+            flow_frames=args.flow_frames,
+            mhi_windows=mhi_windows,
+            out_dtype=torch.float16,
+            in_ch_second=in_ch_second,
+            p_hflip=args.probability_hflip,
+            p_max_drop_frame=args.max_probability_drop_frame,
+            p_affine=args.probability_affine,
+            seed=args.seed,
+        )
+        collate_fn = collate_motion
+
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_motion,
+        collate_fn=collate_fn,
         drop_last=True,
     )
     
@@ -213,7 +252,7 @@ def main():
         model = TwoStreamE2S_X3D_CLIP(
             mhi_channels=in_ch_mhi,
             flow_channels=in_ch_second,
-            mhi_frames=args.mhi_frames,
+            mhi_frames=args.rgb_frames if args.input_modality == "rgb" else args.mhi_frames,
             flow_frames=args.flow_frames,
             img_size=args.img_size,
             flow_hw=args.flow_hw,

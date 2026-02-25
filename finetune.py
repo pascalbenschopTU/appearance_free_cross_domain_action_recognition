@@ -30,7 +30,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import MotionTwoStreamZstdDataset, collate_motion, VideoMotionDataset, collate_video_motion
+from dataset import (
+    MotionTwoStreamZstdDataset,
+    RGBVideoClipDataset,
+    collate_motion,
+    collate_rgb_clip,
+    VideoMotionDataset,
+    collate_video_motion,
+)
 from model import TwoStreamI3D_CLIP
 from augment import (
     temporal_splice_mixup,
@@ -309,6 +316,8 @@ def main():
     ap.add_argument("-r", "--root_dir", type=str, required=True)
     ap.add_argument("-m", "--manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
     ap.add_argument("-c", "--class_id_to_label_csv", type=str, default=None)
+    ap.add_argument("--train_modality", type=str, default="motion", choices=["motion", "rgb"])
+    ap.add_argument("--eval_modality", type=str, default="motion", choices=["motion", "rgb"])
     ap.add_argument("--eval_root_dir", type=str, default=None)
     ap.add_argument("--eval_manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
     ap.add_argument("--eval_class_id_to_label_csv", type=str,default=None)
@@ -324,6 +333,9 @@ def main():
     ap.add_argument("--flow_hw", type=int, default=None)
     ap.add_argument("--mhi_windows", type=str, default=None, help="comma list, e.g. 5,25 (None -> inherit)")
     ap.add_argument("--diff_threshold", type=float, default=15.0, help="diff threshold for mhi")
+    ap.add_argument("--rgb_frames", type=int, default=64)
+    ap.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
+    ap.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
 
 
     ap.add_argument("--embed_dim", type=int, default=None)
@@ -428,11 +440,20 @@ def main():
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
     if args.fuse is None: args.fuse = fuse
     dropout = args.dropout if args.dropout is not None else ckpt_cfg.dropout
+    train_modality = str(args.train_modality).lower()
+    eval_modality = str(args.eval_modality).lower()
     active_branch = args.active_branch if args.active_branch is not None else ckpt_cfg.active_branch
     if args.compute_second_only:
         if args.active_branch not in (None, "second"):
             raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
         active_branch = "second"
+    if train_modality == "rgb" or (args.eval_root_dir is not None and eval_modality == "rgb"):
+        if active_branch != "first":
+            print(
+                f"[WARN] RGB modality requires active_branch=first; overriding '{active_branch}' -> 'first'.",
+                flush=True,
+            )
+        active_branch = "first"
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
     if pretrained_path is None and args.freeze_backbone:
@@ -443,32 +464,51 @@ def main():
         "[CONFIG] "
         f"img_size={img_size} mhi_frames={mhi_frames} flow_frames={flow_frames} flow_hw={flow_hw} "
         f"mhi_windows={mhi_windows_str} embed_dim={embed_dim} fuse={fuse} dropout={dropout} "
-        f"active_branch={active_branch} p_affine={args.p_affine} "
-        f"manifest={manifest_path}"
+        f"active_branch={active_branch} train_modality={train_modality} eval_modality={eval_modality} "
+        f"rgb_frames={args.rgb_frames} rgb_sampling={args.rgb_sampling} rgb_norm={args.rgb_norm} "
+        f"p_affine={args.p_affine} manifest={manifest_path}"
     )
 
     # Dataset (uses dataset_split_txt directly)
-    dataset = MotionTwoStreamZstdDataset(
-        root_dir=args.root_dir,
-        img_size=img_size,
-        flow_hw=flow_hw,
-        mhi_frames=mhi_frames,
-        flow_frames=flow_frames,
-        mhi_windows=mhi_windows,
-        out_dtype=data_dtype,
-        p_hflip=0.5,
-        p_affine=args.p_affine,
-        seed=args.seed,
-        dataset_split_txt=manifest_path,
-        class_id_to_label_csv=args.class_id_to_label_csv,
-    )
+    if train_modality == "rgb":
+        if args.p_affine > 0:
+            print("[WARN] --p_affine is motion-only; ignored for --train_modality rgb.", flush=True)
+        dataset = RGBVideoClipDataset(
+            root_dir=args.root_dir,
+            rgb_frames=args.rgb_frames,
+            img_size=img_size,
+            sampling_mode=args.rgb_sampling,
+            dataset_split_txt=manifest_path,
+            class_id_to_label_csv=args.class_id_to_label_csv,
+            rgb_norm=args.rgb_norm,
+            out_dtype=data_dtype,
+            seed=args.seed,
+        )
+        train_collate_fn = collate_rgb_clip
+    else:
+        dataset = MotionTwoStreamZstdDataset(
+            root_dir=args.root_dir,
+            img_size=img_size,
+            flow_hw=flow_hw,
+            mhi_frames=mhi_frames,
+            flow_frames=flow_frames,
+            mhi_windows=mhi_windows,
+            out_dtype=data_dtype,
+            p_hflip=0.5,
+            p_affine=args.p_affine,
+            seed=args.seed,
+            dataset_split_txt=manifest_path,
+            class_id_to_label_csv=args.class_id_to_label_csv,
+        )
+        train_collate_fn = collate_motion
+
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
-        collate_fn=collate_motion,
+        collate_fn=train_collate_fn,
         drop_last=True,
     )
 
@@ -478,21 +518,36 @@ def main():
             if args.eval_class_id_to_label_csv is not None
             else args.class_id_to_label_csv
         )
-        eval_dataset = VideoMotionDataset(
-            args.eval_root_dir,
-            img_size=ckpt_cfg.img_size,
-            flow_hw=ckpt_cfg.flow_hw,
-            mhi_frames=ckpt_cfg.mhi_frames,
-            flow_frames=ckpt_cfg.flow_frames,
-            mhi_windows=mhi_windows,
-            diff_threshold=diff_threshold,
-            fb_params=ckpt_cfg.fb_params,
-            flow_max_disp=ckpt_cfg.flow_max_disp,
-            flow_normalize=True,
-            out_dtype=data_dtype,
-            dataset_split_txt=args.eval_manifest,
-            class_id_to_label_csv=eval_class_id_to_label_csv,
-        )
+        if eval_modality == "rgb":
+            eval_dataset = RGBVideoClipDataset(
+                root_dir=args.eval_root_dir,
+                rgb_frames=args.rgb_frames,
+                img_size=img_size,
+                sampling_mode=args.rgb_sampling,
+                dataset_split_txt=args.eval_manifest,
+                class_id_to_label_csv=eval_class_id_to_label_csv,
+                rgb_norm=args.rgb_norm,
+                out_dtype=data_dtype,
+                seed=args.seed,
+            )
+            eval_collate_fn = collate_rgb_clip
+        else:
+            eval_dataset = VideoMotionDataset(
+                args.eval_root_dir,
+                img_size=ckpt_cfg.img_size,
+                flow_hw=ckpt_cfg.flow_hw,
+                mhi_frames=ckpt_cfg.mhi_frames,
+                flow_frames=ckpt_cfg.flow_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=diff_threshold,
+                fb_params=ckpt_cfg.fb_params,
+                flow_max_disp=ckpt_cfg.flow_max_disp,
+                flow_normalize=True,
+                out_dtype=data_dtype,
+                dataset_split_txt=args.eval_manifest,
+                class_id_to_label_csv=eval_class_id_to_label_csv,
+            )
+            eval_collate_fn = collate_video_motion
         eval_subset = make_fixed_subset(eval_dataset, k=400, seed=args.seed)
 
         eval_dataloader = DataLoader(
@@ -501,7 +556,7 @@ def main():
             shuffle=False,
             num_workers=args.num_workers,
             pin_memory=(device.type == "cuda"),
-            collate_fn=collate_video_motion,
+            collate_fn=eval_collate_fn,
             drop_last=False,
         )
         eval_class_texts = None
@@ -535,8 +590,9 @@ def main():
     num_classes = len(dataset.classnames)
 
     # Model
+    model_first_channels = 3 if train_modality == "rgb" else len(mhi_windows)
     model = TwoStreamI3D_CLIP(
-        mhi_channels=len(mhi_windows),
+        mhi_channels=model_first_channels,
         second_channels=ckpt_cfg.second_channels,
         embed_dim=embed_dim,
         fuse=fuse,
@@ -812,11 +868,16 @@ def main():
             "global_step": pretrained_ckpt.get("global_step", None),
         }
         payload["data_cfg"] = {
+            "train_modality": train_modality,
+            "eval_modality": eval_modality,
             "img_size": img_size,
             "mhi_frames": mhi_frames,
             "flow_frames": flow_frames,
             "flow_hw": flow_hw,
             "mhi_windows": mhi_windows,
+            "rgb_frames": int(args.rgb_frames),
+            "rgb_sampling": args.rgb_sampling,
+            "rgb_norm": args.rgb_norm,
             "manifest": manifest_path,
         }
 

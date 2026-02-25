@@ -46,7 +46,14 @@ from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 from util import build_text_bank, LogitScale
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from dataset import VideoMotionDataset, collate_video_motion, VideoMHIFramesDataset, raft_flow_from_paired_frames_batched
+from dataset import (
+    RGBVideoClipDataset,
+    collate_rgb_clip,
+    VideoMotionDataset,
+    collate_video_motion,
+    VideoMHIFramesDataset,
+    raft_flow_from_paired_frames_batched,
+)
 
 
 try:
@@ -608,6 +615,7 @@ def main():
     ap.add_argument("--ckpt", type=str, required=True)
     ap.add_argument("--out_dir", type=str, default="eval_out")
     ap.add_argument("--manifests", type=str, nargs="*", default=None, help="evaluation splits")
+    ap.add_argument("--input_modality", type=str, default="motion", choices=["motion", "rgb"])
 
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--batch_size", type=int, default=8)
@@ -622,6 +630,9 @@ def main():
     ap.add_argument("--mhi_windows", type=str, default="15")
     ap.add_argument("--diff_threshold", type=float, default=15.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
+    ap.add_argument("--model_rgb_frames", type=int, default=64)
+    ap.add_argument("--model_rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
+    ap.add_argument("--model_rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
     ap.add_argument(
         "--flow_backend",
         type=str,
@@ -714,6 +725,13 @@ def main():
         if args.active_branch not in (None, "second"):
             raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
         active_branch = "second"
+    if args.input_modality == "rgb":
+        if active_branch != "first":
+            print(
+                f"[WARN] input_modality=rgb requires active_branch=first; overriding '{active_branch}' -> 'first'.",
+                flush=True,
+            )
+        active_branch = "first"
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
     use_nonlinear_projection = bool(_get(ckpt_args, "use_nonlinear_projection", False))
@@ -734,15 +752,23 @@ def main():
     diff_threshold = float(args.diff_threshold)
     flow_max_disp  = float(_get(ckpt_args, "flow_max_disp", args.flow_max_disp))
 
-    if args.flow_backend == "raft_large":
-        if device.type != "cuda":
-            raise RuntimeError("--flow_backend raft_large requires CUDA for practical runtime.")
-        if flow_hw < 128 or (flow_hw % 8) != 0:
-            raise ValueError(
-                f"flow_hw must be >=128 and divisible by 8 for raft_large. Got flow_hw={flow_hw}."
-            )
+    if args.input_modality == "motion":
+        if args.flow_backend == "raft_large":
+            if device.type != "cuda":
+                raise RuntimeError("--flow_backend raft_large requires CUDA for practical runtime.")
+            if flow_hw < 128 or (flow_hw % 8) != 0:
+                raise ValueError(
+                    f"flow_hw must be >=128 and divisible by 8 for raft_large. Got flow_hw={flow_hw}."
+                )
+            if args.roi_mode != "none":
+                raise ValueError("--roi_mode is currently only supported with --flow_backend farneback.")
+    else:
+        if args.flow_backend != "farneback":
+            print("[WARN] flow backend options are motion-only; forcing --flow_backend farneback in rgb mode.", flush=True)
+            args.flow_backend = "farneback"
         if args.roi_mode != "none":
-            raise ValueError("--roi_mode is currently only supported with --flow_backend farneback.")
+            print("[WARN] --roi_mode is motion-only; ignored in rgb mode.", flush=True)
+            args.roi_mode = "none"
 
     # ---- farneback params ----
     fb_params = dict(
@@ -764,7 +790,11 @@ def main():
         p.requires_grad_(False)
 
     templates = CLIP_TEMPLATES
-    raft_model = build_raft_large(str(device)) if args.flow_backend == "raft_large" else None
+    raft_model = (
+        build_raft_large(str(device))
+        if args.input_modality == "motion" and args.flow_backend == "raft_large"
+        else None
+    )
 
     class_texts = None
     if args.class_text_json.strip():
@@ -776,9 +806,10 @@ def main():
     # -----------------------------
     # Load checkpoint + motion model
     # -----------------------------
+    model_first_channels = 3 if args.input_modality == "rgb" else len(mhi_windows)
     if selected_model == "i3d":
         model = TwoStreamI3D_CLIP(
-            mhi_channels=len(mhi_windows), 
+            mhi_channels=model_first_channels, 
             second_channels=second_channels,
             embed_dim=embed_dim, 
             fuse=fuse, 
@@ -790,9 +821,9 @@ def main():
     elif selected_model == "x3d":
         print("selected x3d model", flush=True)
         model = TwoStreamE2S_X3D_CLIP(
-            mhi_channels=len(mhi_windows),
+            mhi_channels=model_first_channels,
             flow_channels=second_channels,
-            mhi_frames=mhi_frames,
+            mhi_frames=args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames,
             flow_frames=flow_frames,
             img_size=img_size,
             flow_hw=flow_hw,
@@ -839,43 +870,56 @@ def main():
         split_out_dir = args.out_dir if not multi_split else os.path.join(args.out_dir, split_name)
         os.makedirs(split_out_dir, exist_ok=True)
 
-        if args.flow_backend == "raft_large":
-            dataset = VideoMHIFramesDataset(
-                args.root_dir,
+        if args.input_modality == "rgb":
+            dataset = RGBVideoClipDataset(
+                root_dir=args.root_dir,
+                rgb_frames=args.model_rgb_frames,
                 img_size=img_size,
-                flow_hw=flow_hw,
-                mhi_frames=mhi_frames,
-                flow_pairs=flow_frames,
-                mhi_windows=mhi_windows,
-                diff_threshold=diff_threshold,
-                out_mhi_dtype=torch.float16,
+                sampling_mode=args.model_rgb_sampling,
                 dataset_split_txt=manifest_path,
                 class_id_to_label_csv=args.class_id_to_label_csv,
+                rgb_norm=args.model_rgb_norm,
+                out_dtype=torch.float16 if device.type == "cuda" else torch.float32,
             )
+            collate_fn = collate_rgb_clip
         else:
-            dataset = VideoMotionDataset(
-                args.root_dir,
-                img_size=img_size,
-                flow_hw=flow_hw,
-                mhi_frames=mhi_frames,
-                flow_frames=flow_frames,
-                mhi_windows=mhi_windows,
-                diff_threshold=diff_threshold,
-                fb_params=fb_params,
-                flow_max_disp=flow_max_disp,
-                flow_normalize=True,
-                roi_mode=args.roi_mode,
-                roi_stride=max(1, int(args.roi_stride)),
-                motion_roi_threshold=args.motion_roi_threshold,
-                motion_roi_min_area=int(args.motion_roi_min_area),
-                yolo_model=args.yolo_model,
-                yolo_conf=float(args.yolo_conf),
-                yolo_device=args.yolo_device,
-                out_dtype=torch.float16,
-                dataset_split_txt=manifest_path,
-                class_id_to_label_csv=args.class_id_to_label_csv,
-            )
-        collate_fn = collate_video_motion
+            if args.flow_backend == "raft_large":
+                dataset = VideoMHIFramesDataset(
+                    args.root_dir,
+                    img_size=img_size,
+                    flow_hw=flow_hw,
+                    mhi_frames=mhi_frames,
+                    flow_pairs=flow_frames,
+                    mhi_windows=mhi_windows,
+                    diff_threshold=diff_threshold,
+                    out_mhi_dtype=torch.float16,
+                    dataset_split_txt=manifest_path,
+                    class_id_to_label_csv=args.class_id_to_label_csv,
+                )
+            else:
+                dataset = VideoMotionDataset(
+                    args.root_dir,
+                    img_size=img_size,
+                    flow_hw=flow_hw,
+                    mhi_frames=mhi_frames,
+                    flow_frames=flow_frames,
+                    mhi_windows=mhi_windows,
+                    diff_threshold=diff_threshold,
+                    fb_params=fb_params,
+                    flow_max_disp=flow_max_disp,
+                    flow_normalize=True,
+                    roi_mode=args.roi_mode,
+                    roi_stride=max(1, int(args.roi_stride)),
+                    motion_roi_threshold=args.motion_roi_threshold,
+                    motion_roi_min_area=int(args.motion_roi_min_area),
+                    yolo_model=args.yolo_model,
+                    yolo_conf=float(args.yolo_conf),
+                    yolo_device=args.yolo_device,
+                    out_dtype=torch.float16,
+                    dataset_split_txt=manifest_path,
+                    class_id_to_label_csv=args.class_id_to_label_csv,
+                )
+            collate_fn = collate_video_motion
 
         dataloader = DataLoader(
             dataset,
@@ -919,11 +963,15 @@ def main():
             "num_samples": int(len(dataset)),
             "num_classes": int(num_classes),
             "classnames": classnames,
+            "input_modality": args.input_modality,
             "use_heads": parse_list(args.use_heads),
             "head_weights": parse_floats(args.head_weights),
             "active_branch": active_branch,
             "flow_backend": args.flow_backend,
             "raft_flow_clip": float(args.raft_flow_clip),
+            "model_rgb_frames": int(args.model_rgb_frames),
+            "model_rgb_sampling": args.model_rgb_sampling,
+            "model_rgb_norm": args.model_rgb_norm,
             "logit_scale_motion": float(scale_motion),
             "rgb_frames": int(args.rgb_frames),
             "rgb_sampling": args.rgb_sampling,
