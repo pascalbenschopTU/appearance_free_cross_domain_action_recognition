@@ -185,6 +185,27 @@ def make_fixed_subset(dataset, k=100, seed=42):
     idx = torch.randperm(len(dataset), generator=g)[:k].tolist()
     return Subset(dataset, idx)
 
+
+def maybe_make_fixed_subset(dataset, subset_size: int, seed: int):
+    if subset_size is None or int(subset_size) <= 0 or len(dataset) <= int(subset_size):
+        return dataset
+    return make_fixed_subset(dataset, k=int(subset_size), seed=seed)
+
+
+def build_fb_params(args, ckpt_cfg) -> Dict[str, Any]:
+    def _pick(v, fallback):
+        return fallback if v is None else v
+
+    return dict(
+        pyr_scale=float(_pick(args.fb_pyr_scale, ckpt_cfg.fb_pyr_scale)),
+        levels=int(_pick(args.fb_levels, ckpt_cfg.fb_levels)),
+        winsize=int(_pick(args.fb_winsize, ckpt_cfg.fb_winsize)),
+        iterations=int(_pick(args.fb_iterations, ckpt_cfg.fb_iterations)),
+        poly_n=int(_pick(args.fb_poly_n, ckpt_cfg.fb_poly_n)),
+        poly_sigma=float(_pick(args.fb_poly_sigma, ckpt_cfg.fb_poly_sigma)),
+        flags=int(_pick(args.fb_flags, ckpt_cfg.fb_flags)),
+    )
+
 def eval_on_validation_split(
     *,
     args,
@@ -196,6 +217,9 @@ def eval_on_validation_split(
     clip_text_bank,
     eval_class_texts=None,
     use_amp=True,
+    split_tag: str = "validation",
+    root_dir: Optional[str] = None,
+    manifest_path: Optional[str] = None,
 ):
     if eval_class_texts is not None:
         clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
@@ -219,9 +243,9 @@ def eval_on_validation_split(
         )
 
     base_json = {
-        "root_dir": args.root_dir,
-        "split": "validation",
-        "manifest": (os.path.abspath(args.eval_manifest) if args.eval_manifest else None),
+        "root_dir": root_dir if root_dir is not None else args.root_dir,
+        "split": split_tag,
+        "manifest": (os.path.abspath(manifest_path) if manifest_path else None),
         "num_samples": int(len(eval_dataset)),
         "num_classes": int(len(eval_dataset.classnames)),
         "classnames": eval_dataset.classnames,
@@ -317,11 +341,20 @@ def main():
     ap.add_argument("-m", "--manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
     ap.add_argument("-c", "--class_id_to_label_csv", type=str, default=None)
     ap.add_argument("--train_modality", type=str, default="motion", choices=["motion", "rgb"])
-    ap.add_argument("--eval_modality", type=str, default="motion", choices=["motion", "rgb"])
-    ap.add_argument("--eval_root_dir", type=str, default=None)
-    ap.add_argument("--eval_manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
-    ap.add_argument("--eval_class_id_to_label_csv", type=str,default=None)
-    ap.add_argument("--eval_class_text_json",type=str,default=None,help="Optional JSON mapping eval classes to prompt lists (used to build eval text bank).")
+    ap.add_argument("--val_modality", type=str, default="motion", choices=["motion", "rgb"])
+    ap.add_argument("--motion_data_source", type=str,default="zstd",choices=["zstd", "video"], help="For --train_modality motion: 'zstd' loads precomputed motion tensors, 'video' computes MHI+flow on-the-fly.")
+    ap.add_argument("--val_root_dir", type=str, default=None)
+    ap.add_argument("--val_manifest", type=str, default=None, help="ONE validation split manifest (file or glob). Optional.")
+    ap.add_argument("--val_class_id_to_label_csv", type=str, default=None)
+    ap.add_argument("--val_class_text_json", type=str, default=None, help="Optional JSON mapping validation classes to prompt lists.")
+    ap.add_argument("--val_subset_size", type=int, default=400, help="Use a fixed random subset for validation if >0; <=0 means full split.")
+    # Backward-compatible aliases (deprecated)
+    ap.add_argument("--eval_modality", type=str, default=None, choices=["motion", "rgb"], help=argparse.SUPPRESS)
+    ap.add_argument("--eval_root_dir", type=str, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--eval_manifest", type=str, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--eval_class_id_to_label_csv", type=str, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--eval_class_text_json", type=str, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--eval_subset_size", type=int, default=None, help=argparse.SUPPRESS)
 
     # Pretrained
     ap.add_argument("-p", "--pretrained_ckpt", type=str, default=None, help="checkpoint path OR directory (optional; omit for scratch training)")
@@ -333,6 +366,23 @@ def main():
     ap.add_argument("--flow_hw", type=int, default=None)
     ap.add_argument("--mhi_windows", type=str, default=None, help="comma list, e.g. 5,25 (None -> inherit)")
     ap.add_argument("--diff_threshold", type=float, default=15.0, help="diff threshold for mhi")
+    ap.add_argument("--flow_max_disp", type=float, default=None, help="Clip flow to [-x, x] before model input.")
+    ap.add_argument("--flow_normalize", action="store_true", default=True, help="Normalize flow by --flow_max_disp.")
+    ap.add_argument("--no_flow_normalize", action="store_false", dest="flow_normalize")
+    ap.add_argument("--fb_pyr_scale", type=float, default=None)
+    ap.add_argument("--fb_levels", type=int, default=None)
+    ap.add_argument("--fb_winsize", type=int, default=None)
+    ap.add_argument("--fb_iterations", type=int, default=None)
+    ap.add_argument("--fb_poly_n", type=int, default=None)
+    ap.add_argument("--fb_poly_sigma", type=float, default=None)
+    ap.add_argument("--fb_flags", type=int, default=None)
+    ap.add_argument("--roi_mode", type=str, default="none", choices=["none", "largest_motion", "yolo_person"])
+    ap.add_argument("--roi_stride", type=int, default=3)
+    ap.add_argument("--motion_roi_threshold", type=float, default=None)
+    ap.add_argument("--motion_roi_min_area", type=int, default=64)
+    ap.add_argument("--yolo_model", type=str, default="yolo11n.pt")
+    ap.add_argument("--yolo_conf", type=float, default=0.25)
+    ap.add_argument("--yolo_device", type=str, default=None)
     ap.add_argument("--rgb_frames", type=int, default=64)
     ap.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
     ap.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
@@ -385,8 +435,13 @@ def main():
     ap.add_argument("--tb_dir", type=str, default="runs")
     ap.add_argument("--ckpt_dir", type=str, default="checkpoints")
     ap.add_argument("--eval_dir", type=str, default="eval_out")
-    ap.add_argument("--eval_skip_epochs", type=int, default=5, help="Skip eval for the first N epochs.")
-    ap.add_argument("--eval_every", type=int, default=1, help="Eval interval after the skip.")
+    ap.add_argument("--val_skip_epochs", type=int, default=5, help="Skip validation for the first N epochs.")
+    ap.add_argument("--val_every", type=int, default=1, help="Validation interval after the skip.")
+    ap.add_argument("--early_stop_patience", type=int, default=0, help="Stop if validation top1 does not improve for N validation checks (0 disables).")
+    ap.add_argument("--early_stop_min_delta", type=float, default=0.0, help="Minimum top1 improvement required to reset early stopping counter.")
+    # Backward-compatible aliases (deprecated)
+    ap.add_argument("--eval_skip_epochs", type=int, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--eval_every", type=int, default=None, help=argparse.SUPPRESS)
 
     _default_device = (
         "mps"
@@ -398,6 +453,25 @@ def main():
     ap.add_argument("--device", type=str, default=_default_device)
 
     args = ap.parse_args()
+
+    # Resolve deprecated eval_* aliases into val_*.
+    if args.eval_modality is not None:
+        args.val_modality = args.eval_modality
+    if args.val_root_dir is None and args.eval_root_dir is not None:
+        args.val_root_dir = args.eval_root_dir
+    if args.val_manifest is None and args.eval_manifest is not None:
+        args.val_manifest = args.eval_manifest
+    if args.val_class_id_to_label_csv is None and args.eval_class_id_to_label_csv is not None:
+        args.val_class_id_to_label_csv = args.eval_class_id_to_label_csv
+    if args.val_class_text_json is None and args.eval_class_text_json is not None:
+        args.val_class_text_json = args.eval_class_text_json
+    if args.eval_subset_size is not None:
+        args.val_subset_size = args.eval_subset_size
+    if args.eval_skip_epochs is not None:
+        args.val_skip_epochs = args.eval_skip_epochs
+    if args.eval_every is not None:
+        args.val_every = args.eval_every
+
     print(args)
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -420,6 +494,7 @@ def main():
     # Resolve paths
     pretrained_path = resolve_ckpt_path(args.pretrained_ckpt) if args.pretrained_ckpt else None
     manifest_path = resolve_single_manifest(args.manifest)
+    val_manifest_path = resolve_single_manifest(args.val_manifest) if args.val_manifest else None
 
     # Read pretrained ckpt args -> defaults
     pretrained_ckpt_raw = torch.load(pretrained_path, map_location=device) if pretrained_path else {}
@@ -435,19 +510,21 @@ def main():
     if not mhi_windows:
         raise ValueError("mhi_windows must contain at least one integer (e.g. '15' or '5,25')")
     diff_threshold = args.diff_threshold if args.diff_threshold is not None else ckpt_cfg.diff_threshold
+    flow_max_disp = args.flow_max_disp if args.flow_max_disp is not None else ckpt_cfg.flow_max_disp
+    fb_params = build_fb_params(args, ckpt_cfg)
 
     embed_dim = args.embed_dim if args.embed_dim is not None else ckpt_cfg.embed_dim
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
     if args.fuse is None: args.fuse = fuse
     dropout = args.dropout if args.dropout is not None else ckpt_cfg.dropout
     train_modality = str(args.train_modality).lower()
-    eval_modality = str(args.eval_modality).lower()
+    val_modality = str(args.val_modality).lower()
     active_branch = args.active_branch if args.active_branch is not None else ckpt_cfg.active_branch
     if args.compute_second_only:
         if args.active_branch not in (None, "second"):
             raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
         active_branch = "second"
-    if train_modality == "rgb" or (args.eval_root_dir is not None and eval_modality == "rgb"):
+    if train_modality == "rgb" or (args.val_root_dir is not None and val_modality == "rgb"):
         if active_branch != "first":
             print(
                 f"[WARN] RGB modality requires active_branch=first; overriding '{active_branch}' -> 'first'.",
@@ -459,14 +536,24 @@ def main():
     if pretrained_path is None and args.freeze_backbone:
         print("[WARN] --pretrained_ckpt not provided; overriding to --no_freeze_backbone for scratch training.")
         args.freeze_backbone = False
+    if train_modality == "motion" and args.motion_data_source == "video" and ckpt_cfg.second_channels != 2:
+        raise ValueError(
+            "On-the-fly video mode currently provides 2-channel optical flow only. "
+            "Use a flow checkpoint/config (second_type=flow)."
+        )
+    if train_modality == "rgb" and args.motion_data_source != "zstd":
+        print("[WARN] --motion_data_source is motion-only; forcing to 'zstd' for rgb training.", flush=True)
+        args.motion_data_source = "zstd"
 
     print(
         "[CONFIG] "
         f"img_size={img_size} mhi_frames={mhi_frames} flow_frames={flow_frames} flow_hw={flow_hw} "
         f"mhi_windows={mhi_windows_str} embed_dim={embed_dim} fuse={fuse} dropout={dropout} "
-        f"active_branch={active_branch} train_modality={train_modality} eval_modality={eval_modality} "
+        f"active_branch={active_branch} train_modality={train_modality} val_modality={val_modality} "
         f"rgb_frames={args.rgb_frames} rgb_sampling={args.rgb_sampling} rgb_norm={args.rgb_norm} "
-        f"p_affine={args.p_affine} manifest={manifest_path}"
+        f"motion_data_source={args.motion_data_source} p_affine={args.p_affine} "
+        f"diff_threshold={diff_threshold} flow_max_disp={flow_max_disp} fb_params={fb_params} "
+        f"manifest={manifest_path}"
     )
 
     # Dataset (uses dataset_split_txt directly)
@@ -486,21 +573,51 @@ def main():
         )
         train_collate_fn = collate_rgb_clip
     else:
-        dataset = MotionTwoStreamZstdDataset(
-            root_dir=args.root_dir,
-            img_size=img_size,
-            flow_hw=flow_hw,
-            mhi_frames=mhi_frames,
-            flow_frames=flow_frames,
-            mhi_windows=mhi_windows,
-            out_dtype=data_dtype,
-            p_hflip=0.5,
-            p_affine=args.p_affine,
-            seed=args.seed,
-            dataset_split_txt=manifest_path,
-            class_id_to_label_csv=args.class_id_to_label_csv,
-        )
-        train_collate_fn = collate_motion
+        if args.motion_data_source == "video":
+            if args.p_affine > 0:
+                print(
+                    "[WARN] --p_affine is only applied in zstd dataset mode; ignored for --motion_data_source video.",
+                    flush=True,
+                )
+            dataset = VideoMotionDataset(
+                args.root_dir,
+                img_size=img_size,
+                flow_hw=flow_hw,
+                mhi_frames=mhi_frames,
+                flow_frames=flow_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=diff_threshold,
+                fb_params=fb_params,
+                flow_max_disp=flow_max_disp,
+                flow_normalize=bool(args.flow_normalize),
+                roi_mode=args.roi_mode,
+                roi_stride=max(1, int(args.roi_stride)),
+                motion_roi_threshold=args.motion_roi_threshold,
+                motion_roi_min_area=int(args.motion_roi_min_area),
+                yolo_model=args.yolo_model,
+                yolo_conf=float(args.yolo_conf),
+                yolo_device=args.yolo_device,
+                out_dtype=data_dtype,
+                dataset_split_txt=manifest_path,
+                class_id_to_label_csv=args.class_id_to_label_csv,
+            )
+            train_collate_fn = collate_video_motion
+        else:
+            dataset = MotionTwoStreamZstdDataset(
+                root_dir=args.root_dir,
+                img_size=img_size,
+                flow_hw=flow_hw,
+                mhi_frames=mhi_frames,
+                flow_frames=flow_frames,
+                mhi_windows=mhi_windows,
+                out_dtype=data_dtype,
+                p_hflip=0.5,
+                p_affine=args.p_affine,
+                seed=args.seed,
+                dataset_split_txt=manifest_path,
+                class_id_to_label_csv=args.class_id_to_label_csv,
+            )
+            train_collate_fn = collate_motion
 
     loader = DataLoader(
         dataset,
@@ -512,69 +629,77 @@ def main():
         drop_last=True,
     )
 
-    if args.eval_root_dir is not None:
-        eval_class_id_to_label_csv = (
-            args.eval_class_id_to_label_csv
-            if args.eval_class_id_to_label_csv is not None
+    if args.val_root_dir is not None:
+        val_class_id_to_label_csv = (
+            args.val_class_id_to_label_csv
+            if args.val_class_id_to_label_csv is not None
             else args.class_id_to_label_csv
         )
-        if eval_modality == "rgb":
-            eval_dataset = RGBVideoClipDataset(
-                root_dir=args.eval_root_dir,
+        if val_modality == "rgb":
+            val_dataset = RGBVideoClipDataset(
+                root_dir=args.val_root_dir,
                 rgb_frames=args.rgb_frames,
                 img_size=img_size,
                 sampling_mode=args.rgb_sampling,
-                dataset_split_txt=args.eval_manifest,
-                class_id_to_label_csv=eval_class_id_to_label_csv,
+                dataset_split_txt=val_manifest_path,
+                class_id_to_label_csv=val_class_id_to_label_csv,
                 rgb_norm=args.rgb_norm,
                 out_dtype=data_dtype,
                 seed=args.seed,
             )
-            eval_collate_fn = collate_rgb_clip
+            val_collate_fn = collate_rgb_clip
         else:
-            eval_dataset = VideoMotionDataset(
-                args.eval_root_dir,
-                img_size=ckpt_cfg.img_size,
-                flow_hw=ckpt_cfg.flow_hw,
-                mhi_frames=ckpt_cfg.mhi_frames,
-                flow_frames=ckpt_cfg.flow_frames,
+            val_dataset = VideoMotionDataset(
+                args.val_root_dir,
+                img_size=img_size,
+                flow_hw=flow_hw,
+                mhi_frames=mhi_frames,
+                flow_frames=flow_frames,
                 mhi_windows=mhi_windows,
                 diff_threshold=diff_threshold,
-                fb_params=ckpt_cfg.fb_params,
-                flow_max_disp=ckpt_cfg.flow_max_disp,
-                flow_normalize=True,
+                fb_params=fb_params,
+                flow_max_disp=flow_max_disp,
+                flow_normalize=bool(args.flow_normalize),
+                roi_mode=args.roi_mode,
+                roi_stride=max(1, int(args.roi_stride)),
+                motion_roi_threshold=args.motion_roi_threshold,
+                motion_roi_min_area=int(args.motion_roi_min_area),
+                yolo_model=args.yolo_model,
+                yolo_conf=float(args.yolo_conf),
+                yolo_device=args.yolo_device,
                 out_dtype=data_dtype,
-                dataset_split_txt=args.eval_manifest,
-                class_id_to_label_csv=eval_class_id_to_label_csv,
+                dataset_split_txt=val_manifest_path,
+                class_id_to_label_csv=val_class_id_to_label_csv,
             )
-            eval_collate_fn = collate_video_motion
-        eval_subset = make_fixed_subset(eval_dataset, k=400, seed=args.seed)
+            val_collate_fn = collate_video_motion
+        val_subset = maybe_make_fixed_subset(val_dataset, subset_size=args.val_subset_size, seed=args.seed)
 
-        eval_dataloader = DataLoader(
-            eval_subset,
+        val_dataloader = DataLoader(
+            val_subset,
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
             pin_memory=(device.type == "cuda"),
-            collate_fn=eval_collate_fn,
+            collate_fn=val_collate_fn,
             drop_last=False,
         )
-        eval_class_texts = None
-        if args.eval_class_text_json:
-            class_text_groups = _load_class_text_file(args.eval_class_text_json)
-            eval_class_texts = _build_eval_class_texts_from_groups(
+        val_class_texts = None
+        if args.val_class_text_json:
+            class_text_groups = _load_class_text_file(args.val_class_text_json)
+            val_class_texts = _build_eval_class_texts_from_groups(
                 class_text_groups,
-                eval_dataset.classnames,
+                val_dataset.classnames,
                 dataset.classnames,
             )
             print(
-                f"[EVAL] custom prompts available for {len(eval_class_texts)}/"
-                f"{len(eval_dataset.classnames)} eval classes from {args.eval_class_text_json}",
+                f"[VAL] custom prompts available for {len(val_class_texts)}/"
+                f"{len(val_dataset.classnames)} classes from {args.val_class_text_json}",
                 flush=True,
             )
-    else: 
-        eval_dataloader = None
-        eval_class_texts = None
+    else:
+        val_dataset = None
+        val_dataloader = None
+        val_class_texts = None
 
     # Text bank for NEW classes
     clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
@@ -670,37 +795,41 @@ def main():
     # Resume (finetune run)
     global_step = 0
     best_loss = float("inf")
-    best_top1_acc = 0.0
+    best_top1_acc = float("-inf")
+    early_stop_bad_epochs = 0
 
     start_epoch = global_step // max(1, steps_per_epoch)
     start_time = time.time()
     use_amp = (device.type == "cuda")
 
-    if eval_dataloader is not None:
+    if val_dataloader is not None:
         zero_shot_metrics = eval_on_validation_split(
             args=args,
             model=model,
-            eval_dataset=eval_dataset,
-            eval_dataloader=eval_dataloader,
+            eval_dataset=val_dataset,
+            eval_dataloader=val_dataloader,
             device=device,
             logit_scale_value=logit_scale().exp(),
             clip_text_bank=clip_text_bank,
-            eval_class_texts=eval_class_texts,
+            eval_class_texts=val_class_texts,
             use_amp=use_amp,
+            split_tag="validation",
+            root_dir=args.val_root_dir,
+            manifest_path=val_manifest_path,
         )
         zero_shot_top1 = float(zero_shot_metrics["motion_only"]["top1"])
         append_eval_log(
             eval_log_path,
             {
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "tag": "zero_shot",
+                "tag": "zero_shot_val",
                 "epoch": -1,
                 "global_step": global_step,
                 "top1": zero_shot_top1,
                 "metrics": zero_shot_metrics,
             },
         )
-        print(f"[ZERO_SHOT] top1={zero_shot_top1:.4f}", flush=True)
+        print(f"[ZERO_SHOT][val] top1={zero_shot_top1:.4f}", flush=True)
 
     for epoch in range(start_epoch, args.epochs):
         if hasattr(dataset, "set_epoch"):
@@ -849,7 +978,6 @@ def main():
 
         # Save best (simple)
         current = run_clip / max(1, n_logs)
-        best_loss = current
         payload = make_ckpt_payload(
             epoch=epoch,
             step_in_epoch=step_in_epoch,
@@ -869,60 +997,92 @@ def main():
         }
         payload["data_cfg"] = {
             "train_modality": train_modality,
-            "eval_modality": eval_modality,
+            "val_modality": val_modality,
+            "motion_data_source": args.motion_data_source,
             "img_size": img_size,
             "mhi_frames": mhi_frames,
             "flow_frames": flow_frames,
             "flow_hw": flow_hw,
             "mhi_windows": mhi_windows,
+            "diff_threshold": diff_threshold,
+            "flow_max_disp": flow_max_disp,
+            "flow_normalize": bool(args.flow_normalize),
+            "fb_params": fb_params,
             "rgb_frames": int(args.rgb_frames),
             "rgb_sampling": args.rgb_sampling,
             "rgb_norm": args.rgb_norm,
             "manifest": manifest_path,
+            "val_manifest": val_manifest_path,
         }
 
-        do_eval = (
-            eval_dataloader is not None
-            and epoch >= args.eval_skip_epochs
-            and (epoch - args.eval_skip_epochs) % args.eval_every == 0
+        do_val = (
+            val_dataloader is not None
+            and epoch >= args.val_skip_epochs
+            and (epoch - args.val_skip_epochs) % args.val_every == 0
         )
-        top_1_acc = None
-        if do_eval:
-            eval_metrics = eval_on_validation_split(
+        if do_val:
+            val_metrics = eval_on_validation_split(
                 args=args,
                 model=model,
-                eval_dataset=eval_dataset,
-                eval_dataloader=eval_dataloader,
+                eval_dataset=val_dataset,
+                eval_dataloader=val_dataloader,
                 device=device,
                 logit_scale_value=logit_scale().exp(),
                 clip_text_bank=clip_text_bank,
-                eval_class_texts=eval_class_texts,
-                use_amp=use_amp
+                eval_class_texts=val_class_texts,
+                use_amp=use_amp,
+                split_tag="validation",
+                root_dir=args.val_root_dir,
+                manifest_path=val_manifest_path,
             )
-            top_1_acc = float(eval_metrics["motion_only"]["top1"])
+            top_1_acc = float(val_metrics["motion_only"]["top1"])
             append_eval_log(
                 eval_log_path,
                 {
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "tag": "epoch_eval",
+                    "tag": "epoch_val",
                     "epoch": epoch,
                     "global_step": global_step,
                     "top1": top_1_acc,
-                    "metrics": eval_metrics,
+                    "metrics": val_metrics,
                 },
             )
-            print(f"Top 1 acc: {top_1_acc}, best acc: {best_top1_acc}")
-            if top_1_acc > best_top1_acc:
+            improved = top_1_acc > (best_top1_acc + float(args.early_stop_min_delta))
+            print(
+                f"[VAL] top1={top_1_acc:.6f} best={best_top1_acc if best_top1_acc > -1e8 else float('nan'):.6f} improved={improved}",
+                flush=True,
+            )
+            if improved:
                 save_path = os.path.join(
                     args.ckpt_dir,
                     f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
                 )
-
                 torch.save(payload, save_path)
                 print(f"[CKPT] saved {save_path}", flush=True)
                 best_top1_acc = top_1_acc
+                early_stop_bad_epochs = 0
+            else:
+                early_stop_bad_epochs += 1
+
+            if args.early_stop_patience > 0 and early_stop_bad_epochs >= args.early_stop_patience:
+                print(
+                    f"[EARLY_STOP] no validation improvement for {early_stop_bad_epochs} checks "
+                    f"(patience={args.early_stop_patience}).",
+                    flush=True,
+                )
+                stop_training = True
         else:
-            print(f"[EPOCH {epoch:03d}] eval skipped (schedule)", flush=True)
+            if val_dataloader is not None:
+                print(f"[EPOCH {epoch:03d}] validation skipped (schedule)", flush=True)
+            else:
+                if current < best_loss:
+                    save_path = os.path.join(
+                        args.ckpt_dir,
+                        f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}.pt",
+                    )
+                    torch.save(payload, save_path)
+                    print(f"[CKPT] saved {save_path}", flush=True)
+                    best_loss = current
 
         if stop_training:
             break
