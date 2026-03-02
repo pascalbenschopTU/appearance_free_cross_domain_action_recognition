@@ -2,8 +2,10 @@ import json
 import sys
 from dataset import (
     MotionTwoStreamZstdDataset,
+    VideoMotionDataset,
     RGBVideoClipDataset,
     collate_motion,
+    collate_video_motion,
     collate_rgb_clip,
     ResumableShuffleSampler,
 )
@@ -12,16 +14,14 @@ from e2s_x3d import TwoStreamE2S_X3D_CLIP
 from augment import (
     temporal_splice_mixup,
     soft_target_cross_entropy,
-    representation_mix_consistency_loss,
-    supervised_contrastive_loss,
 )
 from util import (
     build_warmup_cosine_scheduler,
     find_latest_ckpt,
     load_checkpoint,
     make_ckpt_payload,
-    adapt_class_texts,
     build_clip_text_bank_and_logit_scale,
+    expand_manifest_args,
 )
 import argparse
 import torch
@@ -34,6 +34,20 @@ import random
 import numpy as np
 from torch.utils.data import DataLoader
 import time
+
+
+def resolve_single_manifest(manifest_arg: str):
+    if manifest_arg is None:
+        return None
+    s = str(manifest_arg).strip()
+    if not s:
+        return None
+    matches = expand_manifest_args([s])
+    if not matches:
+        raise FileNotFoundError(f"Validation manifest not found / glob matched nothing: {manifest_arg}")
+    if len(matches) > 1:
+        print(f"[WARN] multiple validation manifests matched; using first: {matches[0]}", flush=True)
+    return matches[0]
 
 
 def main():
@@ -75,30 +89,41 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--warmup_steps", type=int, default=4000)
     ap.add_argument("--min_lr", type=float, default=1e-6)
-    ap.add_argument("--lambda_top", type=float, default=0.0)
-    ap.add_argument("--lambda_bot", type=float, default=0.0)
-    ap.add_argument("--lambda_fuse", type=float, default=1.0)
     ap.add_argument("--use_stems", action="store_true")
     ap.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
     ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
-    ap.add_argument("--use_nonlinear_projection", action="store_true")
+    ap.add_argument("--use_projection", action="store_true",
+                    help="Enable separate fused clip/CE heads (LayerNorm+Linear for CLIP, Dropout+Linear for CE).")
+    ap.add_argument("--use_nonlinear_projection", action="store_true", help=argparse.SUPPRESS)  # legacy alias
     ap.add_argument("--probability_hflip", type=float, default=0.5)
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
     ap.add_argument("--probability_affine", type=float, default=0.0, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
+    ap.add_argument("--apply_templates_to_class_texts", dest="apply_templates_to_class_texts", action="store_true",
+                    help="Apply CLIP templates to class labels/custom class texts.")
+    ap.add_argument("--no_apply_templates_to_class_texts", dest="apply_templates_to_class_texts", action="store_false",
+                    help="Disable templates for class labels/custom class texts.")
+    ap.set_defaults(apply_templates_to_class_texts=True)
+    ap.add_argument("--apply_templates_to_class_descriptions", action="store_true",
+                    help="Also apply CLIP templates to long-form descriptions (default: disabled).")
+    ap.add_argument("--class_text_label_weight", type=float, default=0.5,
+                    help="alpha in alpha*t_label + (1-alpha)*t_desc when descriptions are available.")
     ap.add_argument("--label_smoothing", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
-    ap.add_argument("--lambda_rep_mix", type=float, default=0.0, help="Weight for representation-space mix consistency loss.")
-    ap.add_argument("--rep_mix_alpha", type=float, default=0.4, help="Beta(alpha, alpha) parameter for representation-space mix.")
-    ap.add_argument("--rep_mix_semantic", action="store_true", help="Select representation-mix partners from semantically close classes within the current batch.")
-    ap.add_argument("--rep_mix_semantic_topk", type=int, default=3, help="Randomly choose among top-k semantic partners found in-batch.")
-    ap.add_argument("--rep_mix_semantic_min_sim", type=float, default=-1.0, help="Minimum cosine similarity for semantic partner candidates; values <= -1 disable filtering.")
-    ap.add_argument("--lambda_supcon", type=float, default=0.0, help="Weight for supervised contrastive loss on fused embeddings.")
-    ap.add_argument("--supcon_temp", type=float, default=0.07, help="Temperature for supervised contrastive loss.")
+    ap.add_argument("--lambda_ce", type=float, default=0.0,
+                    help="Weight for auxiliary CE loss using a linear head on fused embeddings.")
     ap.add_argument("--unfreeze_logit_scale", action="store_true",
                     help="Freeze logit_scale parameter while keeping it in the optimizer param list for checkpoint compatibility.")
+
+    # Validation on raw videos (optional)
+    ap.add_argument("--val_modality", type=str, default="motion", choices=["motion", "rgb"])
+    ap.add_argument("--val_root_dir", type=str, default="")
+    ap.add_argument("--val_manifest", type=str, default="", help="Validation split manifest (file or glob).")
+    ap.add_argument("--val_class_id_to_label_csv", type=str, default="")
+    ap.add_argument("--val_class_text_json", type=str, default="")
+    ap.add_argument("--val_every", type=int, default=1, help="Run validation every N epochs (0 disables).")
 
     ap.add_argument("--num_workers", type=int, default=16)
     ap.add_argument("--log_every", type=int, default=100)
@@ -117,6 +142,8 @@ def main():
             raise ValueError("Conflicting branch settings: --compute_second_only and --active_branch!=second")
         args.active_branch = "second"
     args.compute_second_only = (args.active_branch == "second")
+    if args.use_nonlinear_projection:
+        args.use_projection = True
 
     print(args)
     start_time = time.time()
@@ -197,12 +224,113 @@ def main():
         collate_fn=collate_fn,
         drop_last=True,
     )
+
+    val_dataset = None
+    val_loader = None
+    val_clip_text_bank = None
+    val_eval_args = None
+    val_eval_out_dir = None
+    val_manifest_path = None
+    if args.val_root_dir.strip():
+        if args.val_every < 1:
+            raise ValueError("--val_every must be >= 1 when --val_root_dir is set.")
+
+        from eval import evaluate_one_split
+
+        val_manifest_path = resolve_single_manifest(args.val_manifest)
+        val_class_id_to_label_csv = args.val_class_id_to_label_csv.strip() or None
+        data_dtype = torch.float16 if device.type == "cuda" else torch.float32
+        val_modality = str(args.val_modality).lower()
+
+        if val_modality == "rgb":
+            if args.active_branch == "second":
+                print("[WARN] val_modality=rgb is incompatible with active_branch=second. Disabling validation.", flush=True)
+            else:
+                val_dataset = RGBVideoClipDataset(
+                    root_dir=args.val_root_dir,
+                    rgb_frames=args.rgb_frames,
+                    img_size=args.img_size,
+                    sampling_mode=args.rgb_sampling,
+                    dataset_split_txt=val_manifest_path,
+                    class_id_to_label_csv=val_class_id_to_label_csv,
+                    rgb_norm=args.rgb_norm,
+                    out_dtype=data_dtype,
+                    seed=args.seed,
+                )
+                val_collate_fn = collate_rgb_clip
+        else:
+            fb_params = dict(
+                pyr_scale=float(args.fb_pyr_scale),
+                levels=int(args.fb_levels),
+                winsize=int(args.fb_winsize),
+                iterations=int(args.fb_iterations),
+                poly_n=int(args.fb_poly_n),
+                poly_sigma=float(args.fb_poly_sigma),
+                flags=int(args.fb_flags),
+            )
+            val_dataset = VideoMotionDataset(
+                args.val_root_dir,
+                img_size=args.img_size,
+                flow_hw=args.flow_hw,
+                mhi_frames=args.mhi_frames,
+                flow_frames=args.flow_frames,
+                mhi_windows=mhi_windows,
+                diff_threshold=args.diff_threshold,
+                fb_params=fb_params,
+                flow_max_disp=args.flow_max_disp,
+                flow_normalize=True,
+                out_dtype=data_dtype,
+                dataset_split_txt=val_manifest_path,
+                class_id_to_label_csv=val_class_id_to_label_csv,
+            )
+            val_collate_fn = collate_video_motion
+
+        if val_dataset is not None:
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                num_workers=args.num_workers,
+                pin_memory=(device.type == "cuda"),
+                collate_fn=val_collate_fn,
+                drop_last=False,
+            )
+
+            val_class_texts = None
+            if args.val_class_text_json.strip():
+                with open(args.val_class_text_json, "r") as f:
+                    val_class_texts = json.load(f)
+
+            val_clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
+                dataset_classnames=val_dataset.classnames,
+                device=device,
+                init_temp=0.07,
+                dtype=torch.float16,
+                class_texts=val_class_texts,
+                apply_templates_to_class_texts=args.apply_templates_to_class_texts,
+                class_text_label_weight=args.class_text_label_weight,
+                apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+            )
+            val_eval_args = argparse.Namespace(
+                use_heads="fuse",
+                head_weights="1.0",
+                rgb_weight=0.5,
+                no_rgb=True,
+                rgb_frames=int(args.rgb_frames),
+                rgb_sampling=args.rgb_sampling,
+                batch_size=int(args.batch_size),
+            )
+            val_eval_out_dir = os.path.join(args.out_dir, "eval_val")
+            print(
+                f"[VAL] enabled: modality={val_modality} samples={len(val_dataset)} "
+                f"classes={len(val_dataset.classnames)} manifest={val_manifest_path}",
+                flush=True,
+            )
     
     class_texts = None
     if args.class_text_json.strip():
         with open(args.class_text_json, "r") as f:
-            raw_data = json.load(f)
-        class_texts = adapt_class_texts(raw_data, dataset.classnames)
+            class_texts = json.load(f)
 
     clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
         dataset_classnames=dataset.classnames,
@@ -210,31 +338,22 @@ def main():
         init_temp=0.07,
         dtype=torch.float16,
         class_texts=class_texts,
+        apply_templates_to_class_texts=args.apply_templates_to_class_texts,
+        class_text_label_weight=args.class_text_label_weight,
+        apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
     )
-    class_text_sim = None
-    if args.rep_mix_semantic:
-        t_norm = F.normalize(clip_text_bank, dim=-1).float()
-        class_text_sim = (t_norm @ t_norm.t()).detach()
     # Frozen by default
     if not args.unfreeze_logit_scale:
         for p in logit_scale.parameters():
             p.requires_grad_(False)
     num_classes = len(dataset.classnames)
 
-    if args.active_branch == "first" and args.lambda_bot > 0:
-        print("[WARN] lambda_bot > 0 while active_branch=first. Setting lambda_bot=0.")
-        args.lambda_bot = 0.0
-    if args.active_branch == "second" and args.lambda_top > 0:
-        print("[WARN] lambda_top > 0 while active_branch=second. Setting lambda_top=0.")
-        args.lambda_top = 0.0
-    if args.lambda_rep_mix > 0 and args.rep_mix_alpha <= 0:
-        raise ValueError("--rep_mix_alpha must be > 0 when --lambda_rep_mix > 0")
-    if args.rep_mix_semantic_topk <= 0:
-        raise ValueError("--rep_mix_semantic_topk must be >= 1")
-    if args.lambda_supcon > 0 and args.supcon_temp <= 0:
-        raise ValueError("--supcon_temp must be > 0 when --lambda_supcon > 0")
-    if args.lambda_supcon > 0:
-        print("[INFO] SupCon uses in-batch same-class positives; with many classes and batch size 16, some steps may have no positive pairs.")
+    if args.lambda_ce < 0:
+        raise ValueError("--lambda_ce must be >= 0")
+    if not (0.0 <= args.class_text_label_weight <= 1.0):
+        raise ValueError("--class_text_label_weight must be in [0, 1]")
+    if args.lambda_ce > 0 and not args.use_projection:
+        raise ValueError("--lambda_ce > 0 requires --use_projection to enable cls_head.")
 
     # Student model
     if args.model == "i3d":
@@ -245,7 +364,8 @@ def main():
             fuse=args.fuse, 
             dropout=args.dropout,
             use_stems=args.use_stems,
-            use_nonlinear_projection=args.use_nonlinear_projection,
+            use_projection=args.use_projection,
+            num_classes=num_classes if args.lambda_ce > 0 else 0,
             active_branch=args.active_branch,
         ).to(device)
     elif args.model == "x3d":
@@ -260,7 +380,8 @@ def main():
             fuse=args.fuse,
             dropout=args.dropout,
             active_branch=args.active_branch,
-            use_nonlinear_projection=args.use_nonlinear_projection,
+            use_projection=args.use_projection,
+            num_classes=num_classes if args.lambda_ce > 0 else 0,
         ).to(device)
 
     parameters = list(model.parameters()) + list(logit_scale.parameters())
@@ -304,8 +425,7 @@ def main():
 
     global_running_total_loss = 0.0
     global_running_clip_loss = 0.0
-    global_running_rep_mix_loss = 0.0
-    global_running_supcon_loss = 0.0
+    global_running_ce_loss = 0.0
     global_n_logs = 0
 
     for epoch in range(start_epoch, args.epochs):
@@ -313,8 +433,7 @@ def main():
         model.train()
         running_total_loss = 0.0
         running_clip_loss = 0.0
-        running_rep_mix_loss = 0.0
-        running_supcon_loss = 0.0
+        running_ce_loss = 0.0
         n_logs = 0
 
         for step_in_epoch, (mhi_top, flow_bot, labels, cnames) in enumerate(loader):
@@ -355,42 +474,23 @@ def main():
                     return soft_target_cross_entropy(logits, labels_soft)
 
                 loss_fuse = ce_from_emb(out["emb_fuse"])
-                if args.lambda_top > 0 or args.lambda_bot > 0:
-                    loss_top  = ce_from_emb(out["emb_top"])
-                    loss_bot  = ce_from_emb(out["emb_bot"])
+                loss_clip = loss_fuse
 
-                    loss_clip = args.lambda_fuse * loss_fuse + args.lambda_top * loss_top + args.lambda_bot * loss_bot
+                if args.lambda_ce > 0:
+                    logits_ce = out.get("logits_cls", None)
+                    if logits_ce is None:
+                        raise RuntimeError("lambda_ce > 0 but model returned no logits_cls. Enable --use_projection or add cls head.")
+                    if labels_soft is None:
+                        loss_ce = F.cross_entropy(logits_ce, labels, label_smoothing=args.label_smoothing)
+                    else:
+                        loss_ce = soft_target_cross_entropy(logits_ce, labels_soft)
                 else:
-                    # Keep tensor scalars so downstream logging via .item() is always valid.
-                    loss_top = torch.zeros((), device=loss_fuse.device, dtype=loss_fuse.dtype)
-                    loss_bot = torch.zeros((), device=loss_fuse.device, dtype=loss_fuse.dtype)
-                    loss_clip = loss_fuse
+                    loss_ce = torch.zeros((), device=loss_clip.device, dtype=loss_clip.dtype)
 
-                if args.lambda_rep_mix > 0:
-                    loss_rep_mix = representation_mix_consistency_loss(
-                        out["emb_fuse"],
-                        labels,
-                        clip_text_bank,
-                        alpha=args.rep_mix_alpha,
-                        semantic_mix=args.rep_mix_semantic,
-                        semantic_topk=args.rep_mix_semantic_topk,
-                        semantic_min_sim=args.rep_mix_semantic_min_sim,
-                        labels_soft=labels_soft,
-                        class_text_sim=class_text_sim,
-                    ).to(dtype=loss_clip.dtype)
-                else:
-                    loss_rep_mix = torch.zeros((), device=loss_clip.device, dtype=loss_clip.dtype)
-
-                if args.lambda_supcon > 0 and labels_soft is None:
-                    loss_supcon = supervised_contrastive_loss(
-                        out["emb_fuse"],
-                        labels,
-                        temperature=args.supcon_temp,
-                    ).to(dtype=loss_clip.dtype)
-                else:
-                    loss_supcon = torch.zeros((), device=loss_clip.device, dtype=loss_clip.dtype)
-
-                loss = loss_clip + args.lambda_rep_mix * loss_rep_mix + args.lambda_supcon * loss_supcon
+                loss = (
+                    loss_clip
+                    + args.lambda_ce * loss_ce
+                )
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -413,10 +513,7 @@ def main():
                         writer.add_scalar("loss/total", float(loss.item()), global_step)
                         writer.add_scalar("loss/clip", float(loss_clip.item()), global_step)
                         writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
-                        writer.add_scalar("loss/top", float(loss_top.item()), global_step)
-                        writer.add_scalar("loss/bot", float(loss_bot.item()), global_step)
-                        writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
-                        writer.add_scalar("loss/supcon", float(loss_supcon.item()), global_step)
+                        writer.add_scalar("loss/ce", float(loss_ce.item()), global_step)
                         writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
                         writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
                     except Exception as e:
@@ -424,13 +521,11 @@ def main():
 
                 running_total_loss += float(loss.item())
                 running_clip_loss += float(loss_clip.item())
-                running_rep_mix_loss += float(loss_rep_mix.item())
-                running_supcon_loss += float(loss_supcon.item())
+                running_ce_loss += float(loss_ce.item())
                 n_logs += 1
                 global_running_total_loss += float(loss.item())
                 global_running_clip_loss += float(loss_clip.item())
-                global_running_rep_mix_loss += float(loss_rep_mix.item())
-                global_running_supcon_loss += float(loss_supcon.item())
+                global_running_ce_loss += float(loss_ce.item())
                 global_n_logs += 1
 
                 if (global_step % args.log_every) == 0:
@@ -438,14 +533,12 @@ def main():
                     elapsed = time.time() - start_time
                     running_avg_total = global_running_total_loss / max(global_n_logs, 1)
                     running_avg_clip = global_running_clip_loss / max(global_n_logs, 1)
-                    running_avg_rep_mix = global_running_rep_mix_loss / max(global_n_logs, 1)
-                    running_avg_supcon = global_running_supcon_loss / max(global_n_logs, 1)
+                    running_avg_ce = global_running_ce_loss / max(global_n_logs, 1)
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:06d} lr {learning_rate:.6f}] "
                         f"loss={running_avg_total:.4f} "
                         f"clip={running_avg_clip:.4f} "
-                        f"rep_mix={running_avg_rep_mix:.4f} "
-                        f"supcon={running_avg_supcon:.4f} "
+                        f"ce={running_avg_ce:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
                     print(msg, flush=True)
@@ -478,8 +571,7 @@ def main():
                 f"[EPOCH {epoch:03d}] "
                 f"loss={running_total_loss/n_logs:.4f} "
                 f"clip={running_clip_loss/n_logs:.4f} "
-                f"rep_mix={running_rep_mix_loss/n_logs:.4f} "
-                f"supcon={running_supcon_loss/n_logs:.4f}"
+                f"ce={running_ce_loss/n_logs:.4f}"
             )
             print(msg)
 
@@ -499,6 +591,51 @@ def main():
                 best_loss=best_loss,
             )
             torch.save(payload, ckpt_path)
+
+            if val_loader is not None and args.val_every > 0 and ((epoch + 1) % args.val_every == 0):
+                val_base_json = {
+                    "root_dir": args.val_root_dir,
+                    "split": "validation",
+                    "manifest": val_manifest_path,
+                    "num_samples": int(len(val_dataset)),
+                    "num_classes": int(len(val_dataset.classnames)),
+                    "classnames": val_dataset.classnames,
+                    "logit_scale_motion": float(logit_scale().exp().item()),
+                    "logit_scale_clip_vision": 0.0,
+                }
+                was_training = model.training
+                model.eval()
+                val_results = evaluate_one_split(
+                    args=val_eval_args,
+                    dataset=val_dataset,
+                    dataloader=val_loader,
+                    device=device,
+                    autocast_on=use_amp,
+                    model=model,
+                    clip_model=None,
+                    clip_preprocess=None,
+                    text_bank=val_clip_text_bank,
+                    scale_motion=float(logit_scale().exp().item()),
+                    scale_clip=0.0,
+                    num_classes=len(val_dataset.classnames),
+                    classnames=val_dataset.classnames,
+                    out_dir=os.path.join(val_eval_out_dir, f"epoch_{epoch:03d}"),
+                    base_json=val_base_json,
+                )
+                if was_training:
+                    model.train()
+                motion_metrics = val_results["motion_only"]
+                print(
+                    f"[VAL EPOCH {epoch:03d}] "
+                    f"top1={motion_metrics['top1']:.4f} "
+                    f"top5={motion_metrics['top5']:.4f}",
+                    flush=True,
+                )
+                try:
+                    writer.add_scalar("val/top1", float(motion_metrics["top1"]), global_step)
+                    writer.add_scalar("val/top5", float(motion_metrics["top5"]), global_step)
+                except Exception as e:
+                    print(f"[WARN] Failed to write val metrics: {e}", file=sys.stderr, flush=True)
 
     print("[DONE]")
     writer.close()

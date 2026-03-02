@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Optional
 
 try:
     from pytorchvideo.models.x3d import create_x3d
@@ -82,10 +83,15 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
         top_head_dim_out: int = 2048,
         bot_head_dim_out: int = 2048,
         compute_second_only: bool = False,
-        use_nonlinear_projection: bool = False,
+        use_projection: bool = False,
+        num_classes: int = 0,
+        projection_dropout: float = 0.5,
+        use_nonlinear_projection: Optional[bool] = None,  # legacy alias
         active_branch: str = "both",
     ):
         super().__init__()
+        if use_nonlinear_projection is not None:
+            use_projection = bool(use_projection or use_nonlinear_projection)
         if compute_second_only:
             if active_branch not in ("both", "second"):
                 raise ValueError("Conflicting branch settings: compute_second_only=True and active_branch!='second'")
@@ -98,6 +104,7 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
         self.has_bot = active_branch in ("both", "second")
         self.compute_second_only = (active_branch == "second")
         self.fuse = fuse
+        self.use_projection = bool(use_projection)
 
         self.top = None
         self.bot = None
@@ -127,26 +134,30 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
                 head_dim_out=bot_head_dim_out,
             )
 
-        if use_nonlinear_projection:
-            if self.has_top:
-                self.proj_top = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
-            if self.has_bot:
-                self.proj_bot = MLPProjector(in_dim=embed_dim*2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
-        else:
-            if self.has_top:
-                self.proj_top = nn.Linear(embed_dim*2, embed_dim)
-            if self.has_bot:
-                self.proj_bot = nn.Linear(embed_dim*2, embed_dim)
+        if self.has_top:
+            self.proj_top = nn.Linear(embed_dim*2, embed_dim)
+        if self.has_bot:
+            self.proj_bot = nn.Linear(embed_dim*2, embed_dim)
 
         if fuse == "concat":
-            if use_nonlinear_projection:
-                self.proj_fuse = MLPProjector(in_dim=embed_dim * 2, hidden_dim=embed_dim*4, out_dim=embed_dim, dropout=dropout)
-            else:
-                self.proj_fuse = nn.Linear(embed_dim*2, embed_dim)
+            self.proj_fuse = nn.Linear(embed_dim*2, embed_dim)
         elif fuse == "avg_then_proj":
             self.proj_fuse = nn.Linear(embed_dim, embed_dim)
         else:
             raise ValueError("fuse must be one of: concat, avg_then_proj")
+
+        self.clip_head = None
+        self.cls_head = None
+        if self.use_projection:
+            self.clip_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim),
+            )
+            if int(num_classes) > 0:
+                self.cls_head = nn.Sequential(
+                    nn.Dropout(float(projection_dropout)),
+                    nn.Linear(embed_dim, int(num_classes)),
+                )
 
     def forward(self, mhi_bcthw: torch.Tensor, flow_bcthw: torch.Tensor):
         et = None
@@ -170,7 +181,9 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
             eb = torch.zeros_like(et)
 
         if self.fuse == "concat":
-            ef = self.proj_fuse(torch.cat([et, eb], dim=-1))
+            ef_raw = self.proj_fuse(torch.cat([et, eb], dim=-1))
         else:
-            ef = self.proj_fuse(0.5 * (et + eb))
-        return {"emb_top": et, "emb_bot": eb, "emb_fuse": ef}
+            ef_raw = self.proj_fuse(0.5 * (et + eb))
+        ef = self.clip_head(ef_raw) if self.clip_head is not None else ef_raw
+        logits_cls = self.cls_head(ef_raw) if self.cls_head is not None else None
+        return {"emb_top": et, "emb_bot": eb, "emb_fuse": ef, "emb_fuse_raw": ef_raw, "logits_cls": logits_cls}

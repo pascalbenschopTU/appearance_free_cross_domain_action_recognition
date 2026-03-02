@@ -734,7 +734,7 @@ def main():
         active_branch = "first"
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
-    use_nonlinear_projection = bool(_get(ckpt_args, "use_nonlinear_projection", False))
+    use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", False)))
     second_channels = 1 if second_type in ("dphase", "phase") else 2
     selected_model = str(_get(ckpt_args, "model", "i3d"))
 
@@ -815,7 +815,7 @@ def main():
             fuse=fuse, 
             dropout=dropout,
             use_stems=use_stems,
-            use_nonlinear_projection=use_nonlinear_projection,
+            use_projection=use_projection,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "x3d":
@@ -830,7 +830,7 @@ def main():
             embed_dim=embed_dim,
             fuse=fuse,
             dropout=dropout,
-            use_nonlinear_projection=use_nonlinear_projection,
+            use_projection=use_projection,
             active_branch=active_branch,
         ).to(device)
     model.eval()

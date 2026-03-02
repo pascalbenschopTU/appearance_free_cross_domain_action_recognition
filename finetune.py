@@ -724,7 +724,7 @@ def main():
         dropout=dropout,
         init_scratch=(pretrained_path is None),
         use_stems=ckpt_cfg.use_stems,
-        use_nonlinear_projection=ckpt_cfg.use_nonlinear_projection,
+        use_projection=ckpt_cfg.use_projection,
         active_branch=active_branch,
     ).to(device)
 

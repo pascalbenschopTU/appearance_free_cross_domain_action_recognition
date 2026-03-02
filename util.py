@@ -125,80 +125,122 @@ def _norm(s: str) -> str:
     # normalize for matching only (don’t feed this into CLIP)
     return re.sub(r"[\s_]+", " ", s.strip().lower())
 
+
+def _append_unique(dst: List[str], value: Any) -> None:
+    s = str(value).strip()
+    if s and s not in dst:
+        dst.append(s)
+
+
+def _iter_texts(value: Any):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return value
+    return [value]
+
+
+def _split_label_desc(text: str, allow_split: bool) -> Tuple[Optional[str], Optional[str]]:
+    s = str(text).strip()
+    if not s:
+        return None, None
+    if allow_split and ":" in s:
+        left, right = s.split(":", 1)
+        left = left.strip()
+        right = right.strip()
+        return (left if left else None), (right if right else None)
+    return None, s
+
+
+def _parse_entry(value: Any, *, allow_colon_split: bool) -> Dict[str, List[str]]:
+    labels: List[str] = []
+    descriptions: List[str] = []
+
+    if isinstance(value, dict):
+        label_keys = ("label", "labels", "name", "names", "classname", "class_name", "class")
+        desc_keys = ("description", "descriptions", "desc", "descs", "text", "texts", "variants", "prompts", "synonyms")
+        hit = False
+        for k in label_keys:
+            if k in value:
+                for x in _iter_texts(value[k]):
+                    _append_unique(labels, x)
+                hit = True
+        for k in desc_keys:
+            if k in value:
+                for x in _iter_texts(value[k]):
+                    _append_unique(descriptions, x)
+                hit = True
+        if not hit:
+            for x in value.values():
+                for y in _iter_texts(x):
+                    _append_unique(descriptions, y)
+        return {"labels": labels, "descriptions": descriptions}
+
+    for x in _iter_texts(value):
+        label, desc = _split_label_desc(x, allow_split=allow_colon_split)
+        if label is not None:
+            _append_unique(labels, label)
+        if desc is not None:
+            _append_unique(descriptions, desc)
+
+    return {"labels": labels, "descriptions": descriptions}
+
+
 def adapt_class_texts(
     class_texts_json: Union[str, Dict[str, Any]],
     classnames: List[str],
-) -> Dict[str, List[str]]:
+) -> Dict[str, Dict[str, List[str]]]:
     """
-    Returns Dict[raw_classname -> List[str]] compatible with build_text_bank.
+    Returns Dict[raw_classname -> {"labels": [...], "descriptions": [...]}].
     Supports:
       - {"brush_hair": ["brushing hair", ...], ...} (Custom)
       - {"0": "Abseiling: ...", "1": "Air Drumming: ...", ...} (TC-CLIP style)
+      - {"0": {"label": "...", "description": "..."}, ...}
+      - Already-adapted dictionaries with keys labels/descriptions.
     """
     if isinstance(class_texts_json, str):
         data = json.loads(class_texts_json)
     else:
         data = class_texts_json
+    if not isinstance(data, dict):
+        raise ValueError("class_texts must be a dict or JSON string encoding a dict.")
 
-    # Already in expected shape?
-    if all(isinstance(k, str) and isinstance(v, list) for k, v in data.items()):
-        return {k: [str(x).strip() for x in v if str(x).strip()] for k, v in data.items()}
-
-    # Build lookup from normalized names -> raw classname
     cname_by_norm = {_norm(c): c for c in classnames}
+    out: Dict[str, Dict[str, List[str]]] = {}
 
-    out: Dict[str, List[str]] = {}
+    def resolve_raw_name(name: str, fallback: Optional[str] = None) -> str:
+        resolved = cname_by_norm.get(_norm(str(name)))
+        if resolved is not None:
+            return resolved
+        if fallback is not None:
+            return fallback
+        return str(name)
 
-    # Detect numeric-key format
     numeric_keys = all(isinstance(k, str) and k.isdigit() for k in data.keys())
-    if not numeric_keys:
-        raise ValueError("Unrecognized class_texts format. Expected list-values or numeric-string keys.")
+    if numeric_keys:
+        for k, v in data.items():
+            idx = int(k)
+            if idx < 0 or idx >= len(classnames):
+                continue
+            raw = classnames[idx]
+            entry = _parse_entry(v, allow_colon_split=True)
+            if entry["labels"]:
+                raw = resolve_raw_name(entry["labels"][0], fallback=raw)
+            merged = out.setdefault(raw, {"labels": [], "descriptions": []})
+            for s in entry["labels"]:
+                _append_unique(merged["labels"], s)
+            for s in entry["descriptions"]:
+                _append_unique(merged["descriptions"], s)
+        return out
 
     for k, v in data.items():
-        idx = int(k)
-        if idx < 0 or idx >= len(classnames):
-            continue
-        raw_by_index = classnames[idx]
-
-        s = str(v).strip()
-        if not s:
-            continue
-
-        # Try to parse "ClassName: description..."
-        # Keep both class label and description as variants (CLIP usually benefits).
-        # TC-CLIP style
-        label = None
-        desc = s
-        if ":" in s:
-            left, right = s.split(":", 1)
-            left = left.strip()
-            right = right.strip()
-            if left:
-                label = left
-            if right:
-                desc = right
-
-        # Try name-based match first (safer than relying on order)
-        raw = None
-        if label is not None:
-            raw = cname_by_norm.get(_norm(label))
-
-        # Fall back to index-based mapping
-        if raw is None:
-            raw = raw_by_index
-
-        variants = []
-        if label:
-            variants.append(label)       # e.g. "Abseiling"
-        if desc:
-            variants.append(desc)        # e.g. "This video shows the process of ..."
-
-        # merge if already exists
-        out.setdefault(raw, [])
-        for vv in variants:
-            vv = vv.strip()
-            if vv and vv not in out[raw]:
-                out[raw].append(vv)
+        raw = resolve_raw_name(k)
+        entry = _parse_entry(v, allow_colon_split=False)
+        merged = out.setdefault(raw, {"labels": [], "descriptions": []})
+        for s in entry["labels"]:
+            _append_unique(merged["labels"], s)
+        for s in entry["descriptions"]:
+            _append_unique(merged["descriptions"], s)
 
     return out
 
@@ -240,46 +282,82 @@ def build_text_bank(
     classnames: List[str],
     device: torch.device,
     templates: List[str],
-    class_texts: Optional[Dict[str, List[str]]] = None,
+    class_texts: Optional[Dict[str, Any]] = None,
     *,
     l2_normalize: bool = True,
+    apply_templates_to_class_texts: bool = True,
+    class_text_label_weight: float = 0.5,
+    apply_templates_to_class_descriptions: bool = False,
 ) -> torch.Tensor:
     """
     Builds (num_classes, 512) text bank.
-    class_texts (optional) can provide multiple strings per class. We average all embeddings.
-    If class_texts provided for a class, templates are applied to each variant.
+    class_texts can be raw JSON-style values or already adapted output.
+    When descriptions are available, class embedding is:
+      alpha * t_label + (1 - alpha) * t_desc
+    where alpha=class_text_label_weight.
     """
-    all_class_embs = []
-    for raw in classnames:
-        normalized_classname = normalize_classname_ucf(raw)
-        prompts = []
-        # If user provides extra texts, use them with templates; else use normalized name with templates.
-        variants = []
-        if class_texts is not None and raw in class_texts:
-            variants = [normalize_classname_ucf(v) if v == raw else v for v in class_texts[raw]]
-            variants = [v.strip() for v in variants if v.strip()]
-            for v in variants:
-                for t in templates:
-                    prompts.append(t.format(v))
-        else:
-            for t in templates:
-                prompts.append(t.format(normalized_classname))
-        if not prompts:
-            for t in templates:
-                prompts.append(t.format(normalized_classname))
+    alpha = float(max(0.0, min(1.0, class_text_label_weight)))
+    class_text_entries = adapt_class_texts(class_texts, classnames) if class_texts is not None else {}
 
+    def prompts_from_texts(texts: List[str], apply_templates: bool) -> List[str]:
+        prompts: List[str] = []
+        for text in texts:
+            t = str(text).strip()
+            if not t:
+                continue
+            if apply_templates:
+                for template in templates:
+                    prompts.append(template.format(t))
+            else:
+                prompts.append(t)
+        return prompts
+
+    def encode_prompt_set(prompts: List[str]) -> Optional[torch.Tensor]:
+        if not prompts:
+            return None
         tok = tokenize_fn(prompts).to(device)
-        feats = clip_model.encode_text(tok)  # (P,512)
+        feats = clip_model.encode_text(tok)
         if l2_normalize:
             feats = F.normalize(feats, dim=-1)
-        # average within class
-        cls_emb = feats.mean(dim=0)
+        emb = feats.mean(dim=0)
         if l2_normalize:
-            cls_emb = F.normalize(cls_emb, dim=-1)
+            emb = F.normalize(emb, dim=-1)
+        return emb
+
+    all_class_embs: List[torch.Tensor] = []
+    for raw in classnames:
+        canonical_label = normalize_classname_ucf(raw)
+        entry = class_text_entries.get(raw, {"labels": [], "descriptions": []})
+
+        label_texts: List[str] = [canonical_label]
+        for s in entry.get("labels", []):
+            t = str(s).strip()
+            if not t:
+                continue
+            if _norm(t) == _norm(raw):
+                t = canonical_label
+            _append_unique(label_texts, t)
+
+        desc_texts: List[str] = []
+        for s in entry.get("descriptions", []):
+            _append_unique(desc_texts, s)
+
+        label_emb = encode_prompt_set(prompts_from_texts(label_texts, apply_templates_to_class_texts))
+        if label_emb is None:
+            label_emb = encode_prompt_set(prompts_from_texts([canonical_label], True))
+        if label_emb is None:
+            raise RuntimeError(f"Could not build label embedding for class: {raw}")
+
+        cls_emb = label_emb
+        if desc_texts:
+            desc_emb = encode_prompt_set(prompts_from_texts(desc_texts, apply_templates_to_class_descriptions))
+            if desc_emb is not None:
+                cls_emb = alpha * label_emb + (1.0 - alpha) * desc_emb
+                if l2_normalize:
+                    cls_emb = F.normalize(cls_emb, dim=-1)
         all_class_embs.append(cls_emb)
 
-    text_bank = torch.stack(all_class_embs, dim=0)  # (C,512)
-    return text_bank
+    return torch.stack(all_class_embs, dim=0)  # (C,512)
 
 class LogitScale(nn.Module):
     def __init__(self, init_temp=0.07):
@@ -298,6 +376,9 @@ def build_clip_text_bank_and_logit_scale(
     init_temp: float = 0.07,
     dtype=torch.float16,
     class_texts=None,
+    apply_templates_to_class_texts: bool = True,
+    class_text_label_weight: float = 0.5,
+    apply_templates_to_class_descriptions: bool = False,
 ):
     """
     Returns:
@@ -309,13 +390,16 @@ def build_clip_text_bank_and_logit_scale(
     clip_model, tokenize_fn = load_clip_text_encoder(device)
     logit_scale = LogitScale(init_temp=init_temp).to(device)
 
-    def norm_cname(c: str) -> str:
-        return c.replace("_", " ").strip()
-
-    classnames_norm = [norm_cname(c) for c in dataset_classnames]
-
     text_bank = build_text_bank(
-        clip_model, tokenize_fn, classnames_norm, device, templates, class_texts=class_texts
+        clip_model=clip_model,
+        tokenize_fn=tokenize_fn,
+        classnames=list(dataset_classnames),
+        device=device,
+        templates=templates,
+        class_texts=class_texts,
+        apply_templates_to_class_texts=apply_templates_to_class_texts,
+        class_text_label_weight=class_text_label_weight,
+        apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
     )
     text_bank = text_bank.to(dtype=dtype).to(device).detach()
 
@@ -758,6 +842,7 @@ class MotionCkptConfig:
     use_stems: bool = False
     active_branch: str = "both"  # both | first | second
     compute_second_only: bool = False
+    use_projection: bool = False
     use_nonlinear_projection: bool = False
 
     # Input sizing
@@ -821,6 +906,8 @@ def extract_motion_config_from_ckpt(
     if active_branch not in ("both", "first", "second"):
         active_branch = base.active_branch
 
+    use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", base.use_projection)))
+
     cfg = MotionCkptConfig(
         model=str(_get(ckpt_args, "model", base.model)),
         embed_dim=int(_get(ckpt_args, "embed_dim", base.embed_dim)),
@@ -831,7 +918,8 @@ def extract_motion_config_from_ckpt(
         use_stems=bool(_get(ckpt_args, "use_stems", base.use_stems)),
         active_branch=active_branch,
         compute_second_only=(active_branch == "second"),
-        use_nonlinear_projection=bool(_get(ckpt_args, "use_nonlinear_projection", base.use_nonlinear_projection)),
+        use_projection=use_projection,
+        use_nonlinear_projection=use_projection,
 
         img_size=int(_get(ckpt_args, "img_size", base.img_size)),
         mhi_frames=int(_get(ckpt_args, "mhi_frames", base.mhi_frames)),

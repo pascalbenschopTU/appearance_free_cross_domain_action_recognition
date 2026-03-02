@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 class MLPProjector(nn.Module):
     def __init__(self, in_dim=1024, hidden_dim=2048, out_dim=512, dropout=0.1):
@@ -306,10 +307,15 @@ class TwoStreamI3D_CLIP(nn.Module):
         use_stems: bool = False,
         init_scratch: bool = True,
         compute_second_only: bool = False,
-        use_nonlinear_projection: bool = False,
+        use_projection: bool = False,
+        num_classes: int = 0,
+        projection_dropout: float = 0.5,
+        use_nonlinear_projection: Optional[bool] = None,  # legacy alias
         active_branch: str = "both",
     ):        
         super().__init__()
+        if use_nonlinear_projection is not None:
+            use_projection = bool(use_projection or use_nonlinear_projection)
         if compute_second_only:
             if active_branch not in ("both", "second"):
                 raise ValueError("Conflicting branch settings: compute_second_only=True and active_branch!='second'")
@@ -321,6 +327,7 @@ class TwoStreamI3D_CLIP(nn.Module):
         self.has_top = active_branch in ("both", "first")
         self.has_bot = active_branch in ("both", "second")
         self.compute_second_only = (active_branch == "second")
+        self.use_projection = bool(use_projection)
         if use_stems:
             top_stem = InputStem3D(
                 in_channels=mhi_channels,
@@ -353,27 +360,31 @@ class TwoStreamI3D_CLIP(nn.Module):
         if self.has_bot:
             self.bot = I3DFeature(in_channels=second_channels, dropout_prob=dropout, stem=bot_stem)
 
-        if use_nonlinear_projection:
-            if self.has_top:
-                self.proj_top = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
-            if self.has_bot:
-                self.proj_bot = MLPProjector(in_dim=1024, hidden_dim=2048, out_dim=embed_dim, dropout=dropout)
-        else:
-            if self.has_top:
-                self.proj_top = nn.Linear(1024, embed_dim)
-            if self.has_bot:
-                self.proj_bot = nn.Linear(1024, embed_dim)
+        if self.has_top:
+            self.proj_top = nn.Linear(1024, embed_dim)
+        if self.has_bot:
+            self.proj_bot = nn.Linear(1024, embed_dim)
 
         self.fuse = fuse
         if fuse == "concat":
-            if use_nonlinear_projection:
-                self.proj_fuse = MLPProjector(in_dim=embed_dim * 2, hidden_dim=embed_dim * 2, out_dim=embed_dim)
-            else:
-                self.proj_fuse = nn.Linear(embed_dim * 2, embed_dim)
+            self.proj_fuse = nn.Linear(embed_dim * 2, embed_dim)
         elif fuse == "avg_then_proj":
             self.proj_fuse = nn.Linear(embed_dim, embed_dim)
         else:
             raise ValueError("fuse must be one of: concat, avg_then_proj")
+
+        self.clip_head = None
+        self.cls_head = None
+        if self.use_projection:
+            self.clip_head = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim),
+            )
+            if int(num_classes) > 0:
+                self.cls_head = nn.Sequential(
+                    nn.Dropout(float(projection_dropout)),
+                    nn.Linear(embed_dim, int(num_classes)),
+                )
         
         if init_scratch:
             init_from_scratch(self)
@@ -404,11 +415,14 @@ class TwoStreamI3D_CLIP(nn.Module):
 
 
         if self.fuse == "concat":
-            ef = self.proj_fuse(torch.cat([et, eb], dim=-1))
+            ef_raw = self.proj_fuse(torch.cat([et, eb], dim=-1))
         else:
-            ef = self.proj_fuse(0.5 * (et + eb))
+            ef_raw = self.proj_fuse(0.5 * (et + eb))
 
-        return {"emb_top": et, "emb_bot": eb, "emb_fuse": ef}
+        ef = self.clip_head(ef_raw) if self.clip_head is not None else ef_raw
+        logits_cls = self.cls_head(ef_raw) if self.cls_head is not None else None
+
+        return {"emb_top": et, "emb_bot": eb, "emb_fuse": ef, "emb_fuse_raw": ef_raw, "logits_cls": logits_cls}
 
 
 if __name__ == "__main__":
@@ -431,7 +445,8 @@ if __name__ == "__main__":
         use_stems=True,
         init_scratch=True,
         compute_second_only=False,
-        use_nonlinear_projection=True,
+        use_projection=True,
+        num_classes=400,
     ).to(device)
 
     model.eval()
