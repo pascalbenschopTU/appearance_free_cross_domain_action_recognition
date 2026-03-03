@@ -148,6 +148,59 @@ def detect_square_roi_yolo_person(
     return _square_bbox_xyxy(union_x1, union_y1, union_x2, union_y2, frame_w, frame_h)
 
 
+def detect_square_roi_yolo_person_frame(
+    frame_bgr: np.ndarray,
+    model_name: str = "yolo11n.pt",
+    conf: float = 0.25,
+    device: Optional[str] = None,
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Detect person boxes on a single frame and return a square union ROI.
+    """
+    if frame_bgr is None or frame_bgr.size == 0:
+        return None
+    frame_h, frame_w = frame_bgr.shape[:2]
+    if frame_h <= 1 or frame_w <= 1:
+        return None
+
+    model = _get_yolo_model(model_name)
+    results = model.predict(
+        source=frame_bgr,
+        classes=[0],  # COCO person class
+        conf=float(conf),
+        device=device,
+        verbose=False,
+    )
+    if not results:
+        return None
+
+    boxes = results[0].boxes
+    if boxes is None or boxes.xyxy is None or len(boxes.xyxy) == 0:
+        return None
+
+    union_x1 = union_y1 = None
+    union_x2 = union_y2 = None
+    for b in boxes.xyxy.cpu().numpy():
+        x1, y1, x2, y2 = b[:4]
+        x1i = int(max(0, np.floor(x1)))
+        y1i = int(max(0, np.floor(y1)))
+        x2i = int(np.ceil(x2))
+        y2i = int(np.ceil(y2))
+        if x2i <= x1i or y2i <= y1i:
+            continue
+        if union_x1 is None:
+            union_x1, union_y1, union_x2, union_y2 = x1i, y1i, x2i, y2i
+        else:
+            union_x1 = min(union_x1, x1i)
+            union_y1 = min(union_y1, y1i)
+            union_x2 = max(union_x2, x2i)
+            union_y2 = max(union_y2, y2i)
+
+    if union_x1 is None:
+        return None
+    return _square_bbox_xyxy(union_x1, union_y1, union_x2, union_y2, frame_w, frame_h)
+
+
 def detect_square_roi_largest_motion(
     path: str,
     threshold: float,
@@ -200,6 +253,52 @@ def detect_square_roi_largest_motion(
     areas = stats[:, cv2.CC_STAT_AREA].astype(np.float32)
     scores[areas < float(max(1, int(min_area)))] = 0.0
     scores[0] = 0.0  # background
+    best = int(np.argmax(scores))
+    if best <= 0 or float(scores[best]) <= 0.0:
+        return None
+
+    x = int(stats[best, cv2.CC_STAT_LEFT])
+    y = int(stats[best, cv2.CC_STAT_TOP])
+    w = int(stats[best, cv2.CC_STAT_WIDTH])
+    h = int(stats[best, cv2.CC_STAT_HEIGHT])
+    return _square_bbox_xyxy(x, y, x + w, y + h, frame_w, frame_h)
+
+
+def detect_square_roi_largest_motion_frame(
+    prev_gray: np.ndarray,
+    gray: np.ndarray,
+    *,
+    threshold: float,
+    min_area: int = 64,
+) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Frame-pair variant of largest-motion ROI.
+    Uses abs diff as a motion heatmap and returns a square ROI around the dominant component.
+    """
+    if prev_gray is None or gray is None:
+        return None
+    if prev_gray.shape != gray.shape:
+        return None
+
+    frame_h, frame_w = gray.shape[:2]
+    if frame_h <= 1 or frame_w <= 1:
+        return None
+
+    diff = cv2.absdiff(gray, prev_gray).astype(np.float32)
+    motion_any = (diff > float(threshold)).astype(np.uint8)
+    if int(motion_any.sum()) <= 0:
+        return None
+
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(motion_any, connectivity=8)
+    if n_labels <= 1:
+        return None
+
+    label_ids = labels.reshape(-1)
+    weights = diff.reshape(-1)
+    scores = np.bincount(label_ids, weights=weights, minlength=n_labels)
+    areas = stats[:, cv2.CC_STAT_AREA].astype(np.float32)
+    scores[areas < float(max(1, int(min_area)))] = 0.0
+    scores[0] = 0.0
     best = int(np.argmax(scores))
     if best <= 0 or float(scores[best]) <= 0.0:
         return None

@@ -5,3 +5,5 @@ run_scripts.txt
 *.pt
 *.pth
 workspace/
+logs/
+scripts/
