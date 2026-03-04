@@ -21,6 +21,7 @@ from util import (
     load_checkpoint,
     make_ckpt_payload,
     build_clip_text_bank_and_logit_scale,
+    load_precomputed_text_bank_and_logit_scale,
     expand_manifest_args,
 )
 import argparse
@@ -99,6 +100,10 @@ def main():
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
     ap.add_argument("--probability_affine", type=float, default=0.0, help="rotate,translate,scale,shear")
     ap.add_argument("--class_text_json", type=str, default="")
+    ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
+    ap.add_argument("--precomputed_text_embeddings", type=str, default="")
+    ap.add_argument("--precomputed_text_index", type=str, default="")
+    ap.add_argument("--precomputed_text_key", type=str, default="")
     ap.add_argument("--apply_templates_to_class_texts", dest="apply_templates_to_class_texts", action="store_true",
                     help="Apply CLIP templates to class labels/custom class texts.")
     ap.add_argument("--no_apply_templates_to_class_texts", dest="apply_templates_to_class_texts", action="store_false",
@@ -136,6 +141,12 @@ def main():
 
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
+    args.text_bank_backend = str(args.text_bank_backend).lower()
+    if args.text_bank_backend == "precomputed":
+        if not args.precomputed_text_embeddings.strip() or not args.precomputed_text_index.strip():
+            raise ValueError(
+                "--text_bank_backend precomputed requires --precomputed_text_embeddings and --precomputed_text_index."
+            )
 
     if args.compute_second_only:
         if args.active_branch not in ("both", "second"):
@@ -297,20 +308,32 @@ def main():
             )
 
             val_class_texts = None
-            if args.val_class_text_json.strip():
+            if args.text_bank_backend == "clip" and args.val_class_text_json.strip():
                 with open(args.val_class_text_json, "r") as f:
                     val_class_texts = json.load(f)
 
-            val_clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
-                dataset_classnames=val_dataset.classnames,
-                device=device,
-                init_temp=0.07,
-                dtype=torch.float16,
-                class_texts=val_class_texts,
-                apply_templates_to_class_texts=args.apply_templates_to_class_texts,
-                class_text_label_weight=args.class_text_label_weight,
-                apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
-            )
+            if args.text_bank_backend == "precomputed":
+                val_clip_text_bank, _ = load_precomputed_text_bank_and_logit_scale(
+                    dataset_classnames=val_dataset.classnames,
+                    device=device,
+                    embeddings_npy=args.precomputed_text_embeddings,
+                    index_json=args.precomputed_text_index,
+                    key=(args.precomputed_text_key.strip() or None),
+                    class_id_to_label_csv=(args.val_class_id_to_label_csv or None),
+                    init_temp=0.07,
+                    dtype=torch.float16,
+                )
+            else:
+                val_clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
+                    dataset_classnames=val_dataset.classnames,
+                    device=device,
+                    init_temp=0.07,
+                    dtype=torch.float16,
+                    class_texts=val_class_texts,
+                    apply_templates_to_class_texts=args.apply_templates_to_class_texts,
+                    class_text_label_weight=args.class_text_label_weight,
+                    apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+                )
             val_eval_args = argparse.Namespace(
                 use_heads="fuse",
                 head_weights="1.0",
@@ -328,20 +351,32 @@ def main():
             )
     
     class_texts = None
-    if args.class_text_json.strip():
+    if args.text_bank_backend == "clip" and args.class_text_json.strip():
         with open(args.class_text_json, "r") as f:
             class_texts = json.load(f)
 
-    clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
-        dataset_classnames=dataset.classnames,
-        device=device,
-        init_temp=0.07,
-        dtype=torch.float16,
-        class_texts=class_texts,
-        apply_templates_to_class_texts=args.apply_templates_to_class_texts,
-        class_text_label_weight=args.class_text_label_weight,
-        apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
-    )
+    if args.text_bank_backend == "precomputed":
+        clip_text_bank, logit_scale = load_precomputed_text_bank_and_logit_scale(
+            dataset_classnames=dataset.classnames,
+            device=device,
+            embeddings_npy=args.precomputed_text_embeddings,
+            index_json=args.precomputed_text_index,
+            key=(args.precomputed_text_key.strip() or None),
+            class_id_to_label_csv=None,
+            init_temp=0.07,
+            dtype=torch.float16,
+        )
+    else:
+        clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
+            dataset_classnames=dataset.classnames,
+            device=device,
+            init_temp=0.07,
+            dtype=torch.float16,
+            class_texts=class_texts,
+            apply_templates_to_class_texts=args.apply_templates_to_class_texts,
+            class_text_label_weight=args.class_text_label_weight,
+            apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+        )
     # Frozen by default
     if not args.unfreeze_logit_scale:
         for p in logit_scale.parameters():

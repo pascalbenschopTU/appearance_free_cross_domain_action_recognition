@@ -43,9 +43,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
-from util import build_text_bank, LogitScale
+from util import build_text_bank, LogitScale, load_precomputed_text_bank_and_logit_scale
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
+from model_svt import TwoStreamSVT_CLIP
 from dataset import (
     RGBVideoClipDataset,
     collate_rgb_clip,
@@ -493,13 +494,19 @@ def evaluate_one_split(
 
                 logits_by_head = {}
 
-                v = F.normalize(out["emb_top"].float(), dim=-1)
-                logits_by_head["top"] = scale_motion * (v @ text_bank.t().float())
+                emb_top = out.get("emb_top", None) if isinstance(out, dict) else None
+                emb_bot = out.get("emb_bot", None) if isinstance(out, dict) else None
+                emb_fuse = out.get("emb_fuse", None) if isinstance(out, dict) else None
+                if emb_top is not None:
+                    v = F.normalize(emb_top.float(), dim=-1)
+                    logits_by_head["top"] = scale_motion * (v @ text_bank.t().float())
+                if emb_bot is not None:
+                    v = F.normalize(emb_bot.float(), dim=-1)
+                    logits_by_head["bot"] = scale_motion * (v @ text_bank.t().float())
 
-                v = F.normalize(out["emb_bot"].float(), dim=-1)
-                logits_by_head["bot"] = scale_motion * (v @ text_bank.t().float())
-
-                v = F.normalize(out["emb_fuse"].float(), dim=-1)
+                if emb_fuse is None:
+                    raise RuntimeError("Model output missing required key 'emb_fuse'.")
+                v = F.normalize(emb_fuse.float(), dim=-1)
                 logits_by_head["fuse"] = scale_motion * (v @ text_bank.t().float())
 
                 logits_motion_ens = None
@@ -517,6 +524,11 @@ def evaluate_one_split(
                     rgb_frames=int(args.rgb_frames),
                     rgb_sampling=args.rgb_sampling,
                 )
+                if v_rgb.shape[-1] != text_bank.shape[-1]:
+                    raise RuntimeError(
+                        f"RGB/text embedding dim mismatch: rgb={v_rgb.shape[-1]} vs text_bank={text_bank.shape[-1]}. "
+                        "Use --no_rgb for this setup."
+                    )
                 logits_rgb = scale_clip * (v_rgb @ text_bank.t().float())
                 logits_fused_ens = w_motion * logits_motion_ens + w_rgb * logits_rgb
 
@@ -672,6 +684,10 @@ def main():
     ap.add_argument("--fb_flags", type=int, default=0)
 
     # Text bank options
+    ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
+    ap.add_argument("--precomputed_text_embeddings", type=str, default="")
+    ap.add_argument("--precomputed_text_index", type=str, default="")
+    ap.add_argument("--precomputed_text_key", type=str, default="")
     ap.add_argument("--class_text_json", type=str, default="")
     ap.add_argument("--use_heads", type=str, default="fuse")
     ap.add_argument("--head_weights", type=str, default="1.0")
@@ -687,6 +703,19 @@ def main():
     ap.add_argument("--clip_vision_scale", type=float, default=0.0)
 
     args = ap.parse_args()
+    args.text_bank_backend = str(args.text_bank_backend).lower()
+    if args.text_bank_backend == "precomputed":
+        if not args.precomputed_text_embeddings.strip() or not args.precomputed_text_index.strip():
+            raise ValueError(
+                "--text_bank_backend precomputed requires --precomputed_text_embeddings and --precomputed_text_index."
+            )
+        if not args.no_rgb:
+            print(
+                "[WARN] --text_bank_backend precomputed is incompatible with CLIP RGB ensembling "
+                "(RGB embeddings are 512-D, precomputed bank may differ). Forcing --no_rgb.",
+                flush=True,
+            )
+            args.no_rgb = True
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"args: {args}")
 
@@ -797,7 +826,7 @@ def main():
     )
 
     class_texts = None
-    if args.class_text_json.strip():
+    if args.text_bank_backend == "clip" and args.class_text_json.strip():
         with open(args.class_text_json, "r") as f:
             class_texts = json.load(f)
 
@@ -833,6 +862,42 @@ def main():
             use_projection=use_projection,
             active_branch=active_branch,
         ).to(device)
+    elif selected_model == "svt":
+        print("selected svt model", flush=True)
+        svt_max_frames_raw = _get(
+            ckpt_args,
+            "svt_max_frames",
+            max(args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames, flow_frames),
+        )
+        svt_max_frames = (
+            max(args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames, flow_frames)
+            if svt_max_frames_raw is None
+            else int(svt_max_frames_raw)
+        )
+        model = TwoStreamSVT_CLIP(
+            mhi_channels=model_first_channels,
+            flow_channels=second_channels,
+            mhi_frames=args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames,
+            flow_frames=flow_frames,
+            img_size=img_size,
+            embed_dim=embed_dim,
+            semantic_dim=512,
+            patch_size=int(_get(ckpt_args, "svt_patch_size", 16)),
+            depth=int(_get(ckpt_args, "svt_depth", 12)),
+            num_heads=int(_get(ckpt_args, "svt_num_heads", 12)),
+            mlp_ratio=float(_get(ckpt_args, "svt_mlp_ratio", 4.0)),
+            attn_drop=float(_get(ckpt_args, "svt_attn_drop", 0.0)),
+            proj_drop=float(_get(ckpt_args, "svt_proj_drop", 0.0)),
+            max_frames=svt_max_frames,
+            motion_mask_enabled=bool(_get(ckpt_args, "svt_motion_mask_enabled", False)),
+            motion_keep_ratio=float(_get(ckpt_args, "svt_motion_keep_ratio", 0.5)),
+            motion_score_mode=str(_get(ckpt_args, "svt_motion_score_mode", "mhi_flow")),
+            motion_mhi_weight=float(_get(ckpt_args, "svt_motion_mhi_weight", 1.0)),
+            motion_eps=float(_get(ckpt_args, "svt_motion_eps", 1e-6)),
+            active_branch=active_branch,
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported model in checkpoint args: {selected_model}")
     model.eval()
 
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
@@ -944,15 +1009,27 @@ def main():
                     "Aggregation assumes identical class ordering across splits."
                 )
             
-        text_bank = build_text_bank(
-            clip_model=clip_model,
-            tokenize_fn=clip.tokenize,
-            classnames=classnames,
-            device=device,
-            templates=templates,
-            class_texts=class_texts,
-            l2_normalize=True,
-        )  # (C,512)
+        if args.text_bank_backend == "precomputed":
+            text_bank, _ = load_precomputed_text_bank_and_logit_scale(
+                dataset_classnames=classnames,
+                device=device,
+                embeddings_npy=args.precomputed_text_embeddings,
+                index_json=args.precomputed_text_index,
+                key=(args.precomputed_text_key.strip() or None),
+                class_id_to_label_csv=(args.class_id_to_label_csv if args.class_id_to_label_csv else None),
+                init_temp=0.07,
+                dtype=torch.float16 if device.type == "cuda" else torch.float32,
+            )
+        else:
+            text_bank = build_text_bank(
+                clip_model=clip_model,
+                tokenize_fn=clip.tokenize,
+                classnames=classnames,
+                device=device,
+                templates=templates,
+                class_texts=class_texts,
+                l2_normalize=True,
+            )  # (C,512)
 
         # Base json (per split)
         base_json = {

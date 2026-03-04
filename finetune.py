@@ -39,6 +39,8 @@ from dataset import (
     collate_video_motion,
 )
 from model import TwoStreamI3D_CLIP
+from e2s_x3d import TwoStreamE2S_X3D_CLIP
+from model_svt import TwoStreamSVT_CLIP
 from augment import (
     temporal_splice_mixup,
     mixup_batch,
@@ -49,6 +51,7 @@ from augment import (
 from util import (
     # training utilities
     build_clip_text_bank_and_logit_scale,
+    load_precomputed_text_bank_and_logit_scale,
     build_warmup_cosine_scheduler,
     make_ckpt_payload,
     find_latest_ckpt,
@@ -221,62 +224,85 @@ def eval_on_validation_split(
     root_dir: Optional[str] = None,
     manifest_path: Optional[str] = None,
 ):
-    if eval_class_texts is not None:
-        clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
-            dataset_classnames=eval_dataset.classnames,
+    was_training = model.training
+    model.eval()
+    tb_backend = str(getattr(args, "text_bank_backend", "clip")).lower()
+    try:
+        if tb_backend == "precomputed":
+            val_csv = (
+                args.val_class_id_to_label_csv
+                if args.val_class_id_to_label_csv is not None
+                else args.class_id_to_label_csv
+            )
+            clip_text_bank, _ = load_precomputed_text_bank_and_logit_scale(
+                dataset_classnames=eval_dataset.classnames,
+                device=device,
+                embeddings_npy=args.precomputed_text_embeddings,
+                index_json=args.precomputed_text_index,
+                key=args.precomputed_text_key,
+                class_id_to_label_csv=val_csv,
+                init_temp=0.07,
+                dtype=clip_text_bank.dtype if clip_text_bank is not None else torch.float16,
+            )
+        else:
+            if eval_class_texts is not None:
+                clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
+                    dataset_classnames=eval_dataset.classnames,
+                    device=device,
+                    init_temp=0.07,
+                    dtype=clip_text_bank.dtype if clip_text_bank is not None else torch.float16,
+                    class_texts=eval_class_texts,
+                )
+            elif clip_text_bank is not None and clip_text_bank.shape[0] != len(eval_dataset.classnames):
+                print(
+                    f"[WARN] clip_text_bank classes ({clip_text_bank.shape[0]}) "
+                    f"!= eval classes ({len(eval_dataset.classnames)}); rebuilding text bank for eval.",
+                    flush=True
+                )
+                clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
+                    dataset_classnames=eval_dataset.classnames,
+                    device=device,
+                    init_temp=0.07,
+                    dtype=clip_text_bank.dtype,
+                )
+
+        base_json = {
+            "root_dir": root_dir if root_dir is not None else args.root_dir,
+            "split": split_tag,
+            "manifest": (os.path.abspath(manifest_path) if manifest_path else None),
+            "num_samples": int(len(eval_dataset)),
+            "num_classes": int(len(eval_dataset.classnames)),
+            "classnames": eval_dataset.classnames,
+            "logit_scale_motion": float(logit_scale_value),
+            "logit_scale_clip_vision": 0.0,
+        }
+
+        args.use_heads = "fuse"
+        args.head_weights = "1.0"
+        args.rgb_weight = 0.5
+        args.no_rgb = True
+
+        metrics = evaluate_one_split(
+            args=args,
+            dataset=eval_dataset,
+            dataloader=eval_dataloader,
             device=device,
-            init_temp=0.07,
-            dtype=clip_text_bank.dtype if clip_text_bank is not None else torch.float16,
-            class_texts=eval_class_texts,
-        )
-    elif clip_text_bank is not None and clip_text_bank.shape[0] != len(eval_dataset.classnames):
-        print(
-            f"[WARN] clip_text_bank classes ({clip_text_bank.shape[0]}) "
-            f"!= eval classes ({len(eval_dataset.classnames)}); rebuilding text bank for eval.",
-            flush=True
-        )
-        clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
-            dataset_classnames=eval_dataset.classnames,
-            device=device,
-            init_temp=0.07,
-            dtype=clip_text_bank.dtype,
+            autocast_on=use_amp,
+            model=model,
+            clip_model=None,
+            clip_preprocess=None,
+            text_bank=clip_text_bank,
+            scale_motion=logit_scale_value,
+            scale_clip=0.0,
+            num_classes=len(eval_dataset.classnames),
+            classnames=eval_dataset.classnames,
+            out_dir=args.eval_dir,
+            base_json=base_json,
         )
 
-    base_json = {
-        "root_dir": root_dir if root_dir is not None else args.root_dir,
-        "split": split_tag,
-        "manifest": (os.path.abspath(manifest_path) if manifest_path else None),
-        "num_samples": int(len(eval_dataset)),
-        "num_classes": int(len(eval_dataset.classnames)),
-        "classnames": eval_dataset.classnames,
-        "logit_scale_motion": float(logit_scale_value),
-        "logit_scale_clip_vision": 0.0,
-    }
-
-    args.use_heads = "fuse"
-    args.head_weights = "1.0"
-    args.rgb_weight = 0.5
-    args.no_rgb = True
-    
-    metrics = evaluate_one_split(
-        args=args,
-        dataset=eval_dataset,
-        dataloader=eval_dataloader,
-        device=device,
-        autocast_on=use_amp,
-        model=model,
-        clip_model=None,
-        clip_preprocess=None,
-        text_bank=clip_text_bank,
-        scale_motion=logit_scale_value,
-        scale_clip=0.0,
-        num_classes=len(eval_dataset.classnames),
-        classnames=eval_dataset.classnames,
-        out_dir=args.eval_dir,
-        base_json = base_json,
-    )
-
-    return metrics
+        return metrics
+    finally:
+        model.train(was_training)
 
 
 def _json_safe(obj):
@@ -347,14 +373,16 @@ def main():
     ap.add_argument("--val_manifest", type=str, default=None, help="ONE validation split manifest (file or glob). Optional.")
     ap.add_argument("--val_class_id_to_label_csv", type=str, default=None)
     ap.add_argument("--val_class_text_json", type=str, default=None, help="Optional JSON mapping validation classes to prompt lists.")
+    ap.add_argument("--train_class_text_json", type=str, default=None, help="Optional JSON mapping training classes to prompt lists/descriptions.")
+    ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"],
+                    help="Text embedding backend for class bank: CLIP encoder or precomputed embeddings.")
+    ap.add_argument("--precomputed_text_embeddings", type=str, default=None,
+                    help="Path to precomputed text embeddings .npy (e.g., sentence_transformer_embeddings.npy).")
+    ap.add_argument("--precomputed_text_index", type=str, default=None,
+                    help="Path to index JSON for precomputed text embeddings.")
+    ap.add_argument("--precomputed_text_key", type=str, default=None,
+                    help="Dataset key in precomputed index JSON (e.g., kinetics_400_llm_labels).")
     ap.add_argument("--val_subset_size", type=int, default=400, help="Use a fixed random subset for validation if >0; <=0 means full split.")
-    # Backward-compatible aliases (deprecated)
-    ap.add_argument("--eval_modality", type=str, default=None, choices=["motion", "rgb"], help=argparse.SUPPRESS)
-    ap.add_argument("--eval_root_dir", type=str, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--eval_manifest", type=str, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--eval_class_id_to_label_csv", type=str, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--eval_class_text_json", type=str, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--eval_subset_size", type=int, default=None, help=argparse.SUPPRESS)
 
     # Pretrained
     ap.add_argument("-p", "--pretrained_ckpt", type=str, default=None, help="checkpoint path OR directory (optional; omit for scratch training)")
@@ -388,12 +416,26 @@ def main():
     ap.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
 
 
+    ap.add_argument("--model", type=str, default=None, choices=["i3d", "x3d", "svt"],
+                    help="None -> inherit from pretrained checkpoint")
     ap.add_argument("--embed_dim", type=int, default=None)
     ap.add_argument("--fuse", type=str, default=None, choices=[None, "avg_then_proj", "concat"])
     ap.add_argument("--dropout", type=float, default=None)
     ap.add_argument("--active_branch", type=str, default=None, choices=["both", "first", "second"],
                     help="None -> inherit from pretrained checkpoint")
     ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
+    ap.add_argument("--svt_patch_size", type=int, default=16)
+    ap.add_argument("--svt_depth", type=int, default=12)
+    ap.add_argument("--svt_num_heads", type=int, default=12)
+    ap.add_argument("--svt_mlp_ratio", type=float, default=4.0)
+    ap.add_argument("--svt_attn_drop", type=float, default=0.0)
+    ap.add_argument("--svt_proj_drop", type=float, default=0.0)
+    ap.add_argument("--svt_max_frames", type=int, default=None)
+    ap.add_argument("--svt_motion_mask_enabled", action="store_true")
+    ap.add_argument("--svt_motion_keep_ratio", type=float, default=0.5)
+    ap.add_argument("--svt_motion_score_mode", type=str, default="mhi_flow", choices=["mhi_flow", "l1_mean"])
+    ap.add_argument("--svt_motion_mhi_weight", type=float, default=1.0)
+    ap.add_argument("--svt_motion_eps", type=float, default=1e-6)
 
     # Finetune behavior
     ap.add_argument("--freeze_backbone", action="store_true", default=True)
@@ -412,6 +454,7 @@ def main():
     ap.add_argument("--warmup_steps", type=int, default=1000)
     ap.add_argument("--min_lr", type=float, default=1e-6)
     ap.add_argument("--lambda_align", type=float, default=0.0)
+    ap.add_argument("--lambda_cls", type=float, default=0.0, help="Weight for auxiliary CLS-token classification loss when model provides logits_cls.")
     ap.add_argument("--label_smoothing", type=float, default=0.0)
     ap.add_argument("--mixup_alpha", type=float, default=0.0)
     ap.add_argument("--mixup_prob", type=float, default=0.0)
@@ -439,9 +482,6 @@ def main():
     ap.add_argument("--val_every", type=int, default=1, help="Validation interval after the skip.")
     ap.add_argument("--early_stop_patience", type=int, default=0, help="Stop if validation top1 does not improve for N validation checks (0 disables).")
     ap.add_argument("--early_stop_min_delta", type=float, default=0.0, help="Minimum top1 improvement required to reset early stopping counter.")
-    # Backward-compatible aliases (deprecated)
-    ap.add_argument("--eval_skip_epochs", type=int, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--eval_every", type=int, default=None, help=argparse.SUPPRESS)
 
     _default_device = (
         "mps"
@@ -454,25 +494,13 @@ def main():
 
     args = ap.parse_args()
 
-    # Resolve deprecated eval_* aliases into val_*.
-    if args.eval_modality is not None:
-        args.val_modality = args.eval_modality
-    if args.val_root_dir is None and args.eval_root_dir is not None:
-        args.val_root_dir = args.eval_root_dir
-    if args.val_manifest is None and args.eval_manifest is not None:
-        args.val_manifest = args.eval_manifest
-    if args.val_class_id_to_label_csv is None and args.eval_class_id_to_label_csv is not None:
-        args.val_class_id_to_label_csv = args.eval_class_id_to_label_csv
-    if args.val_class_text_json is None and args.eval_class_text_json is not None:
-        args.val_class_text_json = args.eval_class_text_json
-    if args.eval_subset_size is not None:
-        args.val_subset_size = args.eval_subset_size
-    if args.eval_skip_epochs is not None:
-        args.val_skip_epochs = args.eval_skip_epochs
-    if args.eval_every is not None:
-        args.val_every = args.eval_every
-
     print(args)
+
+    if args.text_bank_backend == "precomputed":
+        if not args.precomputed_text_embeddings or not args.precomputed_text_index:
+            raise ValueError(
+                "--text_bank_backend precomputed requires --precomputed_text_embeddings and --precomputed_text_index."
+            )
 
     os.makedirs(args.out_dir, exist_ok=True)
     args.tb_dir = os.path.join(args.out_dir, args.tb_dir)
@@ -513,6 +541,12 @@ def main():
     flow_max_disp = args.flow_max_disp if args.flow_max_disp is not None else ckpt_cfg.flow_max_disp
     fb_params = build_fb_params(args, ckpt_cfg)
 
+    selected_model = str(args.model if args.model is not None else ckpt_cfg.model).lower()
+    if selected_model not in ("i3d", "x3d", "svt"):
+        print(f"[WARN] Unsupported model '{selected_model}' from args/checkpoint; falling back to 'i3d'.", flush=True)
+        selected_model = "i3d"
+    args.model = selected_model
+
     embed_dim = args.embed_dim if args.embed_dim is not None else ckpt_cfg.embed_dim
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
     if args.fuse is None: args.fuse = fuse
@@ -547,6 +581,7 @@ def main():
 
     print(
         "[CONFIG] "
+        f"model={selected_model} "
         f"img_size={img_size} mhi_frames={mhi_frames} flow_frames={flow_frames} flow_hw={flow_hw} "
         f"mhi_windows={mhi_windows_str} embed_dim={embed_dim} fuse={fuse} dropout={dropout} "
         f"active_branch={active_branch} train_modality={train_modality} val_modality={val_modality} "
@@ -555,6 +590,15 @@ def main():
         f"diff_threshold={diff_threshold} flow_max_disp={flow_max_disp} fb_params={fb_params} "
         f"manifest={manifest_path}"
     )
+    if selected_model == "svt":
+        print(
+            "[SVT] "
+            f"patch={args.svt_patch_size} depth={args.svt_depth} heads={args.svt_num_heads} "
+            f"mlp_ratio={args.svt_mlp_ratio} max_frames={args.svt_max_frames if args.svt_max_frames is not None else max(mhi_frames, flow_frames)} "
+            f"mask={args.svt_motion_mask_enabled} keep_ratio={args.svt_motion_keep_ratio} "
+            f"score_mode={args.svt_motion_score_mode} mhi_weight={args.svt_motion_mhi_weight}",
+            flush=True,
+        )
 
     # Dataset (uses dataset_split_txt directly)
     if train_modality == "rgb":
@@ -701,13 +745,34 @@ def main():
         val_dataloader = None
         val_class_texts = None
 
-    # Text bank for NEW classes
-    clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
-        dataset_classnames=dataset.classnames,
-        device=device,
-        init_temp=0.07,
-        dtype=data_dtype,
-    )
+    train_class_texts = None
+    if args.train_class_text_json:
+        train_class_texts = _load_class_text_file(args.train_class_text_json)
+        print(
+            f"[TRAIN] custom prompts available for {len(train_class_texts)} entries from {args.train_class_text_json}",
+            flush=True,
+        )
+
+    # Text bank for training classes
+    if args.text_bank_backend == "precomputed":
+        clip_text_bank, logit_scale = load_precomputed_text_bank_and_logit_scale(
+            dataset_classnames=dataset.classnames,
+            device=device,
+            embeddings_npy=args.precomputed_text_embeddings,
+            index_json=args.precomputed_text_index,
+            key=args.precomputed_text_key,
+            class_id_to_label_csv=args.class_id_to_label_csv,
+            init_temp=0.07,
+            dtype=data_dtype,
+        )
+    else:
+        clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
+            dataset_classnames=dataset.classnames,
+            device=device,
+            init_temp=0.07,
+            dtype=data_dtype,
+            class_texts=train_class_texts,
+        )
     class_text_sim = None
     if args.rep_mix_semantic:
         t_norm = F.normalize(clip_text_bank, dim=-1).float()
@@ -716,18 +781,62 @@ def main():
 
     # Model
     model_first_channels = 3 if train_modality == "rgb" else len(mhi_windows)
-    model = TwoStreamI3D_CLIP(
-        mhi_channels=model_first_channels,
-        second_channels=ckpt_cfg.second_channels,
-        embed_dim=embed_dim,
-        fuse=fuse,
-        dropout=dropout,
-        init_scratch=(pretrained_path is None),
-        use_stems=ckpt_cfg.use_stems,
-        use_projection=ckpt_cfg.use_projection,
-        active_branch=active_branch,
-    ).to(device)
+    if selected_model == "i3d":
+        model = TwoStreamI3D_CLIP(
+            mhi_channels=model_first_channels,
+            second_channels=ckpt_cfg.second_channels,
+            embed_dim=embed_dim,
+            fuse=fuse,
+            dropout=dropout,
+            init_scratch=(pretrained_path is None),
+            use_stems=ckpt_cfg.use_stems,
+            use_projection=ckpt_cfg.use_projection,
+            active_branch=active_branch,
+        ).to(device)
+    elif selected_model == "x3d":
+        model = TwoStreamE2S_X3D_CLIP(
+            mhi_channels=model_first_channels,
+            flow_channels=ckpt_cfg.second_channels,
+            mhi_frames=args.rgb_frames if train_modality == "rgb" else mhi_frames,
+            flow_frames=flow_frames,
+            img_size=img_size,
+            flow_hw=flow_hw,
+            embed_dim=embed_dim,
+            fuse=fuse,
+            dropout=dropout,
+            use_projection=ckpt_cfg.use_projection,
+            active_branch=active_branch,
+        ).to(device)
+    elif selected_model == "svt":
+        model = TwoStreamSVT_CLIP(
+            mhi_channels=model_first_channels,
+            flow_channels=ckpt_cfg.second_channels,
+            mhi_frames=args.rgb_frames if train_modality == "rgb" else mhi_frames,
+            flow_frames=flow_frames,
+            img_size=img_size,
+            embed_dim=embed_dim,
+            semantic_dim=512,
+            patch_size=args.svt_patch_size,
+            depth=args.svt_depth,
+            num_heads=args.svt_num_heads,
+            mlp_ratio=args.svt_mlp_ratio,
+            attn_drop=args.svt_attn_drop,
+            proj_drop=args.svt_proj_drop,
+            max_frames=args.svt_max_frames,
+            motion_mask_enabled=args.svt_motion_mask_enabled,
+            motion_keep_ratio=args.svt_motion_keep_ratio,
+            motion_score_mode=args.svt_motion_score_mode,
+            motion_mhi_weight=args.svt_motion_mhi_weight,
+            motion_eps=args.svt_motion_eps,
+            num_classes=num_classes,
+            active_branch=active_branch,
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported model: {selected_model}")
 
+    if selected_model == "svt" and args.lambda_align > 0:
+        print("[WARN] lambda_align is ignored for svt fuse-only outputs. Setting lambda_align=0.", flush=True)
+        args.lambda_align = 0.0
     if args.lambda_align > 0 and not (getattr(model, "has_top", True) and getattr(model, "has_bot", True)):
         print("[WARN] lambda_align > 0 but active_branch is single-stream. Setting lambda_align=0.")
         args.lambda_align = 0.0
@@ -748,20 +857,31 @@ def main():
     else:
         print("[PRETRAIN] no checkpoint provided; model initialized from scratch.")
 
+    has_explicit_backbone_modules = (
+        getattr(model, "top", None) is not None
+        or getattr(model, "bot", None) is not None
+    )
+
     # Freeze trunks
     if args.freeze_backbone:
-        if getattr(model, "top", None) is not None:
-            freeze_module(model.top)
-        if getattr(model, "bot", None) is not None:
-            freeze_module(model.bot)
+        if has_explicit_backbone_modules:
+            if getattr(model, "top", None) is not None:
+                freeze_module(model.top)
+            if getattr(model, "bot", None) is not None:
+                freeze_module(model.bot)
+        else:
+            freeze_module(model)
 
     # Optional unfreeze
     unfreeze_list = [s.strip() for s in args.unfreeze_modules.split(",") if s.strip()]
     if unfreeze_list:
-        if getattr(model, "top", None) is not None:
-            unfreeze_named_submodules(model.top, unfreeze_list)
-        if getattr(model, "bot", None) is not None:
-            unfreeze_named_submodules(model.bot, unfreeze_list)
+        if has_explicit_backbone_modules:
+            if getattr(model, "top", None) is not None:
+                unfreeze_named_submodules(model.top, unfreeze_list)
+            if getattr(model, "bot", None) is not None:
+                unfreeze_named_submodules(model.bot, unfreeze_list)
+        else:
+            unfreeze_named_submodules(model, unfreeze_list)
 
     if args.freeze_bn_stats:
         force_bn_eval(model)
@@ -837,14 +957,18 @@ def main():
 
         model.train()
         if args.freeze_backbone:
-            if getattr(model, "top", None) is not None:
-                model.top.eval()
-            if getattr(model, "bot", None) is not None:
-                model.bot.eval()
+            if has_explicit_backbone_modules:
+                if getattr(model, "top", None) is not None:
+                    model.top.eval()
+                if getattr(model, "bot", None) is not None:
+                    model.bot.eval()
+            else:
+                model.eval()
         if args.freeze_bn_stats:
             force_bn_eval(model)
 
         run_clip = 0.0
+        run_cls = 0.0
         run_align = 0.0
         run_rep_mix = 0.0
         n_logs = 0
@@ -912,14 +1036,25 @@ def main():
                 else:
                     loss_rep_mix = torch.zeros((), device=clip_loss.device, dtype=clip_loss.dtype)
 
-                if args.lambda_align > 0:
-                    et = F.normalize(out["emb_top"], dim=-1)
-                    eb = F.normalize(out["emb_bot"], dim=-1)
+                logits_cls = out.get("logits_cls", None) if isinstance(out, dict) else None
+                if args.lambda_cls > 0 and logits_cls is not None:
+                    if labels_soft is not None:
+                        cls_loss = soft_target_cross_entropy(logits_cls, labels_soft)
+                    else:
+                        cls_loss = F.cross_entropy(logits_cls, labels, label_smoothing=args.label_smoothing)
+                else:
+                    cls_loss = torch.zeros((), device=clip_loss.device, dtype=clip_loss.dtype)
+
+                emb_top = out.get("emb_top", None) if isinstance(out, dict) else None
+                emb_bot = out.get("emb_bot", None) if isinstance(out, dict) else None
+                if args.lambda_align > 0 and emb_top is not None and emb_bot is not None:
+                    et = F.normalize(emb_top, dim=-1)
+                    eb = F.normalize(emb_bot, dim=-1)
                     align_loss = (1.0 - (et * eb).sum(dim=-1)).mean()
                 else:
                     align_loss = None
 
-                loss = clip_loss + args.lambda_rep_mix * loss_rep_mix
+                loss = clip_loss + args.lambda_rep_mix * loss_rep_mix + args.lambda_cls * cls_loss
                 if align_loss is not None:
                     loss = loss + args.lambda_align * align_loss
 
@@ -941,12 +1076,14 @@ def main():
             with torch.no_grad():
                 writer.add_scalar("loss/total", float(loss.item()), global_step)
                 writer.add_scalar("loss/clip", float(clip_loss.item()), global_step)
+                writer.add_scalar("loss/cls", float(cls_loss.item()), global_step)
                 writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
                 writer.add_scalar("lr", opt.param_groups[0]["lr"], global_step)
                 if align_loss is not None:
                     writer.add_scalar("loss/align", float(align_loss.item()), global_step)
 
                 run_clip += float(clip_loss.item())
+                run_cls += float(cls_loss.item())
                 run_align += float(align_loss.item()) if align_loss is not None else 0.0
                 run_rep_mix += float(loss_rep_mix.item())
                 n_logs += 1
@@ -957,6 +1094,7 @@ def main():
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:07d}] "
                         f"lr={opt.param_groups[0]['lr']:.6f} "
                         f"clip_loss={run_clip/n_logs:.4f} "
+                        f"cls_loss={run_cls/n_logs:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
                     if align_loss is not None:
@@ -969,7 +1107,7 @@ def main():
             print(f"[STOP] reached max_updates={args.max_updates}", flush=True)
 
         if n_logs > 0:
-            msg = f"[EPOCH {epoch:03d}] clip_loss={run_clip/n_logs:.4f}"
+            msg = f"[EPOCH {epoch:03d}] clip_loss={run_clip/n_logs:.4f} cls_loss={run_cls/n_logs:.4f}"
             if args.lambda_align > 0:
                 msg += f" align_loss={run_align/n_logs:.4f}"
             if args.lambda_rep_mix > 0:

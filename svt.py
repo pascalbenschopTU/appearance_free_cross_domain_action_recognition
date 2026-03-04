@@ -4,6 +4,25 @@ import torch.nn.functional as F
 from typing import Iterable, Tuple
 
 
+def drop_path(x: torch.Tensor, drop_prob: float = 0.0, training: bool = False) -> torch.Tensor:
+    if drop_prob == 0.0 or not training:
+        return x
+    keep_prob = 1.0 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    random_tensor.floor_()
+    return x.div(keep_prob) * random_tensor
+
+
+class DropPath(nn.Module):
+    def __init__(self, drop_prob: float = 0.0) -> None:
+        super().__init__()
+        self.drop_prob = float(drop_prob)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return drop_path(x, self.drop_prob, self.training)
+
+
 class FeedForward(nn.Module):
     """Standard Transformer MLP block."""
     def __init__(
@@ -125,6 +144,7 @@ class DividedSpaceTimeBlock(nn.Module):
         mlp_ratio: float = 4.0,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        drop_path_prob: float = 0.0,
     ) -> None:
         super().__init__()
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -156,6 +176,7 @@ class DividedSpaceTimeBlock(nn.Module):
             drop=proj_drop,
             act_layer=nn.GELU,
         )
+        self.drop_path = DropPath(drop_path_prob) if drop_path_prob > 0.0 else nn.Identity()
 
     def forward(
         self,
@@ -170,7 +191,7 @@ class DividedSpaceTimeBlock(nn.Module):
         xt, _ = self.temporal_attn(xt, xt, xt, need_weights=False)
         xt = self.temporal_fc(xt)
         xt = xt.reshape(b, n, t, d).permute(0, 2, 1, 3)   # [B, T, N, D]
-        patch_tokens = patch_tokens + xt
+        patch_tokens = patch_tokens + self.drop_path(xt)
 
         # ---- 2) Spatial attention (per frame across patches + cls) ----
         cls_rep = cls_token.unsqueeze(1).expand(-1, t, -1, -1)  # [B, T, 1, D]
@@ -182,14 +203,14 @@ class DividedSpaceTimeBlock(nn.Module):
         cls_update = xs[:, :, 0, :].mean(dim=1, keepdim=True)   # [B, 1, D]
         patch_update = xs[:, :, 1:, :]                          # [B, T, N, D]
 
-        cls_token = cls_token + cls_update
-        patch_tokens = patch_tokens + patch_update
+        cls_token = cls_token + self.drop_path(cls_update)
+        patch_tokens = patch_tokens + self.drop_path(patch_update)
 
         # ---- 3) MLP on all tokens ----
         all_tokens = torch.cat(
             [cls_token, patch_tokens.reshape(b, t * n, d)], dim=1
         )  # [B, 1+T*N, D]
-        all_tokens = all_tokens + self.mlp(self.norm_mlp(all_tokens))
+        all_tokens = all_tokens + self.drop_path(self.mlp(self.norm_mlp(all_tokens)))
 
         cls_token = all_tokens[:, :1, :]
         patch_tokens = all_tokens[:, 1:, :].reshape(b, t, n, d)
@@ -221,6 +242,7 @@ class SemanticVideoTransformer(nn.Module):
         mlp_ratio: float = 4.0,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        drop_path_rate: float = 0.1,
         semantic_dim: int = 600,
         semantic_hidden_dims: Iterable[int] = (2048, 2048, 1024),
         motion_mask_enabled: bool = False,
@@ -254,12 +276,13 @@ class SemanticVideoTransformer(nn.Module):
         # Learned summary token z_0^0(0)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
-        # Learned spatiotemporal positional embeddings:
-        # one for cls + one per (frame, patch)
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, 1 + max_frames * self.num_patches, embed_dim)
-        )
+        # TimeSformer-style positional embeddings:
+        # one spatial embedding table (cls + patches) and one temporal table.
+        self.pos_embed = nn.Parameter(torch.zeros(1, 1 + self.num_patches, embed_dim))
+        self.time_embed = nn.Parameter(torch.zeros(1, max_frames, embed_dim))
+        self.pos_drop = nn.Dropout(p=proj_drop)
 
+        dpr = torch.linspace(0, float(drop_path_rate), steps=depth).tolist() if depth > 0 else []
         self.blocks = nn.ModuleList(
             [
                 DividedSpaceTimeBlock(
@@ -268,8 +291,9 @@ class SemanticVideoTransformer(nn.Module):
                     mlp_ratio=mlp_ratio,
                     attn_drop=attn_drop,
                     proj_drop=proj_drop,
+                    drop_path_prob=float(dpr[i]),
                 )
-                for _ in range(depth)
+                for i in range(depth)
             ]
         )
 
@@ -281,10 +305,12 @@ class SemanticVideoTransformer(nn.Module):
         )
 
         self._init_weights()
+        self._init_temporal_attention_residual()
 
     def _init_weights(self) -> None:
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.time_embed, std=0.02)
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -298,6 +324,18 @@ class SemanticVideoTransformer(nn.Module):
             elif isinstance(m, nn.LayerNorm):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
+
+    def _init_temporal_attention_residual(self) -> None:
+        # Match TimeSformer initialization behavior:
+        # keep first block temporal_fc learned, zero-init deeper block temporal_fc
+        # so the model starts closer to an image-ViT prior.
+        for i, blk in enumerate(self.blocks):
+            if i == 0:
+                continue
+            if hasattr(blk, "temporal_fc"):
+                nn.init.constant_(blk.temporal_fc.weight, 0.0)
+                if blk.temporal_fc.bias is not None:
+                    nn.init.constant_(blk.temporal_fc.bias, 0.0)
 
     def _compute_motion_score_map(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -341,26 +379,18 @@ class SemanticVideoTransformer(nn.Module):
     def _apply_motion_mask(
         self,
         patch_tokens: torch.Tensor,   # [B, T, N, D]
-        t: int,
         idx: torch.Tensor,            # [B, T, k]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Returns:
             masked patch tokens flattened [B, T*k, D]
-            masked positional embeddings [B, T*k, D]
         """
-        b, _, _, d = patch_tokens.shape
-        k = idx.shape[-1]
+        b, t, _, d = patch_tokens.shape
+        k = int(idx.shape[-1])
 
         idx_exp = idx.unsqueeze(-1).expand(-1, -1, -1, d)
         masked_patch = torch.gather(patch_tokens, dim=2, index=idx_exp).reshape(b, t * k, d)
-
-        pos_patch = self.pos_embed[:, 1 : 1 + t * self.num_patches, :].reshape(
-            1, t, self.num_patches, d
-        )
-        pos_patch = pos_patch.expand(b, -1, -1, -1)
-        masked_pos = torch.gather(pos_patch, dim=2, index=idx_exp).reshape(b, t * k, d)
-        return masked_patch, masked_pos
+        return masked_patch
 
     def forward_features(
         self, x: torch.Tensor, return_mask_info: bool = False
@@ -379,21 +409,21 @@ class SemanticVideoTransformer(nn.Module):
         selected_idx = None
         k = self.num_patches
 
+        # Spatial + temporal positional encoding (TimeSformer style).
+        cls = self.cls_token.expand(b, -1, -1) + self.pos_embed[:, :1, :]
+        patch_tokens = patch_tokens + self.pos_embed[:, 1:, :].unsqueeze(1)
+        patch_tokens = patch_tokens + self.time_embed[:, :t, :].unsqueeze(2)
+        patch_tokens = self.pos_drop(patch_tokens)
+
         if self.motion_mask_enabled:
             score_map = self._compute_motion_score_map(x)
             patch_scores = self._compute_patch_scores(score_map)
             selected_idx, k = self._select_topk_indices(patch_scores)
-            flat_tokens, masked_pos = self._apply_motion_mask(patch_tokens, t, selected_idx)
+            flat_tokens = self._apply_motion_mask(patch_tokens, selected_idx)
         else:
             flat_tokens = patch_tokens.reshape(b, t * self.num_patches, self.embed_dim)
-            masked_pos = self.pos_embed[:, 1 : 1 + t * self.num_patches, :].expand(b, -1, -1)
 
-        cls = self.cls_token.expand(b, -1, -1)                 # [B, 1, D]
         tokens = torch.cat([cls, flat_tokens], dim=1)          # [B, 1+T*K, D]
-
-        cls_pos = self.pos_embed[:, :1, :].expand(b, -1, -1)
-        pos = torch.cat([cls_pos, masked_pos], dim=1)
-        tokens = tokens + pos
 
         cls = tokens[:, :1, :]
         patch_tokens = tokens[:, 1:, :].reshape(b, t, k, self.embed_dim)

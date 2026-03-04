@@ -1,0 +1,14 @@
+{
+  "Fight": [
+    "fight",
+    "punch",
+    "jab",
+    "kick"
+  ],
+  "NonFight": [
+    "walk",
+    "stand",
+    "dancing",
+    "hug"
+  ]
+}

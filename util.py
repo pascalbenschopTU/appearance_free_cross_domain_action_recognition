@@ -4,6 +4,7 @@ import glob
 import json
 import re
 import sys
+import csv
 from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 import math
 import torch
@@ -369,6 +370,113 @@ class LogitScale(nn.Module):
         # CLIP clamps in some implementations; keep it reasonable
         return self.logit_scale.clamp(min=np.log(1/100.0), max=np.log(1/0.01))
 
+
+def _infer_precomputed_text_key(num_classes: int) -> Optional[str]:
+    mapping = {
+        400: "kinetics_400_llm_labels",
+        101: "ucf_101_llm_labels",
+        51: "hmdb_51_llm_labels",
+    }
+    return mapping.get(int(num_classes), None)
+
+
+def _read_id_name_csv(csv_path: str) -> Dict[int, str]:
+    id2name: Dict[int, str] = {}
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or "id" not in reader.fieldnames or "name" not in reader.fieldnames:
+            raise ValueError(f"CSV must have columns id,name. Got: {reader.fieldnames}")
+        for row in reader:
+            if row is None:
+                continue
+            sid = str(row.get("id", "")).strip()
+            sname = str(row.get("name", "")).strip()
+            if sid == "":
+                continue
+            cid = int(sid)
+            id2name[cid] = sname
+    return id2name
+
+
+def load_precomputed_text_bank_and_logit_scale(
+    *,
+    dataset_classnames: List[str],
+    device: torch.device,
+    embeddings_npy: str,
+    index_json: str,
+    key: Optional[str] = None,
+    class_id_to_label_csv: Optional[str] = None,
+    init_temp: float = 0.07,
+    dtype=torch.float16,
+    l2_normalize: bool = True,
+) -> Tuple[torch.Tensor, LogitScale]:
+    """
+    Build text bank from precomputed sentence-transformer embeddings.
+    Expected files:
+      - embeddings_npy: stacked matrix (e.g., (552, 768))
+      - index_json: mapping from dataset key -> rows in embeddings_npy
+    """
+    emb = np.load(embeddings_npy)
+    if emb.ndim != 2:
+        raise ValueError(f"Expected 2D embeddings array, got shape={emb.shape} from {embeddings_npy}")
+
+    with open(index_json, "r", encoding="utf-8") as f:
+        idx_map = json.load(f)
+    if not isinstance(idx_map, dict):
+        raise ValueError(f"Index JSON must be a dict: {index_json}")
+
+    if key is None or str(key).strip() == "":
+        key = _infer_precomputed_text_key(len(dataset_classnames))
+    if key is None:
+        raise ValueError(
+            "Could not infer precomputed text key from class count. "
+            "Please pass --precomputed_text_key explicitly."
+        )
+    if key not in idx_map:
+        raise KeyError(f"precomputed_text_key '{key}' not found in index JSON: {index_json}")
+
+    spec = idx_map[key]
+    if not isinstance(spec, dict) or "rows" not in spec:
+        raise ValueError(f"Invalid index spec for key '{key}': expected dict with 'rows'.")
+    rows = [int(r) for r in spec["rows"]]
+    source = emb[rows]  # [K, D]
+
+    # Optional robust name->id->row remapping when classnames differ from id order.
+    if class_id_to_label_csv:
+        id2name = _read_id_name_csv(class_id_to_label_csv)
+        name2id = {_norm(v): int(k) for k, v in id2name.items()}
+        ordered: List[np.ndarray] = []
+        for cname in dataset_classnames:
+            norm_name = _norm(str(cname))
+            if norm_name not in name2id:
+                raise KeyError(
+                    f"Class '{cname}' not found in label CSV {class_id_to_label_csv}. "
+                    "Pass a matching CSV or disable precomputed backend."
+                )
+            cid = name2id[norm_name]
+            if cid < 0 or cid >= source.shape[0]:
+                raise IndexError(
+                    f"Class id {cid} for '{cname}' is out of range for key '{key}' "
+                    f"(size={source.shape[0]})."
+                )
+            ordered.append(source[cid])
+        bank_np = np.stack(ordered, axis=0)
+    else:
+        if len(dataset_classnames) != source.shape[0]:
+            raise ValueError(
+                f"Class count mismatch for key '{key}': dataset has {len(dataset_classnames)} classes, "
+                f"precomputed source has {source.shape[0]}. Provide --class_id_to_label_csv and/or --precomputed_text_key."
+            )
+        bank_np = source
+
+    text_bank = torch.from_numpy(bank_np).to(device=device, dtype=torch.float32)
+    if l2_normalize:
+        text_bank = F.normalize(text_bank, dim=-1)
+    text_bank = text_bank.to(dtype=dtype).detach()
+
+    logit_scale = LogitScale(init_temp=init_temp).to(device)
+    return text_bank, logit_scale
+
 def build_clip_text_bank_and_logit_scale(
     *,
     dataset_classnames,
@@ -651,7 +759,6 @@ def list_videos(
 
 
 from typing import List, Dict
-import csv
 
 def classnames_from_id_csv(
     csv_path: str,
