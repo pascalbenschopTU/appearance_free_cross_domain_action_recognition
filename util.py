@@ -1046,3 +1046,51 @@ def extract_motion_config_from_ckpt(
         fb_flags=int(_get(ckpt_args, "fb_flags", base.fb_flags)),
     )
     return cfg
+
+def apply_per_class_subset(dataset, max_per_class: int, seed: int):
+    from collections import defaultdict
+
+    if max_per_class <= 0:
+        return None
+    if not hasattr(dataset, "labels") or not hasattr(dataset, "paths"):
+        print("[WARN] Validation dataset has no labels/paths; skipping per-class subset.", flush=True)
+        return None
+
+    labels = list(dataset.labels)
+    paths = list(dataset.paths)
+    if len(labels) != len(paths):
+        print("[WARN] Validation dataset labels/paths length mismatch; skipping per-class subset.", flush=True)
+        return None
+
+    by_class = defaultdict(list)
+    for idx, y in enumerate(labels):
+        by_class[int(y)].append(int(idx))
+
+    rng = np.random.default_rng(int(seed))
+    selected = []
+    classes_with_shortage = 0
+    num_classes = int(len(getattr(dataset, "classnames", [])))
+
+    for cls_id in range(num_classes):
+        cls_indices = by_class.get(cls_id, [])
+        if not cls_indices:
+            classes_with_shortage += 1
+            continue
+        if len(cls_indices) <= max_per_class:
+            chosen = cls_indices
+            if len(cls_indices) < max_per_class:
+                classes_with_shortage += 1
+        else:
+            chosen = rng.choice(np.asarray(cls_indices), size=max_per_class, replace=False).tolist()
+        selected.extend(chosen)
+
+    selected = sorted(selected)
+    dataset.paths = [paths[i] for i in selected]
+    dataset.labels = [labels[i] for i in selected]
+
+    return {
+        "selected": int(len(selected)),
+        "num_classes": num_classes,
+        "max_per_class": int(max_per_class),
+        "classes_with_shortage": int(classes_with_shortage),
+    }

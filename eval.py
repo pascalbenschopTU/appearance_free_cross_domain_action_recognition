@@ -881,7 +881,7 @@ def main():
             flow_frames=flow_frames,
             img_size=img_size,
             embed_dim=embed_dim,
-            semantic_dim=512,
+            semantic_dim=int(_get(ckpt_args, "semantic_dim", embed_dim)),
             patch_size=int(_get(ckpt_args, "svt_patch_size", 16)),
             depth=int(_get(ckpt_args, "svt_depth", 12)),
             num_heads=int(_get(ckpt_args, "svt_num_heads", 12)),

@@ -266,6 +266,11 @@ def eval_on_validation_split(
                     dtype=clip_text_bank.dtype,
                 )
 
+        if torch.is_tensor(logit_scale_value):
+            logit_scale_scalar = float(logit_scale_value.detach().item())
+        else:
+            logit_scale_scalar = float(logit_scale_value)
+
         base_json = {
             "root_dir": root_dir if root_dir is not None else args.root_dir,
             "split": split_tag,
@@ -273,7 +278,7 @@ def eval_on_validation_split(
             "num_samples": int(len(eval_dataset)),
             "num_classes": int(len(eval_dataset.classnames)),
             "classnames": eval_dataset.classnames,
-            "logit_scale_motion": float(logit_scale_value),
+            "logit_scale_motion": logit_scale_scalar,
             "logit_scale_clip_vision": 0.0,
         }
 
