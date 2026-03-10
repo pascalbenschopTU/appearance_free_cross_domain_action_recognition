@@ -445,7 +445,9 @@ def compute_mhi_and_flow_stream(
     mhi_frames: int,
     flow_hw: int,
     flow_frames: int,
+    flow_backend: str,
     fb_params: Dict,
+    dis_params: Optional[Dict],
     flow_max_disp: float,
     flow_normalize: bool,
     out_dtype=torch.float16,
@@ -457,12 +459,46 @@ def compute_mhi_and_flow_stream(
       flow_out: (2, flow_frames, flow_hw, flow_hw)
     CPU tensors.
     """
+    flow_backend = str(flow_backend).lower()
+    if flow_backend not in ("farneback", "dis"):
+        raise ValueError(f"Unsupported flow_backend: {flow_backend}")
+
     C = len(mhi_windows)
     dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
     mhi = torch.zeros((C, img_size, img_size), dtype=torch.float32)
 
     flows = torch.zeros((2, flow_frames, flow_hw, flow_hw), dtype=torch.float32)
     mhi_out = torch.zeros((C, mhi_frames, img_size, img_size), dtype=torch.float32)
+
+    dis_flow = None
+    if flow_backend == "dis":
+        if not hasattr(cv2, "DISOpticalFlow_create"):
+            raise RuntimeError("flow_backend='dis' requires OpenCV with DISOpticalFlow support.")
+        dis_params = dis_params or {}
+        preset_name = str(dis_params.get("preset", "medium")).lower()
+        preset_map = {
+            "ultrafast": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
+            "fast": cv2.DISOPTICAL_FLOW_PRESET_FAST,
+            "medium": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
+        }
+        if preset_name not in preset_map:
+            raise ValueError(f"Unsupported DIS preset: {preset_name}")
+        dis_flow = cv2.DISOpticalFlow_create(preset_map[preset_name])
+        finest_scale = dis_params.get("finest_scale", None)
+        if finest_scale is not None:
+            dis_flow.setFinestScale(int(finest_scale))
+        gd_iters = dis_params.get("gradient_descent_iterations", None)
+        if gd_iters is not None:
+            dis_flow.setGradientDescentIterations(int(gd_iters))
+        vr_iters = dis_params.get("variational_refinement_iterations", None)
+        if vr_iters is not None:
+            dis_flow.setVariationalRefinementIterations(int(vr_iters))
+        patch_size = dis_params.get("patch_size", None)
+        if patch_size is not None and hasattr(dis_flow, "setPatchSize"):
+            dis_flow.setPatchSize(int(patch_size))
+        patch_stride = dis_params.get("patch_stride", None)
+        if patch_stride is not None and hasattr(dis_flow, "setPatchStride"):
+            dis_flow.setPatchStride(int(patch_stride))
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -527,7 +563,10 @@ def compute_mhi_and_flow_stream(
 
         if t in flow_set and prev_gray112 is not None:
             i = flow_pos[t]
-            flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
+            if flow_backend == "farneback":
+                flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
+            else:
+                flow = dis_flow.calc(prev_gray112, gray112, None)
             if flow_max_disp and flow_max_disp > 0:
                 np.clip(flow, -flow_max_disp, flow_max_disp, out=flow)
                 if flow_normalize:
@@ -552,7 +591,9 @@ class VideoMotionDataset(Dataset):
         flow_frames: int,
         mhi_windows: List[int],
         diff_threshold: float,
+        flow_backend: str = "farneback",
         fb_params: Dict,
+        dis_params: Optional[Dict] = None,
         flow_max_disp: float,
         flow_normalize: bool,
         roi_mode: str = "none",
@@ -575,7 +616,9 @@ class VideoMotionDataset(Dataset):
         self.flow_frames = flow_frames
         self.mhi_windows = mhi_windows
         self.diff_threshold = diff_threshold
+        self.flow_backend = str(flow_backend).lower()
         self.fb_params = fb_params
+        self.dis_params = dis_params or {}
         self.flow_max_disp = flow_max_disp
         self.flow_normalize = flow_normalize
         self.roi_mode = str(roi_mode)
@@ -630,7 +673,9 @@ class VideoMotionDataset(Dataset):
                 mhi_frames=self.mhi_frames,
                 flow_hw=self.flow_hw,
                 flow_frames=self.flow_frames,
+                flow_backend=self.flow_backend,
                 fb_params=self.fb_params,
+                dis_params=self.dis_params,
                 flow_max_disp=self.flow_max_disp,
                 flow_normalize=self.flow_normalize,
                 roi_xyxy=roi_xyxy,

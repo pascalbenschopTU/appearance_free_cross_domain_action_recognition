@@ -209,6 +209,17 @@ def build_fb_params(args, ckpt_cfg) -> Dict[str, Any]:
         flags=int(_pick(args.fb_flags, ckpt_cfg.fb_flags)),
     )
 
+
+def build_dis_params(args) -> Dict[str, Any]:
+    return dict(
+        preset=str(args.dis_preset),
+        finest_scale=args.dis_finest_scale,
+        gradient_descent_iterations=args.dis_gradient_descent_iterations,
+        variational_refinement_iterations=args.dis_variational_refinement_iterations,
+        patch_size=args.dis_patch_size,
+        patch_stride=args.dis_patch_stride,
+    )
+
 def eval_on_validation_split(
     *,
     args,
@@ -402,6 +413,7 @@ def main():
     ap.add_argument("--flow_max_disp", type=float, default=None, help="Clip flow to [-x, x] before model input.")
     ap.add_argument("--flow_normalize", action="store_true", default=True, help="Normalize flow by --flow_max_disp.")
     ap.add_argument("--no_flow_normalize", action="store_false", dest="flow_normalize")
+    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
     ap.add_argument("--fb_pyr_scale", type=float, default=None)
     ap.add_argument("--fb_levels", type=int, default=None)
     ap.add_argument("--fb_winsize", type=int, default=None)
@@ -409,6 +421,12 @@ def main():
     ap.add_argument("--fb_poly_n", type=int, default=None)
     ap.add_argument("--fb_poly_sigma", type=float, default=None)
     ap.add_argument("--fb_flags", type=int, default=None)
+    ap.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
+    ap.add_argument("--dis_finest_scale", type=int, default=None)
+    ap.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
+    ap.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
+    ap.add_argument("--dis_patch_size", type=int, default=None)
+    ap.add_argument("--dis_patch_stride", type=int, default=None)
     ap.add_argument("--roi_mode", type=str, default="none", choices=["none", "largest_motion", "yolo_person"])
     ap.add_argument("--roi_stride", type=int, default=3)
     ap.add_argument("--motion_roi_threshold", type=float, default=None)
@@ -545,6 +563,7 @@ def main():
     diff_threshold = args.diff_threshold if args.diff_threshold is not None else ckpt_cfg.diff_threshold
     flow_max_disp = args.flow_max_disp if args.flow_max_disp is not None else ckpt_cfg.flow_max_disp
     fb_params = build_fb_params(args, ckpt_cfg)
+    dis_params = build_dis_params(args)
 
     selected_model = str(args.model if args.model is not None else ckpt_cfg.model).lower()
     if selected_model not in ("i3d", "x3d", "svt"):
@@ -636,7 +655,9 @@ def main():
                 flow_frames=flow_frames,
                 mhi_windows=mhi_windows,
                 diff_threshold=diff_threshold,
+                flow_backend=args.flow_backend,
                 fb_params=fb_params,
+                dis_params=dis_params,
                 flow_max_disp=flow_max_disp,
                 flow_normalize=bool(args.flow_normalize),
                 roi_mode=args.roi_mode,
@@ -706,7 +727,9 @@ def main():
                 flow_frames=flow_frames,
                 mhi_windows=mhi_windows,
                 diff_threshold=diff_threshold,
+                flow_backend=args.flow_backend,
                 fb_params=fb_params,
+                dis_params=dis_params,
                 flow_max_disp=flow_max_disp,
                 flow_normalize=bool(args.flow_normalize),
                 roi_mode=args.roi_mode,

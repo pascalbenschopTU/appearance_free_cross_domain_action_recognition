@@ -15,6 +15,7 @@ from model_svt import TwoStreamSVT_CLIP
 from augment import (
     temporal_splice_mixup,
     soft_target_cross_entropy,
+    representation_mix_consistency_loss,
 )
 from util import (
     build_warmup_cosine_scheduler,
@@ -72,6 +73,7 @@ def main():
     ap.add_argument("--mhi_windows", type=str, default="15", help="comma list, e.g. 5,25")
     ap.add_argument("--diff_threshold", type=float, default=15.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
+    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
     ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
     ap.add_argument("--fb_levels", type=int, default=3)
     ap.add_argument("--fb_winsize", type=int, default=15)
@@ -79,6 +81,12 @@ def main():
     ap.add_argument("--fb_poly_n", type=int, default=5)
     ap.add_argument("--fb_poly_sigma", type=float, default=1.2)
     ap.add_argument("--fb_flags", type=int, default=0)
+    ap.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
+    ap.add_argument("--dis_finest_scale", type=int, default=None)
+    ap.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
+    ap.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
+    ap.add_argument("--dis_patch_size", type=int, default=None)
+    ap.add_argument("--dis_patch_stride", type=int, default=None)
 
     # Model / training
     ap.add_argument("--embed_dim", type=int, default=512)
@@ -134,6 +142,16 @@ def main():
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
+    ap.add_argument("--lambda_rep_mix", type=float, default=0.0,
+                    help="Weight for representation-space mix consistency loss.")
+    ap.add_argument("--rep_mix_alpha", type=float, default=0.4,
+                    help="Beta(alpha, alpha) parameter for representation-space mix.")
+    ap.add_argument("--rep_mix_semantic", action="store_true",
+                    help="Select representation-mix partners from semantically close classes within the current batch.")
+    ap.add_argument("--rep_mix_semantic_topk", type=int, default=3,
+                    help="Randomly choose among top-k semantic partners found in-batch.")
+    ap.add_argument("--rep_mix_semantic_min_sim", type=float, default=-1.0,
+                    help="Minimum cosine similarity for semantic partner candidates; values <= -1 disable filtering.")
     ap.add_argument("--lambda_clip_ce", type=float, default=1.0,
                     help="Weight for CLIP-style CE over text bank similarities.")
     ap.add_argument("--lambda_embed_l2", type=float, default=0.0,
@@ -306,6 +324,14 @@ def main():
                 poly_sigma=float(args.fb_poly_sigma),
                 flags=int(args.fb_flags),
             )
+            dis_params = dict(
+                preset=str(args.dis_preset),
+                finest_scale=args.dis_finest_scale,
+                gradient_descent_iterations=args.dis_gradient_descent_iterations,
+                variational_refinement_iterations=args.dis_variational_refinement_iterations,
+                patch_size=args.dis_patch_size,
+                patch_stride=args.dis_patch_stride,
+            )
             val_dataset = VideoMotionDataset(
                 args.val_root_dir,
                 img_size=args.img_size,
@@ -314,7 +340,9 @@ def main():
                 flow_frames=args.flow_frames,
                 mhi_windows=mhi_windows,
                 diff_threshold=args.diff_threshold,
+                flow_backend=args.flow_backend,
                 fb_params=fb_params,
+                dis_params=dis_params,
                 flow_max_disp=args.flow_max_disp,
                 flow_normalize=True,
                 out_dtype=data_dtype,
@@ -429,18 +457,24 @@ def main():
         raise ValueError("--lambda_embed_l2 must be >= 0")
     if args.lambda_embed_cos < 0:
         raise ValueError("--lambda_embed_cos must be >= 0")
+    if args.lambda_rep_mix < 0:
+        raise ValueError("--lambda_rep_mix must be >= 0")
     if args.lambda_ce < 0:
         raise ValueError("--lambda_ce must be >= 0")
     if args.sgd_momentum < 0 or args.sgd_momentum >= 1:
         raise ValueError("--sgd_momentum must be in [0, 1)")
     if not (0.0 <= args.class_text_label_weight <= 1.0):
         raise ValueError("--class_text_label_weight must be in [0, 1]")
+    if args.lambda_rep_mix > 0 and args.rep_mix_alpha <= 0:
+        raise ValueError("--rep_mix_alpha must be > 0 when --lambda_rep_mix > 0")
+    if args.rep_mix_semantic_topk <= 0:
+        raise ValueError("--rep_mix_semantic_topk must be >= 1")
     if args.lambda_ce > 0 and args.model in ("i3d", "x3d") and not args.use_projection:
         raise ValueError("--lambda_ce > 0 requires --use_projection to enable cls_head.")
-    if (args.lambda_clip_ce + args.lambda_embed_l2 + args.lambda_embed_cos + args.lambda_ce) <= 0:
+    if (args.lambda_clip_ce + args.lambda_embed_l2 + args.lambda_embed_cos + args.lambda_ce + args.lambda_rep_mix) <= 0:
         raise ValueError(
             "At least one loss weight must be > 0 among "
-            "--lambda_clip_ce, --lambda_embed_l2, --lambda_embed_cos, --lambda_ce."
+            "--lambda_clip_ce, --lambda_embed_l2, --lambda_embed_cos, --lambda_ce, --lambda_rep_mix."
         )
 
     # Student model
@@ -508,6 +542,10 @@ def main():
             f"Embedding dim mismatch: --embed_dim={args.embed_dim} but text bank dim={clip_text_bank.shape[-1]}. "
             "Set --embed_dim to match text embedding dim."
         )
+    class_text_sim = None
+    if args.rep_mix_semantic:
+        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+        class_text_sim = (t_norm @ t_norm.t()).detach()
     clip_text_bank_loss = clip_text_bank.float().detach()
 
     parameters = list(model.parameters()) + list(logit_scale.parameters())
@@ -564,6 +602,7 @@ def main():
     global_running_clip_loss = 0.0
     global_running_embed_l2 = 0.0
     global_running_embed_cos = 0.0
+    global_running_rep_mix = 0.0
     global_running_ce_loss = 0.0
     global_n_logs = 0
 
@@ -574,6 +613,7 @@ def main():
         running_clip_loss = 0.0
         running_embed_l2 = 0.0
         running_embed_cos = 0.0
+        running_rep_mix = 0.0
         running_ce_loss = 0.0
         n_logs = 0
 
@@ -659,10 +699,26 @@ def main():
                 else:
                     loss_ce = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
 
+                if args.lambda_rep_mix > 0:
+                    loss_rep_mix = representation_mix_consistency_loss(
+                        emb_fuse,
+                        labels,
+                        clip_text_bank,
+                        alpha=args.rep_mix_alpha,
+                        semantic_mix=args.rep_mix_semantic,
+                        semantic_topk=args.rep_mix_semantic_topk,
+                        semantic_min_sim=args.rep_mix_semantic_min_sim,
+                        labels_soft=labels_soft,
+                        class_text_sim=class_text_sim,
+                    ).to(dtype=loss_clip.dtype)
+                else:
+                    loss_rep_mix = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
+
                 loss = (
                     args.lambda_clip_ce * loss_clip
                     + args.lambda_embed_l2 * loss_embed_l2
                     + args.lambda_embed_cos * loss_embed_cos
+                    + args.lambda_rep_mix * loss_rep_mix
                     + args.lambda_ce * loss_ce
                 )
 
@@ -689,6 +745,7 @@ def main():
                         writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
                         writer.add_scalar("loss/embed_l2", float(loss_embed_l2.item()), global_step)
                         writer.add_scalar("loss/embed_cos", float(loss_embed_cos.item()), global_step)
+                        writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
                         writer.add_scalar("loss/ce", float(loss_ce.item()), global_step)
                         writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
                         writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp()), global_step)
@@ -699,12 +756,14 @@ def main():
                 running_clip_loss += float(loss_clip.item())
                 running_embed_l2 += float(loss_embed_l2.item())
                 running_embed_cos += float(loss_embed_cos.item())
+                running_rep_mix += float(loss_rep_mix.item())
                 running_ce_loss += float(loss_ce.item())
                 n_logs += 1
                 global_running_total_loss += float(loss.item())
                 global_running_clip_loss += float(loss_clip.item())
                 global_running_embed_l2 += float(loss_embed_l2.item())
                 global_running_embed_cos += float(loss_embed_cos.item())
+                global_running_rep_mix += float(loss_rep_mix.item())
                 global_running_ce_loss += float(loss_ce.item())
                 global_n_logs += 1
 
@@ -715,6 +774,7 @@ def main():
                     running_avg_clip = global_running_clip_loss / max(global_n_logs, 1)
                     running_avg_embed_l2 = global_running_embed_l2 / max(global_n_logs, 1)
                     running_avg_embed_cos = global_running_embed_cos / max(global_n_logs, 1)
+                    running_avg_rep_mix = global_running_rep_mix / max(global_n_logs, 1)
                     running_avg_ce = global_running_ce_loss / max(global_n_logs, 1)
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:06d} lr {learning_rate:.6f}] "
@@ -722,6 +782,7 @@ def main():
                         f"clip={running_avg_clip:.4f} "
                         f"embed_l2={running_avg_embed_l2:.4f} "
                         f"embed_cos={running_avg_embed_cos:.4f} "
+                        f"rep_mix={running_avg_rep_mix:.4f} "
                         f"ce={running_avg_ce:.4f} "
                         f"time={elapsed/60:.1f}m"
                     )
@@ -757,6 +818,7 @@ def main():
                 f"clip={running_clip_loss/n_logs:.4f} "
                 f"embed_l2={running_embed_l2/n_logs:.4f} "
                 f"embed_cos={running_embed_cos/n_logs:.4f} "
+                f"rep_mix={running_rep_mix/n_logs:.4f} "
                 f"ce={running_ce_loss/n_logs:.4f}"
             )
             print(msg)

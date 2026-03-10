@@ -649,7 +649,7 @@ def main():
         "--flow_backend",
         type=str,
         default="farneback",
-        choices=["farneback", "raft_large"],
+        choices=["farneback", "dis", "raft_large"],
         help="Flow extractor for on-the-fly evaluation.",
     )
     ap.add_argument(
@@ -682,6 +682,12 @@ def main():
     ap.add_argument("--fb_poly_n", type=int, default=5) # 5
     ap.add_argument("--fb_poly_sigma", type=float, default=1.2) # 1.2
     ap.add_argument("--fb_flags", type=int, default=0)
+    ap.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
+    ap.add_argument("--dis_finest_scale", type=int, default=None)
+    ap.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
+    ap.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
+    ap.add_argument("--dis_patch_size", type=int, default=None)
+    ap.add_argument("--dis_patch_stride", type=int, default=None)
 
     # Text bank options
     ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
@@ -808,6 +814,14 @@ def main():
         poly_n=int(_get(ckpt_args, "fb_poly_n", args.fb_poly_n)),
         poly_sigma=float(_get(ckpt_args, "fb_poly_sigma", args.fb_poly_sigma)),
         flags=int(_get(ckpt_args, "fb_flags", args.fb_flags)),
+    )
+    dis_params = dict(
+        preset=str(args.dis_preset),
+        finest_scale=args.dis_finest_scale,
+        gradient_descent_iterations=args.dis_gradient_descent_iterations,
+        variational_refinement_iterations=args.dis_variational_refinement_iterations,
+        patch_size=args.dis_patch_size,
+        patch_stride=args.dis_patch_stride,
     )
 
     # -----------------------------
@@ -970,7 +984,9 @@ def main():
                     flow_frames=flow_frames,
                     mhi_windows=mhi_windows,
                     diff_threshold=diff_threshold,
+                    flow_backend=args.flow_backend,
                     fb_params=fb_params,
+                    dis_params=dis_params,
                     flow_max_disp=flow_max_disp,
                     flow_normalize=True,
                     roi_mode=args.roi_mode,
