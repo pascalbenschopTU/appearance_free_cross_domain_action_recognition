@@ -482,6 +482,7 @@ def main():
     ap.add_argument("--mixup_alpha", type=float, default=0.0)
     ap.add_argument("--mixup_prob", type=float, default=0.0)
     ap.add_argument("--p_affine", type=float, default=0.25, help="Probability of applying geometric affine augmentation in MotionTwoStreamZstdDataset.")
+    ap.add_argument("--motion_spatial_crop",type=str,default="random",choices=["random", "motion"])
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
@@ -683,6 +684,7 @@ def main():
                 out_dtype=data_dtype,
                 p_hflip=0.5,
                 p_affine=args.p_affine,
+                spatial_crop_mode=args.motion_spatial_crop,
                 seed=args.seed,
                 dataset_split_txt=manifest_path,
                 class_id_to_label_csv=args.class_id_to_label_csv,

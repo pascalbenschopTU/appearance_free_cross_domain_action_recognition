@@ -124,6 +124,7 @@ def main():
     ap.add_argument("--probability_hflip", type=float, default=0.5)
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
     ap.add_argument("--probability_affine", type=float, default=0.0, help="rotate,translate,scale,shear")
+    ap.add_argument("--motion_spatial_crop",type=str,default="random",choices=["random", "motion"])
     ap.add_argument("--class_text_json", type=str, default="")
     ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
     ap.add_argument("--precomputed_text_embeddings", type=str, default="")
@@ -267,6 +268,7 @@ def main():
             p_hflip=args.probability_hflip,
             p_max_drop_frame=args.max_probability_drop_frame,
             p_affine=args.probability_affine,
+            spatial_crop_mode=args.motion_spatial_crop,
             seed=args.seed,
         )
         collate_fn = collate_motion

@@ -329,3 +329,28 @@ def crop_frame_by_roi(
     if cropped.shape[0] <= 1 or cropped.shape[1] <= 1:
         return frame_bgr
     return cropped
+
+
+def resize_frame_preserve_height(
+    frame_bgr: np.ndarray,
+    target_height: int,
+    interpolation: int = cv2.INTER_AREA,
+) -> np.ndarray:
+    """
+    Resize to a fixed height while preserving aspect ratio.
+    Width is rounded to the nearest positive integer.
+    """
+    if frame_bgr is None or frame_bgr.size == 0:
+        return frame_bgr
+
+    target_height = int(target_height)
+    if target_height <= 0:
+        return frame_bgr
+
+    src_h, src_w = frame_bgr.shape[:2]
+    if src_h <= 0 or src_w <= 0:
+        return frame_bgr
+
+    scale = float(target_height) / float(src_h)
+    target_width = max(1, int(round(float(src_w) * scale)))
+    return cv2.resize(frame_bgr, (target_width, target_height), interpolation=interpolation)

@@ -45,6 +45,7 @@ from multiprocessing import get_context
 from cropping_util import (
     detect_square_roi_largest_motion,
     detect_square_roi_yolo_person,
+    resize_frame_preserve_height,
     yolo_import_error_repr,
     yolo_is_available,
 )
@@ -221,9 +222,9 @@ def compute_mhi_and_flow_stream_cpu(
     path: str,
     mhi_windows: List[int],
     diff_threshold: float,
-    img_size: int = 224,
+    img_size: int = 256,
     mhi_frames: int = 32,
-    flow_hw: int = 112,
+    flow_hw: int = 124,
     flow_frames: int = 128,
     flow_backend: str = "farneback",
     fb_params: Dict = None,
@@ -238,13 +239,6 @@ def compute_mhi_and_flow_stream_cpu(
         raise ValueError(f"Unsupported flow_backend: {flow_backend}")
     fb_params = fb_params or {}
     dis_flow = build_dis_flow(dis_params) if flow_backend == "dis" else None
-
-    C = len(mhi_windows)
-    dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
-    mhi = torch.zeros((C, img_size, img_size), dtype=torch.float32)
-
-    flows = torch.zeros((2, flow_frames, flow_hw, flow_hw), dtype=torch.float32)
-    mhi_out = torch.zeros((C, mhi_frames, img_size, img_size), dtype=torch.float32)
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -274,6 +268,11 @@ def compute_mhi_and_flow_stream_cpu(
     prev_gray112 = None
     t = -1
     last_needed = int(flow_idx[-1].item())
+    C = len(mhi_windows)
+    dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
+    mhi = None
+    flows = None
+    mhi_out = None
 
     while True:
         ok, frame_bgr = cap.read()
@@ -290,8 +289,15 @@ def compute_mhi_and_flow_stream_cpu(
             if cropped.shape[0] > 1 and cropped.shape[1] > 1:
                 frame_src = cropped
 
-        frame224 = cv2.resize(frame_src, (img_size, img_size), interpolation=cv2.INTER_AREA)
-        frame112 = cv2.resize(frame224, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
+        frame224 = resize_frame_preserve_height(frame_src, img_size, interpolation=cv2.INTER_AREA)
+        frame112 = resize_frame_preserve_height(frame_src, flow_hw, interpolation=cv2.INTER_AREA)
+
+        if mhi is None:
+            mhi_h, mhi_w = frame224.shape[:2]
+            flow_h, flow_w = frame112.shape[:2]
+            mhi = torch.zeros((C, mhi_h, mhi_w), dtype=torch.float32)
+            flows = torch.zeros((2, flow_frames, flow_h, flow_w), dtype=torch.float32)
+            mhi_out = torch.zeros((C, mhi_frames, mhi_h, mhi_w), dtype=torch.float32)
 
         gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
         gray112 = cv2.cvtColor(frame112, cv2.COLOR_BGR2GRAY)
@@ -326,6 +332,8 @@ def compute_mhi_and_flow_stream_cpu(
         prev_gray112 = gray112
 
     cap.release()
+    if mhi_out is None or flows is None:
+        raise RuntimeError(f"Video yielded no decodable frames: {path}")
     return mhi_out.to(out_dtype), flows.to(out_dtype)
 
 
@@ -697,9 +705,9 @@ def main():
     # feature config
     p.add_argument("--mhi_windows", type=int, nargs="+", default=[15])
     p.add_argument("--diff_threshold", type=float, default=15.0)
-    p.add_argument("--img_size", type=int, default=224)
+    p.add_argument("--img_size", type=int, default=256, help="MHI pre-resize height while preserving aspect ratio")
     p.add_argument("--mhi_frames", type=int, default=32)
-    p.add_argument("--flow_hw", type=int, default=112)
+    p.add_argument("--flow_hw", type=int, default=124, help="Flow pre-resize height while preserving aspect ratio")
     p.add_argument("--flow_frames", type=int, default=128)
     p.add_argument("--flow_max_disp", type=float, default=20.0)
     p.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
