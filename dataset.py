@@ -300,7 +300,6 @@ class MotionTwoStreamZstdDataset(Dataset):
     def __getitem__(self, idx: int):
         video_path = self.paths[idx]
         label = self.labels[idx]
-        cname = self.classnames[label]
 
         try:
             dctx = self._get_dctx()
@@ -363,12 +362,12 @@ class MotionTwoStreamZstdDataset(Dataset):
             mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
             second = torch.zeros((self.in_ch_second, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
 
-        return mhi, second, label, cname
+        return mhi, second, label, video_path
 
 def collate_motion(batch):
-    mhi, flow, labels, cnames = zip(*batch)
+    mhi, flow, labels, sample_ids = zip(*batch)
     return (torch.stack(mhi, 0), torch.stack(flow, 0),
-            torch.tensor(labels, dtype=torch.long), list(cnames))
+            torch.tensor(labels, dtype=torch.long), list(sample_ids))
 
 
 def _sample_rgb_indices(

@@ -7,3 +7,5 @@ run_scripts.txt
 workspace/
 logs/
 scripts/
+
+kinetics400_train_description_matches_clip.csv

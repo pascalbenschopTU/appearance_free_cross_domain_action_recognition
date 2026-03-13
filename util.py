@@ -17,8 +17,8 @@ from dataclasses import dataclass
 
 try:
     import clip  # openai clip
-except Exception as e:
-    raise RuntimeError("Could not import 'clip'. Install OpenAI CLIP (or adapt to open_clip).") from e
+except Exception:
+    clip = None
 
 CLIP_TEMPLATES = [
     "{}",
@@ -29,6 +29,19 @@ CLIP_TEMPLATES = [
     "the action of {}",
     "a clip of {}",
 ]
+
+KINETICS_CLASS_KEY_ALIASES = {
+    "barbequing": "barbecuing",
+    "driving car": "driving a car",
+    "driving tractor": "driving a tractor",
+    "eating burger": "eating a burger",
+    "giving or receiving award": "giving or receiving an award",
+    "passing American football (in game)": "passing american football (in game)",
+    "passing American football (not in game)": "passing american football (not in game)",
+    "skiing (not slalom or crosscountry)": "skiing (not slalom or cross-country)",
+    "skiing crosscountry": "skiing cross-country",
+    "swimming breast stroke": "swimming breaststroke",
+}
 
 # ----------------------------
 # Checkpoint loading
@@ -206,16 +219,23 @@ def adapt_class_texts(
     if not isinstance(data, dict):
         raise ValueError("class_texts must be a dict or JSON string encoding a dict.")
 
+    expanded_data = dict(data)
+    for dataset_key, source_key in KINETICS_CLASS_KEY_ALIASES.items():
+        if dataset_key not in expanded_data and source_key in data:
+            expanded_data[dataset_key] = data[source_key]
+    data = expanded_data
+
     cname_by_norm = {_norm(c): c for c in classnames}
     out: Dict[str, Dict[str, List[str]]] = {}
 
     def resolve_raw_name(name: str, fallback: Optional[str] = None) -> str:
-        resolved = cname_by_norm.get(_norm(str(name)))
+        name_str = str(name)
+        resolved = cname_by_norm.get(_norm(name_str))
         if resolved is not None:
             return resolved
         if fallback is not None:
             return fallback
-        return str(name)
+        return name_str
 
     numeric_keys = all(isinstance(k, str) and k.isdigit() for k in data.keys())
     if numeric_keys:
@@ -252,6 +272,8 @@ def load_clip_text_encoder(device: torch.device):
     Returns:
       clip_model, tokenize_fn
     """
+    if clip is None:
+        raise RuntimeError("Could not import 'clip'. Install OpenAI CLIP (or adapt to open_clip).")
     clip_model, _ = clip.load("ViT-B/32", device=device, jit=False)
     clip_model.eval()
     for p in clip_model.parameters():
@@ -359,6 +381,358 @@ def build_text_bank(
         all_class_embs.append(cls_emb)
 
     return torch.stack(all_class_embs, dim=0)  # (C,512)
+
+
+@dataclass
+class DescriptionTextBank:
+    text_bank: torch.Tensor
+    class_to_desc_indices: torch.Tensor
+    desc_to_class_index: torch.Tensor
+    description_texts: List[str]
+    descriptions_per_class: int
+
+
+@dataclass
+class DescriptionMatchRecord:
+    sample_key: str
+    class_index: int
+    description_index: int
+    description_abs_index: int
+    probability: float
+    margin: float
+
+
+@dataclass
+class DescriptionMatchResolver:
+    root_dir: Path
+    class_to_desc_indices: torch.Tensor
+    exact_records: Dict[str, DescriptionMatchRecord]
+    dir_stem_records: Dict[Tuple[str, str], DescriptionMatchRecord]
+    stem_records: Dict[str, DescriptionMatchRecord]
+    ambiguous_stems: Dict[str, List[str]]
+    margin_p50: float
+    margin_p90: float
+    neg_mass: float = 0.02
+    top_weight_min: float = 0.60
+    top_weight_max: float = 0.90
+
+    def normalize_sample_key(self, sample_path_or_key: str) -> str:
+        sample = Path(str(sample_path_or_key))
+        if sample.is_absolute():
+            try:
+                sample = sample.resolve().relative_to(self.root_dir)
+            except ValueError:
+                sample = sample.name
+        return sample.as_posix().replace("\\", "/").lstrip("./").lower()
+
+    def resolve(self, sample_path_or_key: str) -> DescriptionMatchRecord:
+        sample_key = self.normalize_sample_key(sample_path_or_key)
+        record = self.exact_records.get(sample_key)
+        if record is not None:
+            return record
+
+        parent = Path(sample_key).parent.as_posix().lower()
+        if parent == ".":
+            parent = ""
+        stem = Path(sample_key).stem.lower()
+
+        record = self.dir_stem_records.get((parent, stem))
+        if record is not None:
+            return record
+
+        if stem in self.ambiguous_stems:
+            raise KeyError(
+                f"Ambiguous stem-only match for '{sample_key}' (stem='{stem}'): {self.ambiguous_stems[stem]}"
+            )
+
+        record = self.stem_records.get(stem)
+        if record is not None:
+            return record
+
+        raise KeyError(f"No description match found for sample '{sample_key}'.")
+
+    def validate_paths(self, sample_paths: Sequence[str]) -> None:
+        missing: List[str] = []
+        for sample_path in sample_paths:
+            try:
+                self.resolve(sample_path)
+            except KeyError as exc:
+                missing.append(str(exc))
+                if len(missing) >= 5:
+                    break
+        if missing:
+            joined = "\n".join(missing)
+            raise KeyError(f"Description-match coverage failed. First missing/invalid entries:\n{joined}")
+
+    def top_weight_from_margin(self, margin: float) -> float:
+        denom = max(float(self.margin_p90) - float(self.margin_p50), 1e-6)
+        conf = float(np.clip((float(margin) - float(self.margin_p50)) / denom, 0.0, 1.0))
+        return float(self.top_weight_min + conf * (self.top_weight_max - self.top_weight_min))
+
+    def build_targets(
+        self,
+        sample_paths: Sequence[str],
+        *,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = len(sample_paths)
+        class_to_desc = self.class_to_desc_indices.to(device=device)
+        descs_per_class = int(class_to_desc.shape[1])
+        num_descriptions = int(class_to_desc.max().item()) + 1
+
+        same_class_mass = 1.0 - float(self.neg_mass)
+        neg_value = 0.0
+        if num_descriptions > descs_per_class:
+            neg_value = float(self.neg_mass) / float(num_descriptions - descs_per_class)
+
+        targets = torch.full(
+            (batch_size, num_descriptions),
+            neg_value,
+            device=device,
+            dtype=dtype,
+        )
+        matched_desc_indices = torch.empty((batch_size,), device=device, dtype=torch.long)
+
+        for row_idx, sample_path in enumerate(sample_paths):
+            record = self.resolve(sample_path)
+            desc_indices = class_to_desc[record.class_index]
+            if descs_per_class > 1:
+                top_weight = self.top_weight_from_margin(record.margin)
+                other_weight = same_class_mass * (1.0 - top_weight) / float(descs_per_class - 1)
+            else:
+                top_weight = 1.0
+                other_weight = 0.0
+
+            targets[row_idx, desc_indices] = other_weight
+            targets[row_idx, record.description_abs_index] = same_class_mass * top_weight
+            matched_desc_indices[row_idx] = int(record.description_abs_index)
+
+        return targets, matched_desc_indices
+
+
+def build_description_text_bank(
+    clip_model,
+    tokenize_fn,
+    classnames: List[str],
+    device: torch.device,
+    templates: List[str],
+    class_texts: Optional[Dict[str, Any]] = None,
+    *,
+    l2_normalize: bool = True,
+    apply_templates_to_class_descriptions: bool = False,
+) -> DescriptionTextBank:
+    class_text_entries = adapt_class_texts(class_texts, classnames) if class_texts is not None else {}
+
+    def prompts_from_texts(texts: List[str], apply_templates: bool) -> List[str]:
+        prompts: List[str] = []
+        for text in texts:
+            t = str(text).strip()
+            if not t:
+                continue
+            if apply_templates:
+                for template in templates:
+                    prompts.append(template.format(t))
+            else:
+                prompts.append(t)
+        return prompts
+
+    def encode_prompt_set(prompts: List[str]) -> Optional[torch.Tensor]:
+        if not prompts:
+            return None
+        tok = tokenize_fn(prompts).to(device)
+        feats = clip_model.encode_text(tok)
+        if l2_normalize:
+            feats = F.normalize(feats, dim=-1)
+        emb = feats.mean(dim=0)
+        if l2_normalize:
+            emb = F.normalize(emb, dim=-1)
+        return emb
+
+    all_desc_embs: List[torch.Tensor] = []
+    class_to_desc: List[List[int]] = []
+    desc_to_class: List[int] = []
+    description_texts: List[str] = []
+    descriptions_per_class: Optional[int] = None
+
+    for class_idx, raw in enumerate(classnames):
+        entry = class_text_entries.get(raw, {"labels": [], "descriptions": []})
+        desc_texts: List[str] = []
+        for s in entry.get("descriptions", []):
+            _append_unique(desc_texts, s)
+        if not desc_texts:
+            raise ValueError(f"Class '{raw}' does not contain any descriptions for description-level supervision.")
+
+        if descriptions_per_class is None:
+            descriptions_per_class = len(desc_texts)
+        elif len(desc_texts) != descriptions_per_class:
+            raise ValueError(
+                f"Description bank requires a fixed descriptions-per-class count. "
+                f"Expected {descriptions_per_class} for '{raw}', got {len(desc_texts)}."
+            )
+
+        desc_indices: List[int] = []
+        for desc_text in desc_texts:
+            desc_emb = encode_prompt_set(
+                prompts_from_texts([desc_text], apply_templates_to_class_descriptions)
+            )
+            if desc_emb is None:
+                raise RuntimeError(f"Could not build description embedding for class '{raw}': {desc_text!r}")
+            desc_indices.append(len(all_desc_embs))
+            all_desc_embs.append(desc_emb)
+            desc_to_class.append(class_idx)
+            description_texts.append(str(desc_text).strip())
+        class_to_desc.append(desc_indices)
+
+    if not all_desc_embs:
+        raise ValueError("No description embeddings were created.")
+
+    return DescriptionTextBank(
+        text_bank=torch.stack(all_desc_embs, dim=0),
+        class_to_desc_indices=torch.tensor(class_to_desc, dtype=torch.long),
+        desc_to_class_index=torch.tensor(desc_to_class, dtype=torch.long),
+        description_texts=description_texts,
+        descriptions_per_class=int(descriptions_per_class or 0),
+    )
+
+
+def build_clip_description_bank_and_logit_scale(
+    *,
+    dataset_classnames,
+    device: torch.device,
+    init_temp: float = 0.07,
+    dtype=torch.float16,
+    class_texts=None,
+    apply_templates_to_class_descriptions: bool = False,
+):
+    clip_model, tokenize_fn = load_clip_text_encoder(device)
+    logit_scale = LogitScale(init_temp=init_temp).to(device)
+    desc_bank = build_description_text_bank(
+        clip_model=clip_model,
+        tokenize_fn=tokenize_fn,
+        classnames=list(dataset_classnames),
+        device=device,
+        templates=CLIP_TEMPLATES,
+        class_texts=class_texts,
+        apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+    )
+    desc_bank.text_bank = desc_bank.text_bank.to(dtype=dtype).to(device).detach()
+    return desc_bank, logit_scale
+
+
+def aggregate_description_logits_to_classes(
+    logits: torch.Tensor,
+    class_to_desc_indices: torch.Tensor,
+) -> torch.Tensor:
+    if logits.ndim != 2:
+        raise ValueError(f"Expected logits with shape (B, N), got {tuple(logits.shape)}")
+    if class_to_desc_indices.ndim != 2:
+        raise ValueError(
+            f"Expected class_to_desc_indices with shape (C, K), got {tuple(class_to_desc_indices.shape)}"
+        )
+    idx = class_to_desc_indices.to(device=logits.device, dtype=torch.long)
+    gathered = logits.index_select(1, idx.reshape(-1))
+    gathered = gathered.reshape(logits.shape[0], idx.shape[0], idx.shape[1])
+    return torch.logsumexp(gathered, dim=-1) - math.log(float(idx.shape[1]))
+
+
+def build_description_match_resolver(
+    *,
+    csv_path: Union[str, Path],
+    root_dir: Union[str, Path],
+    classnames: Sequence[str],
+    class_to_desc_indices: torch.Tensor,
+    neg_mass: float = 0.02,
+    top_weight_min: float = 0.60,
+    top_weight_max: float = 0.90,
+) -> DescriptionMatchResolver:
+    csv_path = Path(csv_path).expanduser().resolve()
+    root_dir = Path(root_dir).expanduser().resolve()
+    class_to_desc_indices = class_to_desc_indices.detach().cpu()
+
+    if class_to_desc_indices.ndim != 2:
+        raise ValueError("class_to_desc_indices must have shape (num_classes, descriptions_per_class)")
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Description match CSV does not exist: {csv_path}")
+
+    class_idx_by_norm = {_norm(name): idx for idx, name in enumerate(classnames)}
+    exact_records: Dict[str, DescriptionMatchRecord] = {}
+    dir_stem_records: Dict[Tuple[str, str], DescriptionMatchRecord] = {}
+    stem_lists: Dict[str, List[str]] = {}
+    stem_records_raw: Dict[str, List[DescriptionMatchRecord]] = {}
+    margins: List[float] = []
+
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if row.get("status", "").strip().lower() != "ok":
+                continue
+            sample_key = Path(str(row["video_relpath"]).strip()).as_posix().lstrip("./").lower()
+            parent = Path(sample_key).parent.as_posix().lower()
+            if parent == ".":
+                parent = ""
+            stem = Path(sample_key).stem.lower()
+
+            class_key = str(row.get("class_dir_label") or row.get("class_description_key") or "").strip()
+            class_idx = class_idx_by_norm.get(_norm(class_key))
+            if class_idx is None:
+                continue
+
+            desc_index = int(row["description_index"])
+            if desc_index < 0 or desc_index >= int(class_to_desc_indices.shape[1]):
+                raise IndexError(
+                    f"CSV description_index {desc_index} is out of range for class '{class_key}'."
+                )
+            desc_abs_index = int(class_to_desc_indices[class_idx, desc_index].item())
+            probability = float(row.get("probability", 0.0) or 0.0)
+            margin = float(row.get("margin", 0.0) or 0.0)
+
+            record = DescriptionMatchRecord(
+                sample_key=sample_key,
+                class_index=class_idx,
+                description_index=desc_index,
+                description_abs_index=desc_abs_index,
+                probability=probability,
+                margin=margin,
+            )
+            if sample_key in exact_records:
+                raise KeyError(f"Duplicate exact description-match entry for '{sample_key}'.")
+            exact_records[sample_key] = record
+            if (parent, stem) in dir_stem_records:
+                raise KeyError(
+                    f"Duplicate dir+stem description-match entry for parent='{parent}', stem='{stem}'."
+                )
+            dir_stem_records[(parent, stem)] = record
+            stem_lists.setdefault(stem, []).append(sample_key)
+            stem_records_raw.setdefault(stem, []).append(record)
+            margins.append(margin)
+
+    if not exact_records:
+        raise ValueError(f"No valid 'ok' rows found in description match CSV: {csv_path}")
+
+    ambiguous_stems = {stem: keys for stem, keys in stem_lists.items() if len(keys) > 1}
+    stem_records = {
+        stem: records[0]
+        for stem, records in stem_records_raw.items()
+        if len(records) == 1
+    }
+    margin_arr = np.asarray(margins, dtype=np.float64)
+    margin_p50 = float(np.percentile(margin_arr, 50))
+    margin_p90 = float(np.percentile(margin_arr, 90))
+
+    return DescriptionMatchResolver(
+        root_dir=root_dir,
+        class_to_desc_indices=class_to_desc_indices,
+        exact_records=exact_records,
+        dir_stem_records=dir_stem_records,
+        stem_records=stem_records,
+        ambiguous_stems=ambiguous_stems,
+        margin_p50=margin_p50,
+        margin_p90=margin_p90,
+        neg_mass=float(neg_mass),
+        top_weight_min=float(top_weight_min),
+        top_weight_max=float(top_weight_max),
+    )
 
 class LogitScale(nn.Module):
     def __init__(self, init_temp=0.07):

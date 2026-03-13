@@ -43,10 +43,15 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
-from util import build_text_bank, LogitScale, load_precomputed_text_bank_and_logit_scale
+from util import (
+    aggregate_description_logits_to_classes,
+    build_text_bank,
+    LogitScale,
+    load_precomputed_text_bank_and_logit_scale,
+)
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from model_svt import TwoStreamSVT_CLIP
+from svt import TwoStreamSVT_CLIP
 from dataset import (
     RGBVideoClipDataset,
     collate_rgb_clip,
@@ -412,6 +417,7 @@ def evaluate_one_split(
     clip_model,
     clip_preprocess,
     text_bank,
+    class_to_desc_indices=None,
     scale_motion: float,
     scale_clip: float,
     num_classes: int,
@@ -508,6 +514,12 @@ def evaluate_one_split(
                     raise RuntimeError("Model output missing required key 'emb_fuse'.")
                 v = F.normalize(emb_fuse.float(), dim=-1)
                 logits_by_head["fuse"] = scale_motion * (v @ text_bank.t().float())
+                if class_to_desc_indices is not None:
+                    for head_name, head_logits in list(logits_by_head.items()):
+                        logits_by_head[head_name] = aggregate_description_logits_to_classes(
+                            head_logits,
+                            class_to_desc_indices,
+                        )
 
                 logits_motion_ens = None
                 for h, w in zip(heads_ens, wts):
@@ -530,6 +542,8 @@ def evaluate_one_split(
                         "Use --no_rgb for this setup."
                     )
                 logits_rgb = scale_clip * (v_rgb @ text_bank.t().float())
+                if class_to_desc_indices is not None:
+                    logits_rgb = aggregate_description_logits_to_classes(logits_rgb, class_to_desc_indices)
                 logits_fused_ens = w_motion * logits_motion_ens + w_rgb * logits_rgb
 
             y_true_all.append(y.detach().cpu().numpy())
@@ -878,6 +892,7 @@ def main():
         ).to(device)
     elif selected_model == "svt":
         print("selected svt model", flush=True)
+        svt_num_heads = int(_get(ckpt_args, "svt_num_heads", 12))
         svt_max_frames_raw = _get(
             ckpt_args,
             "svt_max_frames",
@@ -898,7 +913,7 @@ def main():
             semantic_dim=int(_get(ckpt_args, "semantic_dim", embed_dim)),
             patch_size=int(_get(ckpt_args, "svt_patch_size", 16)),
             depth=int(_get(ckpt_args, "svt_depth", 12)),
-            num_heads=int(_get(ckpt_args, "svt_num_heads", 12)),
+            num_heads=svt_num_heads,
             mlp_ratio=float(_get(ckpt_args, "svt_mlp_ratio", 4.0)),
             attn_drop=float(_get(ckpt_args, "svt_attn_drop", 0.0)),
             proj_drop=float(_get(ckpt_args, "svt_proj_drop", 0.0)),
