@@ -171,36 +171,6 @@ def aligned_mhi_indices_from_flow(flow_idx: torch.Tensor, mhi_frames: int) -> to
     return flow_idx.index_select(0, pick)
 
 
-def build_dis_flow(dis_params: Optional[Dict] = None):
-    if not hasattr(cv2, "DISOpticalFlow_create"):
-        raise RuntimeError("flow_backend='dis' requires OpenCV with DISOpticalFlow support.")
-    dis_params = dis_params or {}
-    preset_name = str(dis_params.get("preset", "medium")).lower()
-    preset_map = {
-        "ultrafast": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
-        "fast": cv2.DISOPTICAL_FLOW_PRESET_FAST,
-        "medium": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
-    }
-    if preset_name not in preset_map:
-        raise ValueError(f"Unsupported DIS preset: {preset_name}")
-    dis_flow = cv2.DISOpticalFlow_create(preset_map[preset_name])
-    finest_scale = dis_params.get("finest_scale", None)
-    if finest_scale is not None:
-        dis_flow.setFinestScale(int(finest_scale))
-    gd_iters = dis_params.get("gradient_descent_iterations", None)
-    if gd_iters is not None:
-        dis_flow.setGradientDescentIterations(int(gd_iters))
-    vr_iters = dis_params.get("variational_refinement_iterations", None)
-    if vr_iters is not None:
-        dis_flow.setVariationalRefinementIterations(int(vr_iters))
-    patch_size = dis_params.get("patch_size", None)
-    if patch_size is not None and hasattr(dis_flow, "setPatchSize"):
-        dis_flow.setPatchSize(int(patch_size))
-    patch_stride = dis_params.get("patch_stride", None)
-    if patch_stride is not None and hasattr(dis_flow, "setPatchStride"):
-        dis_flow.setPatchStride(int(patch_stride))
-    return dis_flow
-
 def _count_frames_fallback(path: str, max_frames: Optional[int] = None) -> int:
     """Fallback when CAP_PROP_FRAME_COUNT is missing/0."""
     cap = cv2.VideoCapture(path)
@@ -228,17 +198,15 @@ def compute_mhi_and_flow_stream_cpu(
     flow_frames: int = 128,
     flow_backend: str = "farneback",
     fb_params: Dict = None,
-    dis_params: Optional[Dict] = None,
     flow_max_disp: float = 20.0,
     flow_normalize: bool = True,
     out_dtype: torch.dtype = torch.float16,
     roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     flow_backend = str(flow_backend).lower()
-    if flow_backend not in ("farneback", "dis"):
+    if flow_backend != "farneback":
         raise ValueError(f"Unsupported flow_backend: {flow_backend}")
     fb_params = fb_params or {}
-    dis_flow = build_dis_flow(dis_params) if flow_backend == "dis" else None
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -318,10 +286,7 @@ def compute_mhi_and_flow_stream_cpu(
 
         if t in flow_set and prev_gray112 is not None:
             i = flow_pos[t]
-            if flow_backend == "farneback":
-                flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
-            else:
-                flow = dis_flow.calc(prev_gray112, gray112, None)
+            flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
             if flow_max_disp and flow_max_disp > 0:
                 np.clip(flow, -flow_max_disp, flow_max_disp, out=flow)
                 if flow_normalize:
@@ -647,7 +612,6 @@ def _worker_one(task):
             flow_frames=cfg["flow_frames"],
             flow_backend=cfg["flow_backend"],
             fb_params=cfg["fb_params"],
-            dis_params=cfg["dis_params"],
             flow_max_disp=cfg["flow_max_disp"],
             flow_normalize=cfg["flow_normalize"],
             out_dtype=cfg["out_dtype"],
@@ -710,7 +674,7 @@ def main():
     p.add_argument("--flow_hw", type=int, default=124, help="Flow pre-resize height while preserving aspect ratio")
     p.add_argument("--flow_frames", type=int, default=128)
     p.add_argument("--flow_max_disp", type=float, default=20.0)
-    p.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
+    p.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
 
     # flow normalization
     g = p.add_mutually_exclusive_group()
@@ -738,14 +702,6 @@ def main():
     p.add_argument("--fb_poly_n", type=int, default=5)
     p.add_argument("--fb_poly_sigma", type=float, default=1.2)
     p.add_argument("--fb_flags", type=int, default=0)
-
-    # DIS params
-    p.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
-    p.add_argument("--dis_finest_scale", type=int, default=None)
-    p.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
-    p.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
-    p.add_argument("--dis_patch_size", type=int, default=None)
-    p.add_argument("--dis_patch_stride", type=int, default=None)
 
     # logging / robustness
     p.add_argument("--log_every", type=int, default=200)
@@ -816,15 +772,6 @@ def main():
         poly_sigma=args.fb_poly_sigma,
         flags=args.fb_flags,
     )
-    dis_params = dict(
-        preset=args.dis_preset,
-        finest_scale=args.dis_finest_scale,
-        gradient_descent_iterations=args.dis_gradient_descent_iterations,
-        variational_refinement_iterations=args.dis_variational_refinement_iterations,
-        patch_size=args.dis_patch_size,
-        patch_stride=args.dis_patch_stride,
-    )
-
     cfg = dict(
         overwrite=bool(args.overwrite),
         out_dtype=out_dtype,
@@ -840,7 +787,6 @@ def main():
         flow_normalize=bool(args.flow_normalize),
         flow_clip=float(args.flow_clip),
         fb_params=fb_params,
-        dis_params=dis_params,
         roi_mode=str(args.roi_mode),
         roi_stride=max(1, int(args.roi_stride)),
         yolo_model=str(args.yolo_model),

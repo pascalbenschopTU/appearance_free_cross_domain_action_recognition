@@ -78,7 +78,7 @@ def main():
     ap.add_argument("--mhi_windows", type=str, default="15", help="comma list, e.g. 5,25")
     ap.add_argument("--diff_threshold", type=float, default=15.0)
     ap.add_argument("--flow_max_disp", type=float, default=20.0)
-    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
+    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
     ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
     ap.add_argument("--fb_levels", type=int, default=3)
     ap.add_argument("--fb_winsize", type=int, default=15)
@@ -86,12 +86,10 @@ def main():
     ap.add_argument("--fb_poly_n", type=int, default=5)
     ap.add_argument("--fb_poly_sigma", type=float, default=1.2)
     ap.add_argument("--fb_flags", type=int, default=0)
-    ap.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
-    ap.add_argument("--dis_finest_scale", type=int, default=None)
-    ap.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
-    ap.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
-    ap.add_argument("--dis_patch_size", type=int, default=None)
-    ap.add_argument("--dis_patch_stride", type=int, default=None)
+    ap.add_argument("--motion_img_resize", type=int, default=None)
+    ap.add_argument("--motion_flow_resize", type=int, default=None)
+    ap.add_argument("--motion_resize_mode", type=str, default="square", choices=["square", "short_side"])
+    ap.add_argument("--motion_eval_crop_mode", type=str, default="none", choices=["none", "random", "center"])
 
     # Model / training
     ap.add_argument("--embed_dim", type=int, default=512)
@@ -348,14 +346,6 @@ def main():
                 poly_sigma=float(args.fb_poly_sigma),
                 flags=int(args.fb_flags),
             )
-            dis_params = dict(
-                preset=str(args.dis_preset),
-                finest_scale=args.dis_finest_scale,
-                gradient_descent_iterations=args.dis_gradient_descent_iterations,
-                variational_refinement_iterations=args.dis_variational_refinement_iterations,
-                patch_size=args.dis_patch_size,
-                patch_stride=args.dis_patch_stride,
-            )
             val_dataset = VideoMotionDataset(
                 args.val_root_dir,
                 img_size=args.img_size,
@@ -366,9 +356,12 @@ def main():
                 diff_threshold=args.diff_threshold,
                 flow_backend=args.flow_backend,
                 fb_params=fb_params,
-                dis_params=dis_params,
                 flow_max_disp=args.flow_max_disp,
                 flow_normalize=True,
+                motion_img_resize=args.motion_img_resize,
+                motion_flow_resize=args.motion_flow_resize,
+                motion_resize_mode=args.motion_resize_mode,
+                motion_crop_mode=args.motion_eval_crop_mode,
                 out_dtype=data_dtype,
                 dataset_split_txt=val_manifest_path,
                 class_id_to_label_csv=val_class_id_to_label_csv,

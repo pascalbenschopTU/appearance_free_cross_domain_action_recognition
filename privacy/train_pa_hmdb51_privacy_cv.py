@@ -107,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flow_normalize", action="store_true")
     parser.add_argument("--no_flow_normalize", dest="flow_normalize", action="store_false")
     parser.set_defaults(flow_normalize=True)
-    parser.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
+    parser.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
     parser.add_argument("--fb_pyr_scale", type=float, default=0.5)
     parser.add_argument("--fb_levels", type=int, default=3)
     parser.add_argument("--fb_winsize", type=int, default=15)
@@ -344,7 +344,6 @@ def make_dataset(
         diff_threshold=args.diff_threshold,
         flow_backend=args.flow_backend,
         fb_params=build_fb_params(args),
-        dis_params=None,
         flow_max_disp=args.flow_max_disp,
         flow_normalize=args.flow_normalize,
         roi_mode="none",

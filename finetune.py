@@ -210,16 +210,6 @@ def build_fb_params(args, ckpt_cfg) -> Dict[str, Any]:
     )
 
 
-def build_dis_params(args) -> Dict[str, Any]:
-    return dict(
-        preset=str(args.dis_preset),
-        finest_scale=args.dis_finest_scale,
-        gradient_descent_iterations=args.dis_gradient_descent_iterations,
-        variational_refinement_iterations=args.dis_variational_refinement_iterations,
-        patch_size=args.dis_patch_size,
-        patch_stride=args.dis_patch_stride,
-    )
-
 def eval_on_validation_split(
     *,
     args,
@@ -413,7 +403,7 @@ def main():
     ap.add_argument("--flow_max_disp", type=float, default=None, help="Clip flow to [-x, x] before model input.")
     ap.add_argument("--flow_normalize", action="store_true", default=True, help="Normalize flow by --flow_max_disp.")
     ap.add_argument("--no_flow_normalize", action="store_false", dest="flow_normalize")
-    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "dis"])
+    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
     ap.add_argument("--fb_pyr_scale", type=float, default=None)
     ap.add_argument("--fb_levels", type=int, default=None)
     ap.add_argument("--fb_winsize", type=int, default=None)
@@ -421,12 +411,11 @@ def main():
     ap.add_argument("--fb_poly_n", type=int, default=None)
     ap.add_argument("--fb_poly_sigma", type=float, default=None)
     ap.add_argument("--fb_flags", type=int, default=None)
-    ap.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
-    ap.add_argument("--dis_finest_scale", type=int, default=None)
-    ap.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
-    ap.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
-    ap.add_argument("--dis_patch_size", type=int, default=None)
-    ap.add_argument("--dis_patch_stride", type=int, default=None)
+    ap.add_argument("--motion_img_resize", type=int, default=256, help="None keeps the target-size legacy path.")
+    ap.add_argument("--motion_flow_resize", type=int, default=128,help="None keeps the target-size legacy path.")
+    ap.add_argument("--motion_resize_mode", type=str, default="short_side", choices=["square", "short_side"],help="Spatial resize policy.")
+    ap.add_argument("--motion_train_crop_mode", type=str, default="random", choices=["none", "random", "center"],help="Spatial crop mode for training.")
+    ap.add_argument("--motion_eval_crop_mode", type=str, default="center", choices=["none", "random", "center"],help="Spatial crop mode for evaluation.")
     ap.add_argument("--roi_mode", type=str, default="none", choices=["none", "largest_motion", "yolo_person"])
     ap.add_argument("--roi_stride", type=int, default=3)
     ap.add_argument("--motion_roi_threshold", type=float, default=None)
@@ -564,7 +553,36 @@ def main():
     diff_threshold = args.diff_threshold if args.diff_threshold is not None else ckpt_cfg.diff_threshold
     flow_max_disp = args.flow_max_disp if args.flow_max_disp is not None else ckpt_cfg.flow_max_disp
     fb_params = build_fb_params(args, ckpt_cfg)
-    dis_params = build_dis_params(args)
+    motion_img_resize = (
+        args.motion_img_resize
+        if args.motion_img_resize is not None
+        else getattr(ckpt_cfg, "motion_img_resize", None)
+    )
+    motion_flow_resize = (
+        args.motion_flow_resize
+        if args.motion_flow_resize is not None
+        else getattr(ckpt_cfg, "motion_flow_resize", None)
+    )
+    motion_resize_mode = (
+        args.motion_resize_mode
+        if args.motion_resize_mode is not None
+        else getattr(ckpt_cfg, "motion_resize_mode", "square")
+    )
+    motion_train_crop_mode = (
+        args.motion_train_crop_mode
+        if args.motion_train_crop_mode is not None
+        else getattr(ckpt_cfg, "motion_train_crop_mode", "none")
+    )
+    motion_eval_crop_mode = (
+        args.motion_eval_crop_mode
+        if args.motion_eval_crop_mode is not None
+        else getattr(ckpt_cfg, "motion_eval_crop_mode", "none")
+    )
+    args.motion_img_resize = motion_img_resize
+    args.motion_flow_resize = motion_flow_resize
+    args.motion_resize_mode = str(motion_resize_mode).lower()
+    args.motion_train_crop_mode = str(motion_train_crop_mode).lower()
+    args.motion_eval_crop_mode = str(motion_eval_crop_mode).lower()
 
     selected_model = str(args.model if args.model is not None else ckpt_cfg.model).lower()
     if selected_model not in ("i3d", "x3d", "svt"):
@@ -613,6 +631,9 @@ def main():
         f"rgb_frames={args.rgb_frames} rgb_sampling={args.rgb_sampling} rgb_norm={args.rgb_norm} "
         f"motion_data_source={args.motion_data_source} p_affine={args.p_affine} "
         f"diff_threshold={diff_threshold} flow_max_disp={flow_max_disp} fb_params={fb_params} "
+        f"motion_img_resize={args.motion_img_resize} motion_flow_resize={args.motion_flow_resize} "
+        f"motion_resize_mode={args.motion_resize_mode} "
+        f"motion_train_crop_mode={args.motion_train_crop_mode} motion_eval_crop_mode={args.motion_eval_crop_mode} "
         f"manifest={manifest_path}"
     )
     if selected_model == "svt":
@@ -659,13 +680,16 @@ def main():
                 diff_threshold=diff_threshold,
                 flow_backend=args.flow_backend,
                 fb_params=fb_params,
-                dis_params=dis_params,
                 flow_max_disp=flow_max_disp,
                 flow_normalize=bool(args.flow_normalize),
                 roi_mode=args.roi_mode,
                 roi_stride=max(1, int(args.roi_stride)),
                 motion_roi_threshold=args.motion_roi_threshold,
                 motion_roi_min_area=int(args.motion_roi_min_area),
+                motion_img_resize=args.motion_img_resize,
+                motion_flow_resize=args.motion_flow_resize,
+                motion_resize_mode=args.motion_resize_mode,
+                motion_crop_mode=args.motion_train_crop_mode,
                 yolo_model=args.yolo_model,
                 yolo_conf=float(args.yolo_conf),
                 yolo_device=args.yolo_device,
@@ -732,13 +756,16 @@ def main():
                 diff_threshold=diff_threshold,
                 flow_backend=args.flow_backend,
                 fb_params=fb_params,
-                dis_params=dis_params,
                 flow_max_disp=flow_max_disp,
                 flow_normalize=bool(args.flow_normalize),
                 roi_mode=args.roi_mode,
                 roi_stride=max(1, int(args.roi_stride)),
                 motion_roi_threshold=args.motion_roi_threshold,
                 motion_roi_min_area=int(args.motion_roi_min_area),
+                motion_img_resize=args.motion_img_resize,
+                motion_flow_resize=args.motion_flow_resize,
+                motion_resize_mode=args.motion_resize_mode,
+                motion_crop_mode=args.motion_eval_crop_mode,
                 yolo_model=args.yolo_model,
                 yolo_conf=float(args.yolo_conf),
                 yolo_device=args.yolo_device,

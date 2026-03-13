@@ -663,7 +663,7 @@ def main():
         "--flow_backend",
         type=str,
         default="farneback",
-        choices=["farneback", "dis", "raft_large"],
+        choices=["farneback", "raft_large"],
         help="Flow extractor for on-the-fly evaluation.",
     )
     ap.add_argument(
@@ -696,12 +696,10 @@ def main():
     ap.add_argument("--fb_poly_n", type=int, default=5) # 5
     ap.add_argument("--fb_poly_sigma", type=float, default=1.2) # 1.2
     ap.add_argument("--fb_flags", type=int, default=0)
-    ap.add_argument("--dis_preset", type=str, default="medium", choices=["ultrafast", "fast", "medium"])
-    ap.add_argument("--dis_finest_scale", type=int, default=None)
-    ap.add_argument("--dis_gradient_descent_iterations", type=int, default=None)
-    ap.add_argument("--dis_variational_refinement_iterations", type=int, default=None)
-    ap.add_argument("--dis_patch_size", type=int, default=None)
-    ap.add_argument("--dis_patch_stride", type=int, default=None)
+    ap.add_argument("--motion_img_resize", type=int, default=256, help="None keeps the target-size legacy path.")
+    ap.add_argument("--motion_flow_resize", type=int, default=128,help="None keeps the target-size legacy path.")
+    ap.add_argument("--motion_resize_mode", type=str, default="short_side", choices=["square", "short_side"],help="Spatial resize policy.")
+    ap.add_argument("--motion_eval_crop_mode", type=str, default="center", choices=["none", "random", "center"],help="Spatial crop mode for evaluation.")
 
     # Text bank options
     ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
@@ -800,6 +798,16 @@ def main():
     # diff_threshold = float(_get(ckpt_args, "diff_threshold", args.diff_threshold))
     diff_threshold = float(args.diff_threshold)
     flow_max_disp  = float(_get(ckpt_args, "flow_max_disp", args.flow_max_disp))
+    motion_img_resize = _get(ckpt_args, "motion_img_resize", args.motion_img_resize)
+    motion_flow_resize = _get(ckpt_args, "motion_flow_resize", args.motion_flow_resize)
+    motion_resize_mode = str(_get(ckpt_args, "motion_resize_mode", args.motion_resize_mode or "square")).lower()
+    motion_eval_crop_mode = str(
+        _get(ckpt_args, "motion_eval_crop_mode", args.motion_eval_crop_mode or "none")
+    ).lower()
+    args.motion_img_resize = motion_img_resize
+    args.motion_flow_resize = motion_flow_resize
+    args.motion_resize_mode = motion_resize_mode
+    args.motion_eval_crop_mode = motion_eval_crop_mode
 
     if args.input_modality == "motion":
         if args.flow_backend == "raft_large":
@@ -829,15 +837,6 @@ def main():
         poly_sigma=float(_get(ckpt_args, "fb_poly_sigma", args.fb_poly_sigma)),
         flags=int(_get(ckpt_args, "fb_flags", args.fb_flags)),
     )
-    dis_params = dict(
-        preset=str(args.dis_preset),
-        finest_scale=args.dis_finest_scale,
-        gradient_descent_iterations=args.dis_gradient_descent_iterations,
-        variational_refinement_iterations=args.dis_variational_refinement_iterations,
-        patch_size=args.dis_patch_size,
-        patch_stride=args.dis_patch_stride,
-    )
-
     # -----------------------------
     # CLIP
     # -----------------------------  
@@ -986,6 +985,10 @@ def main():
                     flow_pairs=flow_frames,
                     mhi_windows=mhi_windows,
                     diff_threshold=diff_threshold,
+                    motion_img_resize=motion_img_resize,
+                    motion_flow_resize=motion_flow_resize,
+                    motion_resize_mode=motion_resize_mode,
+                    motion_crop_mode=motion_eval_crop_mode,
                     out_mhi_dtype=torch.float16,
                     dataset_split_txt=manifest_path,
                     class_id_to_label_csv=args.class_id_to_label_csv,
@@ -1001,13 +1004,16 @@ def main():
                     diff_threshold=diff_threshold,
                     flow_backend=args.flow_backend,
                     fb_params=fb_params,
-                    dis_params=dis_params,
                     flow_max_disp=flow_max_disp,
                     flow_normalize=True,
                     roi_mode=args.roi_mode,
                     roi_stride=max(1, int(args.roi_stride)),
                     motion_roi_threshold=args.motion_roi_threshold,
                     motion_roi_min_area=int(args.motion_roi_min_area),
+                    motion_img_resize=motion_img_resize,
+                    motion_flow_resize=motion_flow_resize,
+                    motion_resize_mode=motion_resize_mode,
+                    motion_crop_mode=motion_eval_crop_mode,
                     yolo_model=args.yolo_model,
                     yolo_conf=float(args.yolo_conf),
                     yolo_device=args.yolo_device,
@@ -1076,6 +1082,10 @@ def main():
             "head_weights": parse_floats(args.head_weights),
             "active_branch": active_branch,
             "flow_backend": args.flow_backend,
+            "motion_img_resize": motion_img_resize,
+            "motion_flow_resize": motion_flow_resize,
+            "motion_resize_mode": motion_resize_mode,
+            "motion_eval_crop_mode": motion_eval_crop_mode,
             "raft_flow_clip": float(args.raft_flow_clip),
             "model_rgb_frames": int(args.model_rgb_frames),
             "model_rgb_sampling": args.model_rgb_sampling,

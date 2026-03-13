@@ -519,6 +519,75 @@ def collate_rgb_clip(batch):
 # Video dataset
 # ----------------------------
 
+def _sample_motion_crop_anchor(crop_mode: str) -> Optional[Tuple[float, float]]:
+    if crop_mode == "none":
+        return None
+    if crop_mode == "center":
+        return 0.5, 0.5
+    return float(torch.rand(()).item()), float(torch.rand(()).item())
+
+
+def _resize_and_crop_square(
+    frame: np.ndarray,
+    *,
+    resize_hw: int,
+    out_hw: int,
+    resize_mode: str,
+    crop_mode: str,
+    crop_anchor: Optional[Tuple[float, float]],
+) -> np.ndarray:
+    if resize_hw <= 0 or out_hw <= 0:
+        raise ValueError(f"resize/out sizes must be > 0, got resize={resize_hw}, out={out_hw}")
+
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        raise ValueError(f"Invalid frame shape for resize: {frame.shape}")
+
+    # Avoid enlarging frames beyond their native spatial size just to crop back
+    # down again; only upscale when the source is smaller than the model input.
+    min_side = min(h, w)
+    resize_hw_eff = int(resize_hw)
+    if min_side >= out_hw:
+        resize_hw_eff = min(resize_hw_eff, min_side)
+    else:
+        resize_hw_eff = out_hw
+
+    if resize_mode == "square":
+        resized = cv2.resize(frame, (resize_hw_eff, resize_hw_eff), interpolation=cv2.INTER_AREA)
+        if resize_hw_eff == out_hw:
+            return resized
+        if crop_mode == "none":
+            return cv2.resize(resized, (out_hw, out_hw), interpolation=cv2.INTER_AREA)
+        if resize_hw_eff < out_hw:
+            raise ValueError(
+                f"motion crop mode '{crop_mode}' requires resize >= output, got resize={resize_hw_eff}, out={out_hw}"
+            )
+        max_offset_x = resize_hw_eff - out_hw
+        max_offset_y = resize_hw_eff - out_hw
+    else:
+        scale = float(resize_hw_eff) / float(min_side)
+        new_h = max(1, int(round(h * scale)))
+        new_w = max(1, int(round(w * scale)))
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if crop_mode == "none":
+            crop_mode = "center"
+        if new_h < out_hw or new_w < out_hw:
+            raise ValueError(
+                f"motion resize mode '{resize_mode}' requires resized frame >= output. "
+                f"Got resized=({new_h},{new_w}), out={out_hw}"
+            )
+        max_offset_x = new_w - out_hw
+        max_offset_y = new_h - out_hw
+
+    anchor_x, anchor_y = (0.5, 0.5) if crop_anchor is None else crop_anchor
+    anchor_x = float(np.clip(anchor_x, 0.0, 1.0))
+    anchor_y = float(np.clip(anchor_y, 0.0, 1.0))
+    x0 = int(round(anchor_x * max_offset_x))
+    y0 = int(round(anchor_y * max_offset_y))
+    x0 = max(0, min(x0, max_offset_x))
+    y0 = max(0, min(y0, max_offset_y))
+    return resized[y0:y0 + out_hw, x0:x0 + out_hw]
+
 def compute_mhi_and_flow_stream(
     path: str,
     *,
@@ -530,11 +599,14 @@ def compute_mhi_and_flow_stream(
     flow_frames: int,
     flow_backend: str,
     fb_params: Dict,
-    dis_params: Optional[Dict],
     flow_max_disp: float,
     flow_normalize: bool,
     out_dtype=torch.float16,
     roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
+    motion_img_resize: Optional[int] = None,
+    motion_flow_resize: Optional[int] = None,
+    motion_resize_mode: str = "square",
+    motion_crop_mode: str = "none",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Returns:
@@ -543,8 +615,14 @@ def compute_mhi_and_flow_stream(
     CPU tensors.
     """
     flow_backend = str(flow_backend).lower()
-    if flow_backend not in ("farneback", "dis"):
+    if flow_backend != "farneback":
         raise ValueError(f"Unsupported flow_backend: {flow_backend}")
+    crop_anchor = _sample_motion_crop_anchor(motion_crop_mode)
+    use_legacy_resize_path = (
+        motion_crop_mode == "none"
+        and motion_img_resize == img_size
+        and motion_flow_resize == flow_hw
+    )
 
     C = len(mhi_windows)
     dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
@@ -552,36 +630,6 @@ def compute_mhi_and_flow_stream(
 
     flows = torch.zeros((2, flow_frames, flow_hw, flow_hw), dtype=torch.float32)
     mhi_out = torch.zeros((C, mhi_frames, img_size, img_size), dtype=torch.float32)
-
-    dis_flow = None
-    if flow_backend == "dis":
-        if not hasattr(cv2, "DISOpticalFlow_create"):
-            raise RuntimeError("flow_backend='dis' requires OpenCV with DISOpticalFlow support.")
-        dis_params = dis_params or {}
-        preset_name = str(dis_params.get("preset", "medium")).lower()
-        preset_map = {
-            "ultrafast": cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST,
-            "fast": cv2.DISOPTICAL_FLOW_PRESET_FAST,
-            "medium": cv2.DISOPTICAL_FLOW_PRESET_MEDIUM,
-        }
-        if preset_name not in preset_map:
-            raise ValueError(f"Unsupported DIS preset: {preset_name}")
-        dis_flow = cv2.DISOpticalFlow_create(preset_map[preset_name])
-        finest_scale = dis_params.get("finest_scale", None)
-        if finest_scale is not None:
-            dis_flow.setFinestScale(int(finest_scale))
-        gd_iters = dis_params.get("gradient_descent_iterations", None)
-        if gd_iters is not None:
-            dis_flow.setGradientDescentIterations(int(gd_iters))
-        vr_iters = dis_params.get("variational_refinement_iterations", None)
-        if vr_iters is not None:
-            dis_flow.setVariationalRefinementIterations(int(vr_iters))
-        patch_size = dis_params.get("patch_size", None)
-        if patch_size is not None and hasattr(dis_flow, "setPatchSize"):
-            dis_flow.setPatchSize(int(patch_size))
-        patch_stride = dis_params.get("patch_stride", None)
-        if patch_stride is not None and hasattr(dis_flow, "setPatchStride"):
-            dis_flow.setPatchStride(int(patch_stride))
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -623,9 +671,26 @@ def compute_mhi_and_flow_stream(
             break
 
         frame_src = crop_frame_by_roi(frame_bgr, roi_xyxy)
-        frame224 = cv2.resize(frame_src, (img_size, img_size), interpolation=cv2.INTER_AREA)
-        frame112 = cv2.resize(frame224, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
-        # frame112 = frame224
+        if use_legacy_resize_path:
+            frame224 = cv2.resize(frame_src, (img_size, img_size), interpolation=cv2.INTER_AREA)
+            frame112 = cv2.resize(frame224, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
+        else:
+            frame224 = _resize_and_crop_square(
+                frame_src,
+                resize_hw=motion_img_resize,
+                out_hw=img_size,
+                resize_mode=motion_resize_mode,
+                crop_mode=motion_crop_mode,
+                crop_anchor=crop_anchor,
+            )
+            frame112 = _resize_and_crop_square(
+                frame_src,
+                resize_hw=motion_flow_resize,
+                out_hw=flow_hw,
+                resize_mode=motion_resize_mode,
+                crop_mode=motion_crop_mode,
+                crop_anchor=crop_anchor,
+            )
 
         gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
         gray112 = cv2.cvtColor(frame112, cv2.COLOR_BGR2GRAY)
@@ -646,10 +711,7 @@ def compute_mhi_and_flow_stream(
 
         if t in flow_set and prev_gray112 is not None:
             i = flow_pos[t]
-            if flow_backend == "farneback":
-                flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
-            else:
-                flow = dis_flow.calc(prev_gray112, gray112, None)
+            flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
             if flow_max_disp and flow_max_disp > 0:
                 np.clip(flow, -flow_max_disp, flow_max_disp, out=flow)
                 if flow_normalize:
@@ -676,13 +738,16 @@ class VideoMotionDataset(Dataset):
         diff_threshold: float,
         flow_backend: str = "farneback",
         fb_params: Dict,
-        dis_params: Optional[Dict] = None,
         flow_max_disp: float,
         flow_normalize: bool,
         roi_mode: str = "none",
         roi_stride: int = 3,
         motion_roi_threshold: Optional[float] = None,
         motion_roi_min_area: int = 64,
+        motion_img_resize: Optional[int] = None,
+        motion_flow_resize: Optional[int] = None,
+        motion_resize_mode: str = "square",
+        motion_crop_mode: str = "none",
         yolo_model: str = "yolo11n.pt",
         yolo_conf: float = 0.25,
         yolo_device: Optional[str] = None,
@@ -701,7 +766,6 @@ class VideoMotionDataset(Dataset):
         self.diff_threshold = diff_threshold
         self.flow_backend = str(flow_backend).lower()
         self.fb_params = fb_params
-        self.dis_params = dis_params or {}
         self.flow_max_disp = flow_max_disp
         self.flow_normalize = flow_normalize
         self.roi_mode = str(roi_mode)
@@ -710,6 +774,10 @@ class VideoMotionDataset(Dataset):
             float(diff_threshold) if motion_roi_threshold is None else float(motion_roi_threshold)
         )
         self.motion_roi_min_area = int(motion_roi_min_area)
+        self.motion_img_resize = motion_img_resize
+        self.motion_flow_resize = motion_flow_resize
+        self.motion_resize_mode = motion_resize_mode
+        self.motion_crop_mode = motion_crop_mode
         self.yolo_model = str(yolo_model)
         self.yolo_conf = float(yolo_conf)
         self.yolo_device = yolo_device
@@ -758,10 +826,13 @@ class VideoMotionDataset(Dataset):
                 flow_frames=self.flow_frames,
                 flow_backend=self.flow_backend,
                 fb_params=self.fb_params,
-                dis_params=self.dis_params,
                 flow_max_disp=self.flow_max_disp,
                 flow_normalize=self.flow_normalize,
                 roi_xyxy=roi_xyxy,
+                motion_img_resize=self.motion_img_resize,
+                motion_flow_resize=self.motion_flow_resize,
+                motion_resize_mode=self.motion_resize_mode,
+                motion_crop_mode=self.motion_crop_mode,
                 out_dtype=self.out_dtype,
             )
         except Exception:
@@ -827,6 +898,10 @@ def compute_mhi_and_paired_frames(
     mhi_frames: int,    # number of MHI snapshots to output
     flow_hw: int,       # e.g. 112 or 160; MUST be divisible by 8 for RAFT
     flow_pairs: int,    # number of (t-1,t) pairs
+    motion_img_resize: Optional[int] = None,
+    motion_flow_resize: Optional[int] = None,
+    motion_resize_mode: str = "square",
+    motion_crop_mode: str = "none",
     out_mhi_dtype=torch.float16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -836,6 +911,12 @@ def compute_mhi_and_paired_frames(
     All returned tensors are CPU.
     """
     assert flow_hw % 8 == 0, "flow_hw must be divisible by 8 to avoid padding in RAFT"
+    crop_anchor = _sample_motion_crop_anchor(motion_crop_mode)
+    use_legacy_resize_path = (
+        motion_crop_mode == "none"
+        and motion_img_resize == img_size
+        and motion_flow_resize == flow_hw
+    )
 
     C = len(mhi_windows)
     dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
@@ -878,8 +959,26 @@ def compute_mhi_and_paired_frames(
         if t > last_needed:
             break
 
-        # MHI stream at img_size
-        frame224 = cv2.resize(frame_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        if use_legacy_resize_path:
+            frame224 = cv2.resize(frame_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
+            frame_flow = cv2.resize(frame_bgr, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
+        else:
+            frame224 = _resize_and_crop_square(
+                frame_bgr,
+                resize_hw=motion_img_resize,
+                out_hw=img_size,
+                resize_mode=motion_resize_mode,
+                crop_mode=motion_crop_mode,
+                crop_anchor=crop_anchor,
+            )
+            frame_flow = _resize_and_crop_square(
+                frame_bgr,
+                resize_hw=motion_flow_resize,
+                out_hw=flow_hw,
+                resize_mode=motion_resize_mode,
+                crop_mode=motion_crop_mode,
+                crop_anchor=crop_anchor,
+            )
         gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
 
         if prev_gray224 is not None:
@@ -898,8 +997,7 @@ def compute_mhi_and_paired_frames(
 
         # RAFT frames at flow_hw (RGB uint8, CHW)
         if t in need_set:
-            fr = cv2.resize(frame_bgr, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
-            fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            fr = cv2.cvtColor(frame_flow, cv2.COLOR_BGR2RGB)
             frame_store[t] = torch.from_numpy(fr).permute(2, 0, 1).contiguous()  # (3,H,W) u8
 
         prev_gray224 = gray224
@@ -941,6 +1039,10 @@ class VideoMHIFramesDataset(Dataset):
         flow_pairs: int,
         mhi_windows: List[int],
         diff_threshold: float,
+        motion_img_resize: Optional[int] = None,
+        motion_flow_resize: Optional[int] = None,
+        motion_resize_mode: str = "square",
+        motion_crop_mode: str = "none",
         out_mhi_dtype=torch.float16,
         dataset_split_txt=None,
         class_id_to_label_csv=None,
@@ -954,6 +1056,10 @@ class VideoMHIFramesDataset(Dataset):
         self.flow_pairs = flow_pairs
         self.mhi_windows = mhi_windows
         self.diff_threshold = diff_threshold
+        self.motion_img_resize = motion_img_resize
+        self.motion_flow_resize = motion_flow_resize
+        self.motion_resize_mode = motion_resize_mode
+        self.motion_crop_mode = motion_crop_mode
         self.out_mhi_dtype = out_mhi_dtype
 
     def __len__(self):
@@ -971,6 +1077,10 @@ class VideoMHIFramesDataset(Dataset):
                 mhi_frames=self.mhi_frames,
                 flow_hw=self.flow_hw,
                 flow_pairs=self.flow_pairs,
+                motion_img_resize=self.motion_img_resize,
+                motion_flow_resize=self.motion_flow_resize,
+                motion_resize_mode=self.motion_resize_mode,
+                motion_crop_mode=self.motion_crop_mode,
                 out_mhi_dtype=self.out_mhi_dtype,
             )
         except Exception:
