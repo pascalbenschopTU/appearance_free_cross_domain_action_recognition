@@ -138,6 +138,91 @@ def load_zstd_mhi_second(
 
     return mhi, second, second_type
 
+
+def _pad_spatial_min(x: torch.Tensor, min_h: int, min_w: int) -> torch.Tensor:
+    pad_h = max(0, int(min_h) - int(x.shape[-2]))
+    pad_w = max(0, int(min_w) - int(x.shape[-1]))
+    if pad_h == 0 and pad_w == 0:
+        return x
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    return F.pad(x, (pad_left, pad_right, pad_top, pad_bottom))
+
+
+def _resolve_crop_start(
+    full: int,
+    crop: int,
+    rng: np.random.Generator,
+    mode: str,
+    motion_weights: Optional[np.ndarray] = None,
+) -> int:
+    full = int(full)
+    crop = int(crop)
+    if full <= crop:
+        return 0
+    max_start = full - crop
+    if mode == "motion" and motion_weights is not None and motion_weights.size == full:
+        weights = np.clip(motion_weights.astype(np.float64, copy=False), 0.0, None)
+        total = float(weights.sum())
+        if total > 0.0:
+            coords = np.arange(full, dtype=np.float64)
+            center = float((coords * weights).sum() / total)
+            center += float(rng.uniform(-0.1 * crop, 0.1 * crop))
+            start = int(round(center - crop / 2.0))
+            return int(np.clip(start, 0, max_start))
+    return int(rng.integers(0, max_start + 1))
+
+
+def _crop_motion_streams(
+    mhi: torch.Tensor,
+    second: torch.Tensor,
+    *,
+    target_mhi_hw: int,
+    target_second_hw: int,
+    rng: np.random.Generator,
+    mode: str = "random",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    mode = str(mode).lower()
+    if mode not in ("random", "motion"):
+        raise ValueError(f"Unsupported spatial crop mode: {mode}")
+
+    mhi = _pad_spatial_min(mhi, target_mhi_hw, target_mhi_hw)
+    second = _pad_spatial_min(second, target_second_hw, target_second_hw)
+
+    motion_map = None
+    if mode == "motion" and mhi.numel() > 0:
+        motion_map = mhi.to(torch.float32).sum(dim=(0, 1)).cpu().numpy()
+
+    mhi_h, mhi_w = int(mhi.shape[-2]), int(mhi.shape[-1])
+    top_mhi = _resolve_crop_start(
+        mhi_h,
+        target_mhi_hw,
+        rng,
+        mode,
+        None if motion_map is None else motion_map.sum(axis=1),
+    )
+    left_mhi = _resolve_crop_start(
+        mhi_w,
+        target_mhi_hw,
+        rng,
+        mode,
+        None if motion_map is None else motion_map.sum(axis=0),
+    )
+
+    second_h, second_w = int(second.shape[-2]), int(second.shape[-1])
+    scale_y = float(second_h) / float(max(1, mhi_h))
+    scale_x = float(second_w) / float(max(1, mhi_w))
+    top_second = int(round(top_mhi * scale_y))
+    left_second = int(round(left_mhi * scale_x))
+    top_second = int(np.clip(top_second, 0, max(0, second_h - target_second_hw)))
+    left_second = int(np.clip(left_second, 0, max(0, second_w - target_second_hw)))
+
+    mhi = mhi[:, :, top_mhi:top_mhi + target_mhi_hw, left_mhi:left_mhi + target_mhi_hw]
+    second = second[:, :, top_second:top_second + target_second_hw, left_second:left_second + target_second_hw]
+    return mhi.contiguous(), second.contiguous()
+
 class MotionTwoStreamZstdDataset(Dataset):
     def __init__(
         self,
@@ -161,6 +246,7 @@ class MotionTwoStreamZstdDataset(Dataset):
         affine_translate: float = 0.10,
         affine_scale=(0.5, 1.5),
         affine_shear=(-2.0, 2.0),
+        spatial_crop_mode: str = "random",
         seed: int = 0,
         dataset_split_txt=None,
         class_id_to_label_csv=None,
@@ -190,6 +276,11 @@ class MotionTwoStreamZstdDataset(Dataset):
         self.affine_translate = float(affine_translate)
         self.affine_scale = tuple(affine_scale)
         self.affine_shear = tuple(affine_shear)
+        self.spatial_crop_mode = str(spatial_crop_mode).lower()
+        if self.spatial_crop_mode not in ("random", "motion"):
+            raise ValueError(
+                f"spatial_crop_mode must be one of: random, motion (got {spatial_crop_mode})"
+            )
 
         self.seed = int(seed)
         self.epoch = 0
@@ -209,7 +300,6 @@ class MotionTwoStreamZstdDataset(Dataset):
     def __getitem__(self, idx: int):
         video_path = self.paths[idx]
         label = self.labels[idx]
-        cname = self.classnames[label]
 
         try:
             dctx = self._get_dctx()
@@ -255,23 +345,16 @@ class MotionTwoStreamZstdDataset(Dataset):
                 shear_range=self.affine_shear,
             )
 
-            old_h, old_w = int(second.shape[-2]), int(second.shape[-1])
-            if (old_h != self.flow_hw) or (old_w != self.flow_hw):
-                second = F.interpolate(
-                    second.permute(1, 0, 2, 3).to(torch.float32),
-                    size=(self.flow_hw, self.flow_hw),
-                    mode="bilinear",
-                    align_corners=False,
-                ).permute(1, 0, 2, 3)
-
-                # Keep optical-flow vectors in pixel units consistent after resizing.
-                if second_type == "flow" and second.shape[0] >= 2:
-                    scale_x = float(self.flow_hw) / float(max(1, old_w))
-                    scale_y = float(self.flow_hw) / float(max(1, old_h))
-                    second[0].mul_(scale_x)
-                    second[1].mul_(scale_y)
-
-                second = second.to(dtype=self.out_dtype)
+            mhi, second = _crop_motion_streams(
+                mhi,
+                second,
+                target_mhi_hw=self.img_size,
+                target_second_hw=self.flow_hw,
+                rng=rng,
+                mode=self.spatial_crop_mode,
+            )
+            mhi = mhi.to(dtype=self.out_dtype)
+            second = second.to(dtype=self.out_dtype)
 
         except Exception as e:
             print(f"Something went wrong, video: {video_path}, error: {e}", flush=True)
@@ -279,12 +362,12 @@ class MotionTwoStreamZstdDataset(Dataset):
             mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
             second = torch.zeros((self.in_ch_second, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
 
-        return mhi, second, label, cname
+        return mhi, second, label, video_path
 
 def collate_motion(batch):
-    mhi, flow, labels, cnames = zip(*batch)
+    mhi, flow, labels, sample_ids = zip(*batch)
     return (torch.stack(mhi, 0), torch.stack(flow, 0),
-            torch.tensor(labels, dtype=torch.long), list(cnames))
+            torch.tensor(labels, dtype=torch.long), list(sample_ids))
 
 
 def _sample_rgb_indices(

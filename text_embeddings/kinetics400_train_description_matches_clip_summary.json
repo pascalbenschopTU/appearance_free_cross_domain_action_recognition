@@ -1,0 +1,4615 @@
+{
+  "total_rows": 239362,
+  "status_counts": {
+    "ok": 239362
+  },
+  "per_class": {
+    "abseiling": {
+      "num_videos": 907,
+      "description_counts": {
+        "0": 67,
+        "1": 829,
+        "2": 4,
+        "4": 7
+      },
+      "mean_probability": 0.8153567409040796,
+      "mean_margin": 0.022699025358324115
+    },
+    "air drumming": {
+      "num_videos": 811,
+      "description_counts": {
+        "0": 103,
+        "1": 25,
+        "2": 1,
+        "3": 259,
+        "4": 423
+      },
+      "mean_probability": 0.5109818150431559,
+      "mean_margin": 0.006613769420468558
+    },
+    "answering questions": {
+      "num_videos": 215,
+      "description_counts": {
+        "0": 64,
+        "1": 90,
+        "2": 13,
+        "3": 41,
+        "4": 7
+      },
+      "mean_probability": 0.49935502325581416,
+      "mean_margin": 0.007155009302325588
+    },
+    "applauding": {
+      "num_videos": 222,
+      "description_counts": {
+        "0": 62,
+        "1": 40,
+        "2": 89,
+        "3": 26,
+        "4": 5
+      },
+      "mean_probability": 0.4997108018018018,
+      "mean_margin": 0.00647521621621622
+    },
+    "applying cream": {
+      "num_videos": 284,
+      "description_counts": {
+        "0": 58,
+        "1": 135,
+        "2": 18,
+        "4": 73
+      },
+      "mean_probability": 0.5583865528169014,
+      "mean_margin": 0.00871470774647888
+    },
+    "archery": {
+      "num_videos": 943,
+      "description_counts": {
+        "0": 21,
+        "1": 652,
+        "2": 17,
+        "3": 252,
+        "4": 1
+      },
+      "mean_probability": 0.7355742120890767,
+      "mean_margin": 0.018280373276776212
+    },
+    "arm wrestling": {
+      "num_videos": 954,
+      "description_counts": {
+        "0": 425,
+        "1": 18,
+        "2": 147,
+        "3": 362,
+        "4": 2
+      },
+      "mean_probability": 0.5860915597484274,
+      "mean_margin": 0.010438927672955955
+    },
+    "arranging flowers": {
+      "num_videos": 423,
+      "description_counts": {
+        "0": 168,
+        "1": 5,
+        "3": 17,
+        "4": 233
+      },
+      "mean_probability": 0.6819996453900716,
+      "mean_margin": 0.012371803782505929
+    },
+    "assembling computer": {
+      "num_videos": 375,
+      "description_counts": {
+        "0": 6,
+        "1": 40,
+        "3": 305,
+        "4": 24
+      },
+      "mean_probability": 0.6638971173333335,
+      "mean_margin": 0.013878914666666657
+    },
+    "auctioning": {
+      "num_videos": 326,
+      "description_counts": {
+        "0": 66,
+        "1": 60,
+        "2": 7,
+        "3": 65,
+        "4": 128
+      },
+      "mean_probability": 0.5459418650306743,
+      "mean_margin": 0.008988279141104285
+    },
+    "baby waking up": {
+      "num_videos": 451,
+      "description_counts": {
+        "0": 21,
+        "1": 373,
+        "3": 53,
+        "4": 4
+      },
+      "mean_probability": 0.6821326895787144,
+      "mean_margin": 0.014515527716186258
+    },
+    "baking cookies": {
+      "num_videos": 736,
+      "description_counts": {
+        "0": 212,
+        "1": 1,
+        "2": 515,
+        "3": 2,
+        "4": 6
+      },
+      "mean_probability": 0.7520629157608703,
+      "mean_margin": 0.016994629076086936
+    },
+    "balloon blowing": {
+      "num_videos": 651,
+      "description_counts": {
+        "0": 378,
+        "1": 27,
+        "2": 206,
+        "3": 40
+      },
+      "mean_probability": 0.6362473149001537,
+      "mean_margin": 0.010777611367127501
+    },
+    "bandaging": {
+      "num_videos": 413,
+      "description_counts": {
+        "0": 9,
+        "1": 156,
+        "2": 18,
+        "3": 230
+      },
+      "mean_probability": 0.6321912276029059,
+      "mean_margin": 0.009149956416464884
+    },
+    "barbequing": {
+      "num_videos": 901,
+      "description_counts": {
+        "0": 61,
+        "1": 300,
+        "2": 135,
+        "4": 405
+      },
+      "mean_probability": 0.5858496970033299,
+      "mean_margin": 0.007790934517203103
+    },
+    "bartending": {
+      "num_videos": 440,
+      "description_counts": {
+        "0": 429,
+        "2": 3,
+        "3": 8
+      },
+      "mean_probability": 0.9310569045454553,
+      "mean_margin": 0.03879172954545455
+    },
+    "beatboxing": {
+      "num_videos": 782,
+      "description_counts": {
+        "0": 37,
+        "1": 330,
+        "2": 6,
+        "3": 380,
+        "4": 29
+      },
+      "mean_probability": 0.5922904795396421,
+      "mean_margin": 0.01108670588235295
+    },
+    "bee keeping": {
+      "num_videos": 274,
+      "description_counts": {
+        "0": 22,
+        "1": 2,
+        "3": 12,
+        "4": 238
+      },
+      "mean_probability": 0.6367873722627735,
+      "mean_margin": 0.010731047445255463
+    },
+    "belly dancing": {
+      "num_videos": 908,
+      "description_counts": {
+        "0": 609,
+        "1": 30,
+        "2": 12,
+        "3": 198,
+        "4": 59
+      },
+      "mean_probability": 0.5337787830396475,
+      "mean_margin": 0.00778667290748899
+    },
+    "bench pressing": {
+      "num_videos": 946,
+      "description_counts": {
+        "0": 738,
+        "1": 20,
+        "2": 60,
+        "3": 111,
+        "4": 17
+      },
+      "mean_probability": 0.6201926923890063,
+      "mean_margin": 0.012651304439746295
+    },
+    "bending back": {
+      "num_videos": 472,
+      "description_counts": {
+        "0": 99,
+        "1": 28,
+        "2": 170,
+        "3": 9,
+        "4": 166
+      },
+      "mean_probability": 0.45189576694915307,
+      "mean_margin": 0.005612385593220337
+    },
+    "bending metal": {
+      "num_videos": 255,
+      "description_counts": {
+        "0": 94,
+        "1": 2,
+        "2": 3,
+        "3": 18,
+        "4": 138
+      },
+      "mean_probability": 0.6234269882352937,
+      "mean_margin": 0.01047793333333333
+    },
+    "biking through snow": {
+      "num_videos": 865,
+      "description_counts": {
+        "0": 34,
+        "1": 3,
+        "2": 758,
+        "4": 70
+      },
+      "mean_probability": 0.6695504416184974,
+      "mean_margin": 0.012134352601156069
+    },
+    "blasting sand": {
+      "num_videos": 558,
+      "description_counts": {
+        "0": 12,
+        "1": 145,
+        "2": 3,
+        "3": 69,
+        "4": 329
+      },
+      "mean_probability": 0.6004923225806448,
+      "mean_margin": 0.009994019713261635
+    },
+    "blowing glass": {
+      "num_videos": 979,
+      "description_counts": {
+        "0": 21,
+        "1": 13,
+        "2": 944,
+        "4": 1
+      },
+      "mean_probability": 0.8264923237997949,
+      "mean_margin": 0.019931756894790605
+    },
+    "blowing leaves": {
+      "num_videos": 232,
+      "description_counts": {
+        "0": 11,
+        "2": 13,
+        "3": 187,
+        "4": 21
+      },
+      "mean_probability": 0.745722284482759,
+      "mean_margin": 0.019478616379310355
+    },
+    "blowing nose": {
+      "num_videos": 420,
+      "description_counts": {
+        "0": 17,
+        "1": 157,
+        "2": 216,
+        "3": 22,
+        "4": 8
+      },
+      "mean_probability": 0.5256545285714284,
+      "mean_margin": 0.0094421357142857
+    },
+    "blowing out candles": {
+      "num_videos": 988,
+      "description_counts": {
+        "0": 3,
+        "1": 892,
+        "2": 67,
+        "3": 1,
+        "4": 25
+      },
+      "mean_probability": 0.7358211872469631,
+      "mean_margin": 0.014328678137651811
+    },
+    "bobsledding": {
+      "num_videos": 397,
+      "description_counts": {
+        "0": 285,
+        "1": 9,
+        "2": 101,
+        "3": 2
+      },
+      "mean_probability": 0.743951206549119,
+      "mean_margin": 0.015345801007556675
+    },
+    "bookbinding": {
+      "num_videos": 758,
+      "description_counts": {
+        "0": 630,
+        "1": 5,
+        "3": 109,
+        "4": 14
+      },
+      "mean_probability": 0.7176297678100262,
+      "mean_margin": 0.01613214248021107
+    },
+    "bouncing on trampoline": {
+      "num_videos": 523,
+      "description_counts": {
+        "0": 42,
+        "2": 10,
+        "3": 471
+      },
+      "mean_probability": 0.8932241739961764,
+      "mean_margin": 0.040238166347992356
+    },
+    "bowling": {
+      "num_videos": 915,
+      "description_counts": {
+        "1": 704,
+        "2": 2,
+        "3": 140,
+        "4": 69
+      },
+      "mean_probability": 0.6524013661202175,
+      "mean_margin": 0.012048401092896182
+    },
+    "braiding hair": {
+      "num_videos": 571,
+      "description_counts": {
+        "1": 226,
+        "3": 339,
+        "4": 6
+      },
+      "mean_probability": 0.6343855113835378,
+      "mean_margin": 0.007860812609457094
+    },
+    "breading or breadcrumbing": {
+      "num_videos": 299,
+      "description_counts": {
+        "0": 184,
+        "1": 41,
+        "2": 33,
+        "3": 41
+      },
+      "mean_probability": 0.5521783210702341,
+      "mean_margin": 0.00787129765886288
+    },
+    "breakdancing": {
+      "num_videos": 788,
+      "description_counts": {
+        "0": 57,
+        "1": 186,
+        "2": 50,
+        "3": 7,
+        "4": 488
+      },
+      "mean_probability": 0.5428141573604073,
+      "mean_margin": 0.008546909898477159
+    },
+    "brush painting": {
+      "num_videos": 376,
+      "description_counts": {
+        "1": 255,
+        "2": 4,
+        "3": 82,
+        "4": 35
+      },
+      "mean_probability": 0.5814595239361704,
+      "mean_margin": 0.009533515957446817
+    },
+    "brushing hair": {
+      "num_videos": 761,
+      "description_counts": {
+        "0": 5,
+        "1": 110,
+        "2": 351,
+        "4": 295
+      },
+      "mean_probability": 0.624197628120893,
+      "mean_margin": 0.010308755584756902
+    },
+    "brushing teeth": {
+      "num_videos": 981,
+      "description_counts": {
+        "0": 226,
+        "2": 34,
+        "3": 403,
+        "4": 318
+      },
+      "mean_probability": 0.5679721100917432,
+      "mean_margin": 0.009267253822629969
+    },
+    "building cabinet": {
+      "num_videos": 278,
+      "description_counts": {
+        "0": 7,
+        "1": 2,
+        "3": 14,
+        "4": 255
+      },
+      "mean_probability": 0.7782544244604321,
+      "mean_margin": 0.019754312949640286
+    },
+    "building shed": {
+      "num_videos": 272,
+      "description_counts": {
+        "0": 16,
+        "2": 3,
+        "3": 1,
+        "4": 252
+      },
+      "mean_probability": 0.845998426470589,
+      "mean_margin": 0.026158974264705873
+    },
+    "bungee jumping": {
+      "num_videos": 888,
+      "description_counts": {
+        "1": 16,
+        "2": 193,
+        "3": 636,
+        "4": 43
+      },
+      "mean_probability": 0.6904000011261261,
+      "mean_margin": 0.01803356418918921
+    },
+    "busking": {
+      "num_videos": 687,
+      "description_counts": {
+        "0": 83,
+        "1": 409,
+        "2": 160,
+        "3": 19,
+        "4": 16
+      },
+      "mean_probability": 0.5820546899563326,
+      "mean_margin": 0.008564999999999991
+    },
+    "canoeing or kayaking": {
+      "num_videos": 949,
+      "description_counts": {
+        "0": 604,
+        "1": 1,
+        "2": 230,
+        "3": 105,
+        "4": 9
+      },
+      "mean_probability": 0.5512944952581661,
+      "mean_margin": 0.007383781875658593
+    },
+    "capoeira": {
+      "num_videos": 937,
+      "description_counts": {
+        "0": 753,
+        "1": 39,
+        "2": 130,
+        "3": 14,
+        "4": 1
+      },
+      "mean_probability": 0.7047683265741735,
+      "mean_margin": 0.01855534791889006
+    },
+    "carrying baby": {
+      "num_videos": 406,
+      "description_counts": {
+        "0": 106,
+        "1": 48,
+        "2": 16,
+        "3": 72,
+        "4": 164
+      },
+      "mean_probability": 0.48992948768472877,
+      "mean_margin": 0.007016623152709356
+    },
+    "cartwheeling": {
+      "num_videos": 452,
+      "description_counts": {
+        "0": 406,
+        "1": 20,
+        "2": 2,
+        "4": 24
+      },
+      "mean_probability": 0.7197740884955748,
+      "mean_margin": 0.015559378318584074
+    },
+    "carving pumpkin": {
+      "num_videos": 548,
+      "description_counts": {
+        "0": 395,
+        "1": 2,
+        "2": 1,
+        "3": 147,
+        "4": 3
+      },
+      "mean_probability": 0.6852599635036493,
+      "mean_margin": 0.009011808394160591
+    },
+    "catching fish": {
+      "num_videos": 484,
+      "description_counts": {
+        "0": 310,
+        "2": 4,
+        "3": 4,
+        "4": 166
+      },
+      "mean_probability": 0.636966423553719,
+      "mean_margin": 0.009245309917355369
+    },
+    "catching or throwing baseball": {
+      "num_videos": 598,
+      "description_counts": {
+        "0": 161,
+        "1": 38,
+        "2": 150,
+        "3": 221,
+        "4": 28
+      },
+      "mean_probability": 0.5076206170568559,
+      "mean_margin": 0.007477515050167223
+    },
+    "catching or throwing frisbee": {
+      "num_videos": 886,
+      "description_counts": {
+        "0": 6,
+        "1": 60,
+        "2": 241,
+        "3": 39,
+        "4": 540
+      },
+      "mean_probability": 0.5897001783295708,
+      "mean_margin": 0.010354066591422115
+    },
+    "catching or throwing softball": {
+      "num_videos": 685,
+      "description_counts": {
+        "0": 163,
+        "1": 12,
+        "2": 246,
+        "3": 251,
+        "4": 13
+      },
+      "mean_probability": 0.5318010306569343,
+      "mean_margin": 0.007922432116788317
+    },
+    "celebrating": {
+      "num_videos": 564,
+      "description_counts": {
+        "0": 28,
+        "1": 2,
+        "2": 399,
+        "3": 109,
+        "4": 26
+      },
+      "mean_probability": 0.6244203829787236,
+      "mean_margin": 0.011931289007092198
+    },
+    "changing oil": {
+      "num_videos": 550,
+      "description_counts": {
+        "0": 104,
+        "1": 101,
+        "2": 8,
+        "3": 213,
+        "4": 124
+      },
+      "mean_probability": 0.5210076600000004,
+      "mean_margin": 0.00878553272727273
+    },
+    "changing wheel": {
+      "num_videos": 309,
+      "description_counts": {
+        "0": 8,
+        "1": 11,
+        "2": 145,
+        "3": 105,
+        "4": 40
+      },
+      "mean_probability": 0.7117995339805826,
+      "mean_margin": 0.015771957928802594
+    },
+    "checking tires": {
+      "num_videos": 398,
+      "description_counts": {
+        "0": 1,
+        "1": 202,
+        "2": 1,
+        "3": 112,
+        "4": 82
+      },
+      "mean_probability": 0.5771012060301502,
+      "mean_margin": 0.00873722864321608
+    },
+    "cheerleading": {
+      "num_videos": 980,
+      "description_counts": {
+        "0": 48,
+        "1": 15,
+        "2": 882,
+        "3": 21,
+        "4": 14
+      },
+      "mean_probability": 0.8578595948979589,
+      "mean_margin": 0.03483612653061224
+    },
+    "chopping wood": {
+      "num_videos": 742,
+      "description_counts": {
+        "0": 53,
+        "1": 534,
+        "2": 103,
+        "3": 38,
+        "4": 14
+      },
+      "mean_probability": 0.6098359690026952,
+      "mean_margin": 0.012934526954177877
+    },
+    "clapping": {
+      "num_videos": 334,
+      "description_counts": {
+        "0": 11,
+        "1": 8,
+        "2": 287,
+        "3": 12,
+        "4": 16
+      },
+      "mean_probability": 0.7013816676646709,
+      "mean_margin": 0.02074209281437125
+    },
+    "clay pottery making": {
+      "num_videos": 358,
+      "description_counts": {
+        "0": 175,
+        "1": 1,
+        "2": 7,
+        "3": 175
+      },
+      "mean_probability": 0.616333687150838,
+      "mean_margin": 0.008362170391061461
+    },
+    "clean and jerk": {
+      "num_videos": 744,
+      "description_counts": {
+        "0": 377,
+        "1": 12,
+        "2": 138,
+        "3": 217
+      },
+      "mean_probability": 0.5211903534946244,
+      "mean_margin": 0.00671880241935484
+    },
+    "cleaning floor": {
+      "num_videos": 702,
+      "description_counts": {
+        "0": 10,
+        "1": 189,
+        "2": 210,
+        "3": 272,
+        "4": 21
+      },
+      "mean_probability": 0.5235849472934476,
+      "mean_margin": 0.007409072649572643
+    },
+    "cleaning gutters": {
+      "num_videos": 441,
+      "description_counts": {
+        "1": 184,
+        "2": 96,
+        "3": 102,
+        "4": 59
+      },
+      "mean_probability": 0.6273168390022675,
+      "mean_margin": 0.012021834467120183
+    },
+    "cleaning pool": {
+      "num_videos": 293,
+      "description_counts": {
+        "0": 167,
+        "1": 22,
+        "2": 19,
+        "3": 39,
+        "4": 46
+      },
+      "mean_probability": 0.5301001228668942,
+      "mean_margin": 0.007659160409556318
+    },
+    "cleaning shoes": {
+      "num_videos": 535,
+      "description_counts": {
+        "0": 12,
+        "1": 166,
+        "2": 37,
+        "4": 320
+      },
+      "mean_probability": 0.6390355813084112,
+      "mean_margin": 0.011670844859813083
+    },
+    "cleaning toilet": {
+      "num_videos": 418,
+      "description_counts": {
+        "0": 144,
+        "1": 210,
+        "3": 34,
+        "4": 30
+      },
+      "mean_probability": 0.5206596818181817,
+      "mean_margin": 0.007476361244019146
+    },
+    "cleaning windows": {
+      "num_videos": 530,
+      "description_counts": {
+        "0": 20,
+        "1": 14,
+        "2": 94,
+        "3": 14,
+        "4": 388
+      },
+      "mean_probability": 0.6501672207547166,
+      "mean_margin": 0.012748973584905654
+    },
+    "climbing a rope": {
+      "num_videos": 259,
+      "description_counts": {
+        "0": 5,
+        "1": 36,
+        "2": 45,
+        "3": 9,
+        "4": 164
+      },
+      "mean_probability": 0.6575253667953671,
+      "mean_margin": 0.013551702702702709
+    },
+    "climbing ladder": {
+      "num_videos": 504,
+      "description_counts": {
+        "0": 12,
+        "1": 7,
+        "3": 3,
+        "4": 482
+      },
+      "mean_probability": 0.792994424603175,
+      "mean_margin": 0.023221952380952402
+    },
+    "climbing tree": {
+      "num_videos": 908,
+      "description_counts": {
+        "1": 241,
+        "2": 9,
+        "3": 658
+      },
+      "mean_probability": 0.6633152808370045,
+      "mean_margin": 0.008815944933920709
+    },
+    "contact juggling": {
+      "num_videos": 975,
+      "description_counts": {
+        "0": 148,
+        "1": 125,
+        "2": 4,
+        "3": 219,
+        "4": 479
+      },
+      "mean_probability": 0.4985594492307696,
+      "mean_margin": 0.006714850256410252
+    },
+    "cooking chicken": {
+      "num_videos": 811,
+      "description_counts": {
+        "0": 285,
+        "1": 207,
+        "2": 297,
+        "3": 19,
+        "4": 3
+      },
+      "mean_probability": 0.555711334155364,
+      "mean_margin": 0.009537429099876687
+    },
+    "cooking egg": {
+      "num_videos": 453,
+      "description_counts": {
+        "0": 182,
+        "1": 122,
+        "2": 77,
+        "3": 4,
+        "4": 68
+      },
+      "mean_probability": 0.5339565651214125,
+      "mean_margin": 0.008723048565121412
+    },
+    "cooking on campfire": {
+      "num_videos": 250,
+      "description_counts": {
+        "1": 6,
+        "2": 54,
+        "3": 115,
+        "4": 75
+      },
+      "mean_probability": 0.6390390360000001,
+      "mean_margin": 0.011925288000000006
+    },
+    "cooking sausages": {
+      "num_videos": 311,
+      "description_counts": {
+        "0": 229,
+        "1": 2,
+        "2": 58,
+        "3": 5,
+        "4": 17
+      },
+      "mean_probability": 0.7026398745980706,
+      "mean_margin": 0.01651988424437299
+    },
+    "counting money": {
+      "num_videos": 502,
+      "description_counts": {
+        "0": 137,
+        "1": 9,
+        "2": 293,
+        "3": 19,
+        "4": 44
+      },
+      "mean_probability": 0.6715272589641434,
+      "mean_margin": 0.013448886454183262
+    },
+    "country line dancing": {
+      "num_videos": 858,
+      "description_counts": {
+        "0": 11,
+        "1": 830,
+        "2": 3,
+        "3": 6,
+        "4": 8
+      },
+      "mean_probability": 0.8822951946386942,
+      "mean_margin": 0.03821496736596736
+    },
+    "cracking neck": {
+      "num_videos": 290,
+      "description_counts": {
+        "0": 114,
+        "1": 5,
+        "2": 36,
+        "3": 2,
+        "4": 133
+      },
+      "mean_probability": 0.5536941172413792,
+      "mean_margin": 0.006942855172413795
+    },
+    "crawling baby": {
+      "num_videos": 986,
+      "description_counts": {
+        "2": 466,
+        "3": 96,
+        "4": 424
+      },
+      "mean_probability": 0.5327113762677484,
+      "mean_margin": 0.004916228194726168
+    },
+    "crossing river": {
+      "num_videos": 745,
+      "description_counts": {
+        "0": 509,
+        "1": 158,
+        "2": 66,
+        "3": 11,
+        "4": 1
+      },
+      "mean_probability": 0.6576414335570473,
+      "mean_margin": 0.011358434899328846
+    },
+    "crying": {
+      "num_videos": 843,
+      "description_counts": {
+        "1": 62,
+        "2": 56,
+        "3": 3,
+        "4": 722
+      },
+      "mean_probability": 0.829749415183867,
+      "mean_margin": 0.031451258600237245
+    },
+    "curling hair": {
+      "num_videos": 687,
+      "description_counts": {
+        "0": 518,
+        "2": 1,
+        "3": 7,
+        "4": 161
+      },
+      "mean_probability": 0.7052380538573502,
+      "mean_margin": 0.011666360989810776
+    },
+    "cutting nails": {
+      "num_videos": 404,
+      "description_counts": {
+        "0": 154,
+        "1": 72,
+        "2": 7,
+        "3": 171
+      },
+      "mean_probability": 0.6801963589108909,
+      "mean_margin": 0.015922309405940582
+    },
+    "cutting pineapple": {
+      "num_videos": 548,
+      "description_counts": {
+        "0": 16,
+        "1": 478,
+        "2": 1,
+        "3": 53
+      },
+      "mean_probability": 0.878409069343066,
+      "mean_margin": 0.03732256569343065
+    },
+    "cutting watermelon": {
+      "num_videos": 600,
+      "description_counts": {
+        "0": 554,
+        "1": 17,
+        "3": 24,
+        "4": 5
+      },
+      "mean_probability": 0.8728788399999998,
+      "mean_margin": 0.03320068500000003
+    },
+    "dancing ballet": {
+      "num_videos": 981,
+      "description_counts": {
+        "0": 187,
+        "1": 509,
+        "2": 6,
+        "3": 152,
+        "4": 127
+      },
+      "mean_probability": 0.5094948470948008,
+      "mean_margin": 0.00856855657492354
+    },
+    "dancing charleston": {
+      "num_videos": 565,
+      "description_counts": {
+        "1": 337,
+        "2": 227,
+        "3": 1
+      },
+      "mean_probability": 0.67796511858407,
+      "mean_margin": 0.010165541592920359
+    },
+    "dancing gangnam style": {
+      "num_videos": 676,
+      "description_counts": {
+        "0": 184,
+        "1": 6,
+        "2": 133,
+        "3": 208,
+        "4": 145
+      },
+      "mean_probability": 0.45543476627218893,
+      "mean_margin": 0.005937906804733726
+    },
+    "dancing macarena": {
+      "num_videos": 798,
+      "description_counts": {
+        "0": 8,
+        "1": 13,
+        "2": 632,
+        "3": 124,
+        "4": 21
+      },
+      "mean_probability": 0.6189922406015036,
+      "mean_margin": 0.01149921804511279
+    },
+    "deadlifting": {
+      "num_videos": 651,
+      "description_counts": {
+        "0": 1,
+        "1": 226,
+        "2": 386,
+        "4": 38
+      },
+      "mean_probability": 0.5250084639016905,
+      "mean_margin": 0.005086844854070663
+    },
+    "decorating the christmas tree": {
+      "num_videos": 436,
+      "description_counts": {
+        "1": 373,
+        "2": 61,
+        "3": 2
+      },
+      "mean_probability": 0.7140312499999992,
+      "mean_margin": 0.013349050458715601
+    },
+    "digging": {
+      "num_videos": 249,
+      "description_counts": {
+        "1": 132,
+        "2": 114,
+        "3": 3
+      },
+      "mean_probability": 0.7593567630522087,
+      "mean_margin": 0.01547202409638554
+    },
+    "dining": {
+      "num_videos": 520,
+      "description_counts": {
+        "0": 239,
+        "1": 15,
+        "2": 93,
+        "4": 173
+      },
+      "mean_probability": 0.5214585346153845,
+      "mean_margin": 0.007428913461538458
+    },
+    "disc golfing": {
+      "num_videos": 408,
+      "description_counts": {
+        "0": 131,
+        "1": 124,
+        "2": 2,
+        "3": 1,
+        "4": 150
+      },
+      "mean_probability": 0.5205006397058826,
+      "mean_margin": 0.007545612745098038
+    },
+    "diving cliff": {
+      "num_videos": 895,
+      "description_counts": {
+        "0": 1,
+        "1": 876,
+        "4": 18
+      },
+      "mean_probability": 0.9019588435754191,
+      "mean_margin": 0.03012724022346371
+    },
+    "dodgeball": {
+      "num_videos": 439,
+      "description_counts": {
+        "0": 3,
+        "1": 352,
+        "2": 14,
+        "3": 32,
+        "4": 38
+      },
+      "mean_probability": 0.5973954009111613,
+      "mean_margin": 0.011802191343963557
+    },
+    "doing aerobics": {
+      "num_videos": 302,
+      "description_counts": {
+        "0": 61,
+        "1": 18,
+        "2": 163,
+        "3": 54,
+        "4": 6
+      },
+      "mean_probability": 0.4836684668874173,
+      "mean_margin": 0.007074821192052977
+    },
+    "doing laundry": {
+      "num_videos": 307,
+      "description_counts": {
+        "0": 51,
+        "1": 161,
+        "2": 44,
+        "3": 3,
+        "4": 48
+      },
+      "mean_probability": 0.5769861954397395,
+      "mean_margin": 0.009883309446254067
+    },
+    "doing nails": {
+      "num_videos": 756,
+      "description_counts": {
+        "0": 672,
+        "1": 46,
+        "2": 7,
+        "3": 28,
+        "4": 3
+      },
+      "mean_probability": 0.6057839417989411,
+      "mean_margin": 0.009608519841269834
+    },
+    "drawing": {
+      "num_videos": 291,
+      "description_counts": {
+        "0": 59,
+        "1": 130,
+        "2": 69,
+        "3": 25,
+        "4": 8
+      },
+      "mean_probability": 0.5831521134020616,
+      "mean_margin": 0.010741343642611673
+    },
+    "dribbling basketball": {
+      "num_videos": 756,
+      "description_counts": {
+        "0": 64,
+        "2": 636,
+        "3": 56
+      },
+      "mean_probability": 0.7940657605820106,
+      "mean_margin": 0.022677794973544968
+    },
+    "drinking": {
+      "num_videos": 437,
+      "description_counts": {
+        "0": 70,
+        "1": 58,
+        "2": 31,
+        "3": 244,
+        "4": 34
+      },
+      "mean_probability": 0.4997491784897027,
+      "mean_margin": 0.0073225240274599505
+    },
+    "drinking beer": {
+      "num_videos": 408,
+      "description_counts": {
+        "0": 2,
+        "1": 32,
+        "2": 33,
+        "3": 230,
+        "4": 111
+      },
+      "mean_probability": 0.5045501151960782,
+      "mean_margin": 0.006755737745098043
+    },
+    "drinking shots": {
+      "num_videos": 253,
+      "description_counts": {
+        "0": 125,
+        "2": 120,
+        "3": 3,
+        "4": 5
+      },
+      "mean_probability": 0.6310475573122527,
+      "mean_margin": 0.009844774703557317
+    },
+    "driving car": {
+      "num_videos": 908,
+      "description_counts": {
+        "0": 169,
+        "1": 205,
+        "2": 50,
+        "3": 400,
+        "4": 84
+      },
+      "mean_probability": 0.5186553777533043,
+      "mean_margin": 0.008286921806167403
+    },
+    "driving tractor": {
+      "num_videos": 744,
+      "description_counts": {
+        "0": 26,
+        "1": 11,
+        "2": 355,
+        "3": 4,
+        "4": 348
+      },
+      "mean_probability": 0.6411907231182788,
+      "mean_margin": 0.008533099462365589
+    },
+    "drop kicking": {
+      "num_videos": 552,
+      "description_counts": {
+        "0": 35,
+        "1": 3,
+        "2": 428,
+        "3": 10,
+        "4": 76
+      },
+      "mean_probability": 0.6482937663043484,
+      "mean_margin": 0.017167034420289867
+    },
+    "drumming fingers": {
+      "num_videos": 257,
+      "description_counts": {
+        "0": 113,
+        "1": 70,
+        "2": 4,
+        "3": 5,
+        "4": 65
+      },
+      "mean_probability": 0.5269675680933854,
+      "mean_margin": 0.007060143968871595
+    },
+    "dunking basketball": {
+      "num_videos": 931,
+      "description_counts": {
+        "0": 8,
+        "1": 21,
+        "2": 97,
+        "3": 135,
+        "4": 670
+      },
+      "mean_probability": 0.6055277389903331,
+      "mean_margin": 0.012468735767991422
+    },
+    "dying hair": {
+      "num_videos": 882,
+      "description_counts": {
+        "0": 781,
+        "1": 4,
+        "2": 84,
+        "3": 13
+      },
+      "mean_probability": 0.7377744149659852,
+      "mean_margin": 0.016272028344671223
+    },
+    "eating burger": {
+      "num_videos": 697,
+      "description_counts": {
+        "0": 75,
+        "1": 96,
+        "2": 2,
+        "3": 13,
+        "4": 511
+      },
+      "mean_probability": 0.6761367790530844,
+      "mean_margin": 0.01275609038737445
+    },
+    "eating cake": {
+      "num_videos": 341,
+      "description_counts": {
+        "0": 124,
+        "1": 184,
+        "2": 22,
+        "3": 11
+      },
+      "mean_probability": 0.6319275483870965,
+      "mean_margin": 0.01130740469208211
+    },
+    "eating carrots": {
+      "num_videos": 360,
+      "description_counts": {
+        "0": 102,
+        "1": 219,
+        "2": 1,
+        "3": 11,
+        "4": 27
+      },
+      "mean_probability": 0.6871690666666664,
+      "mean_margin": 0.012758380555555547
+    },
+    "eating chips": {
+      "num_videos": 579,
+      "description_counts": {
+        "0": 303,
+        "1": 29,
+        "2": 41,
+        "4": 206
+      },
+      "mean_probability": 0.5950057115716751,
+      "mean_margin": 0.00928176856649395
+    },
+    "eating doughnuts": {
+      "num_videos": 373,
+      "description_counts": {
+        "0": 73,
+        "1": 40,
+        "2": 179,
+        "3": 5,
+        "4": 76
+      },
+      "mean_probability": 0.625718024128686,
+      "mean_margin": 0.011970402144772121
+    },
+    "eating hotdog": {
+      "num_videos": 407,
+      "description_counts": {
+        "0": 59,
+        "1": 216,
+        "2": 12,
+        "4": 120
+      },
+      "mean_probability": 0.6345718624078622,
+      "mean_margin": 0.011722941031941039
+    },
+    "eating ice cream": {
+      "num_videos": 762,
+      "description_counts": {
+        "0": 178,
+        "1": 304,
+        "2": 245,
+        "3": 32,
+        "4": 3
+      },
+      "mean_probability": 0.5501321312335956,
+      "mean_margin": 0.008807633858267714
+    },
+    "eating spaghetti": {
+      "num_videos": 987,
+      "description_counts": {
+        "0": 45,
+        "1": 931,
+        "2": 2,
+        "3": 5,
+        "4": 4
+      },
+      "mean_probability": 0.759682763931104,
+      "mean_margin": 0.020299899696048642
+    },
+    "eating watermelon": {
+      "num_videos": 397,
+      "description_counts": {
+        "0": 15,
+        "1": 249,
+        "2": 23,
+        "3": 105,
+        "4": 5
+      },
+      "mean_probability": 0.6824363576826195,
+      "mean_margin": 0.014581717884130974
+    },
+    "egg hunting": {
+      "num_videos": 330,
+      "description_counts": {
+        "0": 295,
+        "1": 14,
+        "2": 21
+      },
+      "mean_probability": 0.7382250151515153,
+      "mean_margin": 0.01867973030303029
+    },
+    "exercising arm": {
+      "num_videos": 265,
+      "description_counts": {
+        "0": 80,
+        "1": 18,
+        "2": 7,
+        "3": 114,
+        "4": 46
+      },
+      "mean_probability": 0.5184602603773587,
+      "mean_margin": 0.0075835433962264135
+    },
+    "exercising with an exercise ball": {
+      "num_videos": 288,
+      "description_counts": {
+        "0": 270,
+        "1": 3,
+        "2": 3,
+        "3": 10,
+        "4": 2
+      },
+      "mean_probability": 0.8463965416666668,
+      "mean_margin": 0.03055317708333331
+    },
+    "extinguishing fire": {
+      "num_videos": 439,
+      "description_counts": {
+        "0": 125,
+        "1": 97,
+        "2": 21,
+        "3": 103,
+        "4": 93
+      },
+      "mean_probability": 0.5683265603644645,
+      "mean_margin": 0.009928810933940786
+    },
+    "faceplanting": {
+      "num_videos": 285,
+      "description_counts": {
+        "0": 63,
+        "3": 210,
+        "4": 12
+      },
+      "mean_probability": 0.6416375614035085,
+      "mean_margin": 0.010568284210526304
+    },
+    "feeding birds": {
+      "num_videos": 960,
+      "description_counts": {
+        "0": 504,
+        "1": 73,
+        "2": 294,
+        "3": 88,
+        "4": 1
+      },
+      "mean_probability": 0.6693817250000007,
+      "mean_margin": 0.01448795312499998
+    },
+    "feeding fish": {
+      "num_videos": 781,
+      "description_counts": {
+        "0": 616,
+        "1": 26,
+        "2": 117,
+        "3": 19,
+        "4": 3
+      },
+      "mean_probability": 0.6781054199743927,
+      "mean_margin": 0.014286588988476305
+    },
+    "feeding goats": {
+      "num_videos": 844,
+      "description_counts": {
+        "0": 132,
+        "1": 74,
+        "2": 3,
+        "3": 620,
+        "4": 15
+      },
+      "mean_probability": 0.6180116244075828,
+      "mean_margin": 0.011667248815165877
+    },
+    "filling eyebrows": {
+      "num_videos": 892,
+      "description_counts": {
+        "0": 299,
+        "1": 129,
+        "2": 71,
+        "4": 393
+      },
+      "mean_probability": 0.491486282511211,
+      "mean_margin": 0.0055654170403587385
+    },
+    "finger snapping": {
+      "num_videos": 674,
+      "description_counts": {
+        "0": 58,
+        "1": 266,
+        "2": 203,
+        "3": 36,
+        "4": 111
+      },
+      "mean_probability": 0.48923370919881315,
+      "mean_margin": 0.007002741839762615
+    },
+    "fixing hair": {
+      "num_videos": 510,
+      "description_counts": {
+        "0": 99,
+        "1": 3,
+        "2": 111,
+        "3": 292,
+        "4": 5
+      },
+      "mean_probability": 0.573466221568628,
+      "mean_margin": 0.009531764705882356
+    },
+    "flipping pancake": {
+      "num_videos": 556,
+      "description_counts": {
+        "0": 275,
+        "1": 17,
+        "2": 34,
+        "3": 206,
+        "4": 24
+      },
+      "mean_probability": 0.6291473345323744,
+      "mean_margin": 0.01230911690647482
+    },
+    "flying kite": {
+      "num_videos": 906,
+      "description_counts": {
+        "0": 644,
+        "1": 4,
+        "2": 223,
+        "3": 2,
+        "4": 33
+      },
+      "mean_probability": 0.5193582461368651,
+      "mean_margin": 0.007392666666666661
+    },
+    "folding clothes": {
+      "num_videos": 523,
+      "description_counts": {
+        "0": 193,
+        "1": 3,
+        "2": 84,
+        "3": 19,
+        "4": 224
+      },
+      "mean_probability": 0.561334848948374,
+      "mean_margin": 0.009171149139579345
+    },
+    "folding napkins": {
+      "num_videos": 693,
+      "description_counts": {
+        "0": 465,
+        "1": 144,
+        "2": 77,
+        "3": 2,
+        "4": 5
+      },
+      "mean_probability": 0.6875363088023088,
+      "mean_margin": 0.016303168831168828
+    },
+    "folding paper": {
+      "num_videos": 718,
+      "description_counts": {
+        "0": 476,
+        "1": 19,
+        "2": 1,
+        "3": 139,
+        "4": 83
+      },
+      "mean_probability": 0.6359312493036201,
+      "mean_margin": 0.012267722841225627
+    },
+    "front raises": {
+      "num_videos": 801,
+      "description_counts": {
+        "0": 63,
+        "1": 51,
+        "2": 4,
+        "3": 170,
+        "4": 513
+      },
+      "mean_probability": 0.49156542197253383,
+      "mean_margin": 0.005840009987515595
+    },
+    "frying vegetables": {
+      "num_videos": 433,
+      "description_counts": {
+        "0": 1,
+        "1": 340,
+        "2": 63,
+        "3": 19,
+        "4": 10
+      },
+      "mean_probability": 0.658492351039261,
+      "mean_margin": 0.013358690531177837
+    },
+    "garbage collecting": {
+      "num_videos": 290,
+      "description_counts": {
+        "0": 72,
+        "1": 4,
+        "2": 201,
+        "4": 13
+      },
+      "mean_probability": 0.6797615793103445,
+      "mean_margin": 0.013114134482758623
+    },
+    "gargling": {
+      "num_videos": 277,
+      "description_counts": {
+        "0": 138,
+        "1": 5,
+        "2": 56,
+        "3": 53,
+        "4": 25
+      },
+      "mean_probability": 0.5006222274368233,
+      "mean_margin": 0.0074207075812274354
+    },
+    "getting a haircut": {
+      "num_videos": 496,
+      "description_counts": {
+        "0": 10,
+        "1": 434,
+        "2": 1,
+        "3": 21,
+        "4": 30
+      },
+      "mean_probability": 0.7500290241935477,
+      "mean_margin": 0.019757675403225823
+    },
+    "getting a tattoo": {
+      "num_videos": 581,
+      "description_counts": {
+        "1": 5,
+        "4": 576
+      },
+      "mean_probability": 0.9355674629948372,
+      "mean_margin": 0.03871290361445782
+    },
+    "giving or receiving award": {
+      "num_videos": 794,
+      "description_counts": {
+        "1": 344,
+        "2": 67,
+        "3": 6,
+        "4": 377
+      },
+      "mean_probability": 0.7126698639798481,
+      "mean_margin": 0.014389541561712854
+    },
+    "golf chipping": {
+      "num_videos": 545,
+      "description_counts": {
+        "0": 68,
+        "1": 188,
+        "2": 81,
+        "3": 5,
+        "4": 203
+      },
+      "mean_probability": 0.4562271522935779,
+      "mean_margin": 0.005002627522935785
+    },
+    "golf driving": {
+      "num_videos": 684,
+      "description_counts": {
+        "0": 279,
+        "1": 25,
+        "2": 2,
+        "3": 344,
+        "4": 34
+      },
+      "mean_probability": 0.5347529225146196,
+      "mean_margin": 0.008177627192982465
+    },
+    "golf putting": {
+      "num_videos": 929,
+      "description_counts": {
+        "0": 96,
+        "1": 82,
+        "2": 696,
+        "3": 1,
+        "4": 54
+      },
+      "mean_probability": 0.6028767567276643,
+      "mean_margin": 0.01150087405812701
+    },
+    "grinding meat": {
+      "num_videos": 263,
+      "description_counts": {
+        "0": 24,
+        "1": 213,
+        "3": 26
+      },
+      "mean_probability": 0.7447458783269959,
+      "mean_margin": 0.017967072243346007
+    },
+    "grooming dog": {
+      "num_videos": 457,
+      "description_counts": {
+        "0": 134,
+        "1": 38,
+        "2": 241,
+        "3": 42,
+        "4": 2
+      },
+      "mean_probability": 0.556671603938731,
+      "mean_margin": 0.007950310722100656
+    },
+    "grooming horse": {
+      "num_videos": 485,
+      "description_counts": {
+        "0": 99,
+        "1": 116,
+        "2": 1,
+        "3": 269
+      },
+      "mean_probability": 0.5783132762886599,
+      "mean_margin": 0.008080806185567002
+    },
+    "gymnastics tumbling": {
+      "num_videos": 987,
+      "description_counts": {
+        "0": 89,
+        "1": 1,
+        "2": 808,
+        "3": 85,
+        "4": 4
+      },
+      "mean_probability": 0.76205022289767,
+      "mean_margin": 0.022197996960486334
+    },
+    "hammer throw": {
+      "num_videos": 984,
+      "description_counts": {
+        "0": 701,
+        "1": 1,
+        "2": 249,
+        "3": 5,
+        "4": 28
+      },
+      "mean_probability": 0.64424518495935,
+      "mean_margin": 0.010608213414634148
+    },
+    "headbanging": {
+      "num_videos": 935,
+      "description_counts": {
+        "0": 109,
+        "1": 17,
+        "2": 82,
+        "3": 4,
+        "4": 723
+      },
+      "mean_probability": 0.5568500374331543,
+      "mean_margin": 0.009570306951871659
+    },
+    "headbutting": {
+      "num_videos": 479,
+      "description_counts": {
+        "0": 26,
+        "1": 27,
+        "2": 332,
+        "3": 47,
+        "4": 47
+      },
+      "mean_probability": 0.5023129686847605,
+      "mean_margin": 0.00879747181628392
+    },
+    "high jump": {
+      "num_videos": 798,
+      "description_counts": {
+        "1": 62,
+        "2": 9,
+        "3": 186,
+        "4": 541
+      },
+      "mean_probability": 0.5916726528822055,
+      "mean_margin": 0.00963804761904762
+    },
+    "high kick": {
+      "num_videos": 664,
+      "description_counts": {
+        "0": 6,
+        "1": 314,
+        "2": 270,
+        "3": 23,
+        "4": 51
+      },
+      "mean_probability": 0.5820411897590364,
+      "mean_margin": 0.0104954608433735
+    },
+    "hitting baseball": {
+      "num_videos": 900,
+      "description_counts": {
+        "0": 294,
+        "1": 43,
+        "2": 420,
+        "3": 142,
+        "4": 1
+      },
+      "mean_probability": 0.5652533577777781,
+      "mean_margin": 0.008816592222222227
+    },
+    "hockey stop": {
+      "num_videos": 318,
+      "description_counts": {
+        "0": 151,
+        "1": 9,
+        "2": 7,
+        "4": 151
+      },
+      "mean_probability": 0.6364408270440249,
+      "mean_margin": 0.007961047169811322
+    },
+    "holding snake": {
+      "num_videos": 274,
+      "description_counts": {
+        "0": 236,
+        "1": 23,
+        "2": 1,
+        "3": 10,
+        "4": 4
+      },
+      "mean_probability": 0.708413208029197,
+      "mean_margin": 0.017617770072992704
+    },
+    "hopscotch": {
+      "num_videos": 566,
+      "description_counts": {
+        "0": 217,
+        "1": 6,
+        "2": 335,
+        "3": 8
+      },
+      "mean_probability": 0.7615082367491164,
+      "mean_margin": 0.017395446996466425
+    },
+    "hoverboarding": {
+      "num_videos": 405,
+      "description_counts": {
+        "0": 395,
+        "1": 5,
+        "2": 1,
+        "3": 1,
+        "4": 3
+      },
+      "mean_probability": 0.8673876493827156,
+      "mean_margin": 0.034517876543209876
+    },
+    "hugging": {
+      "num_videos": 355,
+      "description_counts": {
+        "0": 45,
+        "1": 9,
+        "2": 261,
+        "3": 25,
+        "4": 15
+      },
+      "mean_probability": 0.6011189295774647,
+      "mean_margin": 0.012032661971830986
+    },
+    "hula hooping": {
+      "num_videos": 967,
+      "description_counts": {
+        "0": 89,
+        "1": 2,
+        "2": 630,
+        "3": 216,
+        "4": 30
+      },
+      "mean_probability": 0.5612901571871763,
+      "mean_margin": 0.008815319544984485
+    },
+    "hurdling": {
+      "num_videos": 466,
+      "description_counts": {
+        "0": 12,
+        "1": 169,
+        "2": 87,
+        "3": 132,
+        "4": 66
+      },
+      "mean_probability": 0.5071314270386266,
+      "mean_margin": 0.007579364806866944
+    },
+    "hurling (sport)": {
+      "num_videos": 677,
+      "description_counts": {
+        "0": 2,
+        "1": 493,
+        "2": 1,
+        "3": 175,
+        "4": 6
+      },
+      "mean_probability": 0.6992328271787296,
+      "mean_margin": 0.013020413589364848
+    },
+    "ice climbing": {
+      "num_videos": 689,
+      "description_counts": {
+        "0": 564,
+        "1": 95,
+        "2": 30
+      },
+      "mean_probability": 0.6586315224963717,
+      "mean_margin": 0.011953656023222065
+    },
+    "ice fishing": {
+      "num_videos": 377,
+      "description_counts": {
+        "0": 249,
+        "1": 11,
+        "2": 4,
+        "4": 113
+      },
+      "mean_probability": 0.7417568673740057,
+      "mean_margin": 0.01666275596816977
+    },
+    "ice skating": {
+      "num_videos": 970,
+      "description_counts": {
+        "0": 678,
+        "1": 1,
+        "2": 13,
+        "3": 263,
+        "4": 15
+      },
+      "mean_probability": 0.6936017484536083,
+      "mean_margin": 0.014046242268041235
+    },
+    "ironing": {
+      "num_videos": 383,
+      "description_counts": {
+        "0": 2,
+        "1": 87,
+        "2": 8,
+        "3": 285,
+        "4": 1
+      },
+      "mean_probability": 0.7036668302872063,
+      "mean_margin": 0.013568618798955621
+    },
+    "javelin throw": {
+      "num_videos": 744,
+      "description_counts": {
+        "0": 16,
+        "1": 244,
+        "2": 64,
+        "3": 393,
+        "4": 27
+      },
+      "mean_probability": 0.5687439637096772,
+      "mean_margin": 0.010006641129032262
+    },
+    "jetskiing": {
+      "num_videos": 948,
+      "description_counts": {
+        "0": 502,
+        "2": 1,
+        "3": 414,
+        "4": 31
+      },
+      "mean_probability": 0.6993212447257383,
+      "mean_margin": 0.014087284810126579
+    },
+    "jogging": {
+      "num_videos": 268,
+      "description_counts": {
+        "0": 16,
+        "1": 45,
+        "2": 107,
+        "3": 35,
+        "4": 65
+      },
+      "mean_probability": 0.5443060597014927,
+      "mean_margin": 0.008649223880597013
+    },
+    "juggling balls": {
+      "num_videos": 766,
+      "description_counts": {
+        "0": 295,
+        "1": 78,
+        "2": 74,
+        "3": 40,
+        "4": 279
+      },
+      "mean_probability": 0.47309689164490776,
+      "mean_margin": 0.006821740208877279
+    },
+    "juggling fire": {
+      "num_videos": 507,
+      "description_counts": {
+        "0": 335,
+        "1": 17,
+        "2": 40,
+        "3": 115
+      },
+      "mean_probability": 0.628859057199211,
+      "mean_margin": 0.010039623274161722
+    },
+    "juggling soccer ball": {
+      "num_videos": 327,
+      "description_counts": {
+        "1": 225,
+        "2": 7,
+        "3": 12,
+        "4": 83
+      },
+      "mean_probability": 0.6100880275229354,
+      "mean_margin": 0.011083373088685015
+    },
+    "jumping into pool": {
+      "num_videos": 944,
+      "description_counts": {
+        "1": 674,
+        "2": 233,
+        "3": 37
+      },
+      "mean_probability": 0.5945248347457632,
+      "mean_margin": 0.007841324152542375
+    },
+    "jumpstyle dancing": {
+      "num_videos": 508,
+      "description_counts": {
+        "0": 5,
+        "1": 188,
+        "2": 25,
+        "3": 169,
+        "4": 121
+      },
+      "mean_probability": 0.5127044685039368,
+      "mean_margin": 0.00756813385826772
+    },
+    "kicking field goal": {
+      "num_videos": 676,
+      "description_counts": {
+        "0": 9,
+        "1": 135,
+        "2": 340,
+        "4": 192
+      },
+      "mean_probability": 0.6342383210059171,
+      "mean_margin": 0.013421044378698213
+    },
+    "kicking soccer ball": {
+      "num_videos": 386,
+      "description_counts": {
+        "0": 51,
+        "1": 30,
+        "2": 49,
+        "4": 256
+      },
+      "mean_probability": 0.5056341968911918,
+      "mean_margin": 0.0068179067357513
+    },
+    "kissing": {
+      "num_videos": 479,
+      "description_counts": {
+        "0": 1,
+        "1": 31,
+        "2": 230,
+        "3": 215,
+        "4": 2
+      },
+      "mean_probability": 0.6297319206680584,
+      "mean_margin": 0.009388185803757833
+    },
+    "kitesurfing": {
+      "num_videos": 635,
+      "description_counts": {
+        "0": 380,
+        "1": 3,
+        "2": 78,
+        "4": 174
+      },
+      "mean_probability": 0.6780354141732278,
+      "mean_margin": 0.014415826771653548
+    },
+    "knitting": {
+      "num_videos": 527,
+      "description_counts": {
+        "0": 508,
+        "1": 4,
+        "3": 12,
+        "4": 3
+      },
+      "mean_probability": 0.8153486375711575,
+      "mean_margin": 0.022612199240986737
+    },
+    "krumping": {
+      "num_videos": 506,
+      "description_counts": {
+        "0": 102,
+        "1": 10,
+        "2": 374,
+        "3": 4,
+        "4": 16
+      },
+      "mean_probability": 0.5871871541501985,
+      "mean_margin": 0.010137373517786562
+    },
+    "laughing": {
+      "num_videos": 735,
+      "description_counts": {
+        "0": 423,
+        "1": 244,
+        "2": 2,
+        "3": 66
+      },
+      "mean_probability": 0.6195286054421761,
+      "mean_margin": 0.009313053061224496
+    },
+    "laying bricks": {
+      "num_videos": 269,
+      "description_counts": {
+        "0": 261,
+        "2": 8
+      },
+      "mean_probability": 0.8837555167286247,
+      "mean_margin": 0.028759579925650543
+    },
+    "long jump": {
+      "num_videos": 677,
+      "description_counts": {
+        "0": 53,
+        "1": 230,
+        "3": 1,
+        "4": 393
+      },
+      "mean_probability": 0.5120804372230428,
+      "mean_margin": 0.0068914815361890615
+    },
+    "lunge": {
+      "num_videos": 602,
+      "description_counts": {
+        "0": 5,
+        "1": 188,
+        "2": 332,
+        "3": 45,
+        "4": 32
+      },
+      "mean_probability": 0.5266186295681059,
+      "mean_margin": 0.006907729235880406
+    },
+    "making a cake": {
+      "num_videos": 296,
+      "description_counts": {
+        "0": 198,
+        "1": 76,
+        "2": 1,
+        "3": 4,
+        "4": 17
+      },
+      "mean_probability": 0.6462897297297298,
+      "mean_margin": 0.012974895270270265
+    },
+    "making a sandwich": {
+      "num_videos": 285,
+      "description_counts": {
+        "0": 7,
+        "1": 15,
+        "2": 93,
+        "3": 7,
+        "4": 163
+      },
+      "mean_probability": 0.6234186421052634,
+      "mean_margin": 0.01035369473684211
+    },
+    "making bed": {
+      "num_videos": 521,
+      "description_counts": {
+        "0": 24,
+        "1": 244,
+        "2": 189,
+        "3": 55,
+        "4": 9
+      },
+      "mean_probability": 0.5759380268714018,
+      "mean_margin": 0.010722495201535507
+    },
+    "making jewelry": {
+      "num_videos": 502,
+      "description_counts": {
+        "0": 195,
+        "1": 4,
+        "2": 173,
+        "3": 22,
+        "4": 108
+      },
+      "mean_probability": 0.5599875956175303,
+      "mean_margin": 0.009217278884462155
+    },
+    "making pizza": {
+      "num_videos": 976,
+      "description_counts": {
+        "0": 287,
+        "1": 296,
+        "2": 16,
+        "3": 157,
+        "4": 220
+      },
+      "mean_probability": 0.5004834026639345,
+      "mean_margin": 0.007399644467213106
+    },
+    "making snowman": {
+      "num_videos": 594,
+      "description_counts": {
+        "0": 6,
+        "1": 230,
+        "2": 1,
+        "3": 132,
+        "4": 225
+      },
+      "mean_probability": 0.6109750690235686,
+      "mean_margin": 0.00987639225589226
+    },
+    "making sushi": {
+      "num_videos": 280,
+      "description_counts": {
+        "0": 111,
+        "1": 25,
+        "2": 64,
+        "3": 1,
+        "4": 79
+      },
+      "mean_probability": 0.5906197464285721,
+      "mean_margin": 0.010084328571428575
+    },
+    "making tea": {
+      "num_videos": 263,
+      "description_counts": {
+        "0": 112,
+        "1": 43,
+        "3": 56,
+        "4": 52
+      },
+      "mean_probability": 0.5938335627376424,
+      "mean_margin": 0.010026
+    },
+    "marching": {
+      "num_videos": 968,
+      "description_counts": {
+        "0": 9,
+        "1": 9,
+        "2": 25,
+        "3": 638,
+        "4": 287
+      },
+      "mean_probability": 0.766206094008264,
+      "mean_margin": 0.020647040289256173
+    },
+    "massaging back": {
+      "num_videos": 903,
+      "description_counts": {
+        "0": 97,
+        "2": 786,
+        "3": 17,
+        "4": 3
+      },
+      "mean_probability": 0.8191818361018837,
+      "mean_margin": 0.0230332956810631
+    },
+    "massaging feet": {
+      "num_videos": 310,
+      "description_counts": {
+        "0": 165,
+        "1": 92,
+        "2": 1,
+        "4": 52
+      },
+      "mean_probability": 0.5877488516129032,
+      "mean_margin": 0.007807780645161293
+    },
+    "massaging legs": {
+      "num_videos": 362,
+      "description_counts": {
+        "0": 320,
+        "1": 42
+      },
+      "mean_probability": 0.7348241574585638,
+      "mean_margin": 0.015811483425414365
+    },
+    "massaging person's head": {
+      "num_videos": 484,
+      "description_counts": {
+        "0": 155,
+        "1": 141,
+        "2": 4,
+        "3": 167,
+        "4": 17
+      },
+      "mean_probability": 0.5877872024793387,
+      "mean_margin": 0.009240002066115702
+    },
+    "milking cow": {
+      "num_videos": 808,
+      "description_counts": {
+        "0": 496,
+        "1": 9,
+        "3": 244,
+        "4": 59
+      },
+      "mean_probability": 0.6118200346534655,
+      "mean_margin": 0.0070333935643564225
+    },
+    "mopping floor": {
+      "num_videos": 444,
+      "description_counts": {
+        "0": 15,
+        "1": 308,
+        "3": 108,
+        "4": 13
+      },
+      "mean_probability": 0.620656060810811,
+      "mean_margin": 0.010757572072072074
+    },
+    "motorcycling": {
+      "num_videos": 935,
+      "description_counts": {
+        "0": 746,
+        "1": 1,
+        "2": 45,
+        "3": 142,
+        "4": 1
+      },
+      "mean_probability": 0.6881835935828865,
+      "mean_margin": 0.011764823529411756
+    },
+    "moving furniture": {
+      "num_videos": 269,
+      "description_counts": {
+        "0": 13,
+        "1": 74,
+        "2": 155,
+        "4": 27
+      },
+      "mean_probability": 0.6062728810408928,
+      "mean_margin": 0.010407743494423789
+    },
+    "mowing lawn": {
+      "num_videos": 953,
+      "description_counts": {
+        "0": 611,
+        "1": 9,
+        "2": 128,
+        "3": 1,
+        "4": 204
+      },
+      "mean_probability": 0.6509319275970613,
+      "mean_margin": 0.011963014690451195
+    },
+    "news anchoring": {
+      "num_videos": 267,
+      "description_counts": {
+        "0": 13,
+        "1": 10,
+        "2": 240,
+        "3": 1,
+        "4": 3
+      },
+      "mean_probability": 0.9326748089887643,
+      "mean_margin": 0.05084114232209739
+    },
+    "opening bottle": {
+      "num_videos": 576,
+      "description_counts": {
+        "0": 7,
+        "1": 322,
+        "2": 2,
+        "3": 26,
+        "4": 219
+      },
+      "mean_probability": 0.6296501180555565,
+      "mean_margin": 0.009688501736111107
+    },
+    "opening present": {
+      "num_videos": 696,
+      "description_counts": {
+        "0": 29,
+        "1": 604,
+        "2": 41,
+        "3": 21,
+        "4": 1
+      },
+      "mean_probability": 0.7270430660919545,
+      "mean_margin": 0.018098841954022993
+    },
+    "paragliding": {
+      "num_videos": 645,
+      "description_counts": {
+        "0": 167,
+        "1": 241,
+        "2": 3,
+        "3": 234
+      },
+      "mean_probability": 0.5484821627906971,
+      "mean_margin": 0.007839930232558145
+    },
+    "parasailing": {
+      "num_videos": 605,
+      "description_counts": {
+        "0": 369,
+        "1": 9,
+        "2": 67,
+        "4": 160
+      },
+      "mean_probability": 0.6715396644628101,
+      "mean_margin": 0.01573372892561984
+    },
+    "parkour": {
+      "num_videos": 348,
+      "description_counts": {
+        "0": 88,
+        "1": 42,
+        "2": 155,
+        "3": 52,
+        "4": 11
+      },
+      "mean_probability": 0.4561395718390806,
+      "mean_margin": 0.0060729913793103486
+    },
+    "passing American football (in game)": {
+      "num_videos": 709,
+      "description_counts": {
+        "0": 9,
+        "1": 647,
+        "2": 2,
+        "3": 8,
+        "4": 43
+      },
+      "mean_probability": 0.7622409464033852,
+      "mean_margin": 0.023840379407616363
+    },
+    "passing American football (not in game)": {
+      "num_videos": 879,
+      "description_counts": {
+        "0": 798,
+        "1": 6,
+        "2": 13,
+        "3": 54,
+        "4": 8
+      },
+      "mean_probability": 0.7357018134243465,
+      "mean_margin": 0.017593810011376537
+    },
+    "peeling apples": {
+      "num_videos": 431,
+      "description_counts": {
+        "0": 190,
+        "1": 49,
+        "2": 175,
+        "3": 17
+      },
+      "mean_probability": 0.6167541693735497,
+      "mean_margin": 0.010547617169373547
+    },
+    "peeling potatoes": {
+      "num_videos": 297,
+      "description_counts": {
+        "0": 176,
+        "1": 34,
+        "2": 70,
+        "3": 11,
+        "4": 6
+      },
+      "mean_probability": 0.6770783973063974,
+      "mean_margin": 0.013400191919191916
+    },
+    "petting animal (not cat)": {
+      "num_videos": 598,
+      "description_counts": {
+        "0": 17,
+        "1": 63,
+        "2": 422,
+        "3": 48,
+        "4": 48
+      },
+      "mean_probability": 0.622845581939799,
+      "mean_margin": 0.011359279264214041
+    },
+    "petting cat": {
+      "num_videos": 597,
+      "description_counts": {
+        "0": 15,
+        "1": 162,
+        "2": 13,
+        "3": 23,
+        "4": 384
+      },
+      "mean_probability": 0.5358694656616414,
+      "mean_margin": 0.006727159128978229
+    },
+    "picking fruit": {
+      "num_videos": 588,
+      "description_counts": {
+        "0": 166,
+        "1": 39,
+        "2": 379,
+        "4": 4
+      },
+      "mean_probability": 0.6550891054421761,
+      "mean_margin": 0.010918642857142852
+    },
+    "planting trees": {
+      "num_videos": 385,
+      "description_counts": {
+        "0": 288,
+        "1": 30,
+        "2": 9,
+        "3": 55,
+        "4": 3
+      },
+      "mean_probability": 0.6898183974025974,
+      "mean_margin": 0.015236594805194787
+    },
+    "plastering": {
+      "num_videos": 272,
+      "description_counts": {
+        "0": 135,
+        "1": 39,
+        "2": 1,
+        "3": 97
+      },
+      "mean_probability": 0.5690514191176467,
+      "mean_margin": 0.006949018382352937
+    },
+    "playing accordion": {
+      "num_videos": 767,
+      "description_counts": {
+        "0": 8,
+        "1": 5,
+        "2": 748,
+        "3": 1,
+        "4": 5
+      },
+      "mean_probability": 0.9458781238591912,
+      "mean_margin": 0.054782041720990875
+    },
+    "playing badminton": {
+      "num_videos": 759,
+      "description_counts": {
+        "0": 397,
+        "1": 137,
+        "2": 126,
+        "3": 88,
+        "4": 11
+      },
+      "mean_probability": 0.614241090909091,
+      "mean_margin": 0.01168012516469038
+    },
+    "playing bagpipes": {
+      "num_videos": 675,
+      "description_counts": {
+        "0": 3,
+        "1": 22,
+        "3": 40,
+        "4": 610
+      },
+      "mean_probability": 0.8527238992592601,
+      "mean_margin": 0.03947394814814817
+    },
+    "playing basketball": {
+      "num_videos": 985,
+      "description_counts": {
+        "0": 563,
+        "1": 260,
+        "2": 136,
+        "3": 12,
+        "4": 14
+      },
+      "mean_probability": 0.5619960964467008,
+      "mean_margin": 0.010076059898477149
+    },
+    "playing bass guitar": {
+      "num_videos": 959,
+      "description_counts": {
+        "0": 266,
+        "1": 490,
+        "2": 111,
+        "3": 73,
+        "4": 19
+      },
+      "mean_probability": 0.5024974045881127,
+      "mean_margin": 0.0070514296141814415
+    },
+    "playing cards": {
+      "num_videos": 571,
+      "description_counts": {
+        "0": 410,
+        "1": 10,
+        "2": 1,
+        "3": 150
+      },
+      "mean_probability": 0.6212151838879153,
+      "mean_margin": 0.009205718038528894
+    },
+    "playing cello": {
+      "num_videos": 919,
+      "description_counts": {
+        "0": 268,
+        "1": 354,
+        "2": 9,
+        "3": 184,
+        "4": 104
+      },
+      "mean_probability": 0.516995674646355,
+      "mean_margin": 0.008080673558215455
+    },
+    "playing chess": {
+      "num_videos": 665,
+      "description_counts": {
+        "0": 307,
+        "1": 68,
+        "2": 9,
+        "3": 10,
+        "4": 271
+      },
+      "mean_probability": 0.6527424451127818,
+      "mean_margin": 0.010948869172932335
+    },
+    "playing clarinet": {
+      "num_videos": 861,
+      "description_counts": {
+        "0": 807,
+        "1": 1,
+        "2": 2,
+        "3": 37,
+        "4": 14
+      },
+      "mean_probability": 0.8210976713124278,
+      "mean_margin": 0.02372644018583047
+    },
+    "playing controller": {
+      "num_videos": 365,
+      "description_counts": {
+        "0": 107,
+        "1": 44,
+        "2": 177,
+        "3": 33,
+        "4": 4
+      },
+      "mean_probability": 0.5413594273972607,
+      "mean_margin": 0.008622504109589035
+    },
+    "playing cricket": {
+      "num_videos": 716,
+      "description_counts": {
+        "0": 180,
+        "1": 255,
+        "2": 14,
+        "3": 221,
+        "4": 46
+      },
+      "mean_probability": 0.5323320991620113,
+      "mean_margin": 0.00957537569832402
+    },
+    "playing cymbals": {
+      "num_videos": 483,
+      "description_counts": {
+        "0": 13,
+        "1": 41,
+        "2": 1,
+        "3": 6,
+        "4": 422
+      },
+      "mean_probability": 0.7877700186335406,
+      "mean_margin": 0.01935130227743271
+    },
+    "playing didgeridoo": {
+      "num_videos": 634,
+      "description_counts": {
+        "0": 15,
+        "1": 25,
+        "2": 571,
+        "3": 18,
+        "4": 5
+      },
+      "mean_probability": 0.7681095378548891,
+      "mean_margin": 0.023860673501577275
+    },
+    "playing drums": {
+      "num_videos": 742,
+      "description_counts": {
+        "0": 35,
+        "1": 472,
+        "2": 226,
+        "4": 9
+      },
+      "mean_probability": 0.5660114164420481,
+      "mean_margin": 0.008720277628032335
+    },
+    "playing flute": {
+      "num_videos": 319,
+      "description_counts": {
+        "0": 278,
+        "1": 26,
+        "2": 5,
+        "3": 10
+      },
+      "mean_probability": 0.7347752664576807,
+      "mean_margin": 0.014500338557993724
+    },
+    "playing guitar": {
+      "num_videos": 952,
+      "description_counts": {
+        "0": 444,
+        "1": 10,
+        "2": 30,
+        "3": 444,
+        "4": 24
+      },
+      "mean_probability": 0.596832278361344,
+      "mean_margin": 0.010022455882352939
+    },
+    "playing harmonica": {
+      "num_videos": 842,
+      "description_counts": {
+        "0": 778,
+        "1": 2,
+        "2": 23,
+        "3": 9,
+        "4": 30
+      },
+      "mean_probability": 0.7851011674584321,
+      "mean_margin": 0.020604370546318296
+    },
+    "playing harp": {
+      "num_videos": 992,
+      "description_counts": {
+        "0": 210,
+        "1": 120,
+        "2": 105,
+        "3": 38,
+        "4": 519
+      },
+      "mean_probability": 0.4970413931451616,
+      "mean_margin": 0.007502508064516128
+    },
+    "playing ice hockey": {
+      "num_videos": 750,
+      "description_counts": {
+        "0": 562,
+        "1": 111,
+        "2": 1,
+        "3": 76
+      },
+      "mean_probability": 0.6109804586666672,
+      "mean_margin": 0.010099441333333342
+    },
+    "playing keyboard": {
+      "num_videos": 559,
+      "description_counts": {
+        "0": 330,
+        "1": 42,
+        "2": 42,
+        "3": 122,
+        "4": 23
+      },
+      "mean_probability": 0.5601022504472265,
+      "mean_margin": 0.009885500894454379
+    },
+    "playing kickball": {
+      "num_videos": 312,
+      "description_counts": {
+        "0": 39,
+        "1": 10,
+        "2": 89,
+        "3": 92,
+        "4": 82
+      },
+      "mean_probability": 0.5019406057692307,
+      "mean_margin": 0.006472451923076921
+    },
+    "playing monopoly": {
+      "num_videos": 573,
+      "description_counts": {
+        "0": 386,
+        "1": 3,
+        "2": 95,
+        "3": 53,
+        "4": 36
+      },
+      "mean_probability": 0.6220562495636993,
+      "mean_margin": 0.01325390401396161
+    },
+    "playing organ": {
+      "num_videos": 514,
+      "description_counts": {
+        "0": 63,
+        "1": 425,
+        "2": 22,
+        "3": 3,
+        "4": 1
+      },
+      "mean_probability": 0.7712810953307399,
+      "mean_margin": 0.024833492217898837
+    },
+    "playing paintball": {
+      "num_videos": 931,
+      "description_counts": {
+        "0": 23,
+        "1": 164,
+        "2": 498,
+        "3": 82,
+        "4": 164
+      },
+      "mean_probability": 0.47175560687432894,
+      "mean_margin": 0.006585223415682054
+    },
+    "playing piano": {
+      "num_videos": 527,
+      "description_counts": {
+        "0": 259,
+        "1": 4,
+        "2": 2,
+        "3": 19,
+        "4": 243
+      },
+      "mean_probability": 0.5699877495256167,
+      "mean_margin": 0.006574430740037949
+    },
+    "playing poker": {
+      "num_videos": 933,
+      "description_counts": {
+        "0": 251,
+        "1": 9,
+        "2": 669,
+        "3": 4
+      },
+      "mean_probability": 0.6659266345123255,
+      "mean_margin": 0.008502277599142544
+    },
+    "playing recorder": {
+      "num_videos": 979,
+      "description_counts": {
+        "0": 912,
+        "2": 40,
+        "4": 27
+      },
+      "mean_probability": 0.8805134933605718,
+      "mean_margin": 0.03531560061287023
+    },
+    "playing saxophone": {
+      "num_videos": 751,
+      "description_counts": {
+        "0": 692,
+        "2": 5,
+        "3": 53,
+        "4": 1
+      },
+      "mean_probability": 0.8474290026631158,
+      "mean_margin": 0.027130990679094514
+    },
+    "playing squash or racquetball": {
+      "num_videos": 816,
+      "description_counts": {
+        "0": 695,
+        "1": 117,
+        "2": 2,
+        "3": 1,
+        "4": 1
+      },
+      "mean_probability": 0.7996886004901966,
+      "mean_margin": 0.01817294362745097
+    },
+    "playing tennis": {
+      "num_videos": 962,
+      "description_counts": {
+        "0": 368,
+        "1": 568,
+        "2": 1,
+        "3": 3,
+        "4": 22
+      },
+      "mean_probability": 0.6343996798336796,
+      "mean_margin": 0.008945011434511428
+    },
+    "playing trombone": {
+      "num_videos": 979,
+      "description_counts": {
+        "1": 27,
+        "2": 4,
+        "3": 903,
+        "4": 45
+      },
+      "mean_probability": 0.8898454422880486,
+      "mean_margin": 0.03359862819203269
+    },
+    "playing trumpet": {
+      "num_videos": 823,
+      "description_counts": {
+        "0": 2,
+        "2": 607,
+        "3": 152,
+        "4": 62
+      },
+      "mean_probability": 0.7286245091130008,
+      "mean_margin": 0.015450273390036436
+    },
+    "playing ukulele": {
+      "num_videos": 982,
+      "description_counts": {
+        "0": 63,
+        "1": 76,
+        "2": 728,
+        "3": 114,
+        "4": 1
+      },
+      "mean_probability": 0.6766964073319757,
+      "mean_margin": 0.015367551934826883
+    },
+    "playing violin": {
+      "num_videos": 977,
+      "description_counts": {
+        "0": 68,
+        "1": 3,
+        "2": 2,
+        "3": 871,
+        "4": 33
+      },
+      "mean_probability": 0.8052550010235421,
+      "mean_margin": 0.024823619242579337
+    },
+    "playing volleyball": {
+      "num_videos": 627,
+      "description_counts": {
+        "0": 190,
+        "1": 73,
+        "2": 323,
+        "3": 31,
+        "4": 10
+      },
+      "mean_probability": 0.5784427272727279,
+      "mean_margin": 0.010195496012759165
+    },
+    "playing xylophone": {
+      "num_videos": 591,
+      "description_counts": {
+        "0": 16,
+        "1": 39,
+        "2": 14,
+        "3": 475,
+        "4": 47
+      },
+      "mean_probability": 0.7473503976311336,
+      "mean_margin": 0.020420426395939075
+    },
+    "pole vault": {
+      "num_videos": 819,
+      "description_counts": {
+        "0": 2,
+        "1": 623,
+        "2": 129,
+        "3": 61,
+        "4": 4
+      },
+      "mean_probability": 0.6867309096459089,
+      "mean_margin": 0.013833597069597052
+    },
+    "presenting weather forecast": {
+      "num_videos": 888,
+      "description_counts": {
+        "0": 43,
+        "2": 840,
+        "4": 5
+      },
+      "mean_probability": 0.9277231036036006,
+      "mean_margin": 0.05317400675675678
+    },
+    "pull ups": {
+      "num_videos": 953,
+      "description_counts": {
+        "0": 170,
+        "1": 48,
+        "2": 266,
+        "3": 1,
+        "4": 468
+      },
+      "mean_probability": 0.5158248331584465,
+      "mean_margin": 0.006894218258132207
+    },
+    "pumping fist": {
+      "num_videos": 847,
+      "description_counts": {
+        "0": 11,
+        "1": 173,
+        "2": 27,
+        "3": 429,
+        "4": 207
+      },
+      "mean_probability": 0.5297623648170011,
+      "mean_margin": 0.007959219598583223
+    },
+    "pumping gas": {
+      "num_videos": 384,
+      "description_counts": {
+        "0": 198,
+        "1": 107,
+        "2": 78,
+        "3": 1
+      },
+      "mean_probability": 0.5678494609374999,
+      "mean_margin": 0.008997916666666666
+    },
+    "punching bag": {
+      "num_videos": 987,
+      "description_counts": {
+        "0": 497,
+        "1": 10,
+        "2": 54,
+        "3": 2,
+        "4": 424
+      },
+      "mean_probability": 0.6740178419452879,
+      "mean_margin": 0.014473322188449841
+    },
+    "punching person (boxing)": {
+      "num_videos": 335,
+      "description_counts": {
+        "0": 144,
+        "1": 12,
+        "2": 118,
+        "3": 49,
+        "4": 12
+      },
+      "mean_probability": 0.49044575223880627,
+      "mean_margin": 0.0059756059701492545
+    },
+    "push up": {
+      "num_videos": 457,
+      "description_counts": {
+        "0": 29,
+        "1": 189,
+        "2": 10,
+        "3": 21,
+        "4": 208
+      },
+      "mean_probability": 0.5267395207877463,
+      "mean_margin": 0.007916951859956235
+    },
+    "pushing car": {
+      "num_videos": 908,
+      "description_counts": {
+        "0": 544,
+        "1": 4,
+        "2": 130,
+        "3": 230
+      },
+      "mean_probability": 0.6943251905286344,
+      "mean_margin": 0.017041575991189398
+    },
+    "pushing cart": {
+      "num_videos": 988,
+      "description_counts": {
+        "0": 854,
+        "1": 18,
+        "2": 2,
+        "3": 1,
+        "4": 113
+      },
+      "mean_probability": 0.7819433704453438,
+      "mean_margin": 0.022239520242914996
+    },
+    "pushing wheelchair": {
+      "num_videos": 309,
+      "description_counts": {
+        "0": 275,
+        "1": 9,
+        "2": 17,
+        "3": 7,
+        "4": 1
+      },
+      "mean_probability": 0.8276485889967635,
+      "mean_margin": 0.028379533980582548
+    },
+    "reading book": {
+      "num_videos": 971,
+      "description_counts": {
+        "0": 125,
+        "1": 150,
+        "2": 140,
+        "3": 3,
+        "4": 553
+      },
+      "mean_probability": 0.5231337703398565,
+      "mean_margin": 0.0068545468589083424
+    },
+    "reading newspaper": {
+      "num_videos": 266,
+      "description_counts": {
+        "0": 106,
+        "1": 38,
+        "2": 45,
+        "3": 42,
+        "4": 35
+      },
+      "mean_probability": 0.5597850751879702,
+      "mean_margin": 0.010274078947368424
+    },
+    "recording music": {
+      "num_videos": 262,
+      "description_counts": {
+        "0": 1,
+        "1": 136,
+        "2": 23,
+        "3": 40,
+        "4": 62
+      },
+      "mean_probability": 0.5941087557251908,
+      "mean_margin": 0.01156360305343511
+    },
+    "riding a bike": {
+      "num_videos": 316,
+      "description_counts": {
+        "0": 109,
+        "1": 49,
+        "2": 1,
+        "3": 7,
+        "4": 150
+      },
+      "mean_probability": 0.571900174050633,
+      "mean_margin": 0.00864185443037974
+    },
+    "riding camel": {
+      "num_videos": 552,
+      "description_counts": {
+        "0": 109,
+        "2": 22,
+        "3": 421
+      },
+      "mean_probability": 0.750734192028986,
+      "mean_margin": 0.016302579710144916
+    },
+    "riding elephant": {
+      "num_videos": 920,
+      "description_counts": {
+        "0": 178,
+        "1": 9,
+        "2": 1,
+        "3": 582,
+        "4": 150
+      },
+      "mean_probability": 0.6324911510869573,
+      "mean_margin": 0.010388706521739125
+    },
+    "riding mechanical bull": {
+      "num_videos": 539,
+      "description_counts": {
+        "0": 2,
+        "2": 4,
+        "3": 5,
+        "4": 528
+      },
+      "mean_probability": 0.936248502782932,
+      "mean_margin": 0.039408100185528705
+    },
+    "riding mountain bike": {
+      "num_videos": 316,
+      "description_counts": {
+        "0": 72,
+        "2": 117,
+        "3": 71,
+        "4": 56
+      },
+      "mean_probability": 0.5078016582278474,
+      "mean_margin": 0.006960316455696206
+    },
+    "riding mule": {
+      "num_videos": 312,
+      "description_counts": {
+        "0": 50,
+        "2": 90,
+        "3": 134,
+        "4": 38
+      },
+      "mean_probability": 0.5230673910256408,
+      "mean_margin": 0.007238945512820511
+    },
+    "riding or walking with horse": {
+      "num_videos": 962,
+      "description_counts": {
+        "0": 1,
+        "1": 632,
+        "2": 40,
+        "3": 39,
+        "4": 250
+      },
+      "mean_probability": 0.5277695925155926,
+      "mean_margin": 0.007625972972972968
+    },
+    "riding scooter": {
+      "num_videos": 510,
+      "description_counts": {
+        "0": 458,
+        "2": 16,
+        "3": 16,
+        "4": 20
+      },
+      "mean_probability": 0.6895632117647059,
+      "mean_margin": 0.012983241176470582
+    },
+    "riding unicycle": {
+      "num_videos": 698,
+      "description_counts": {
+        "0": 260,
+        "1": 3,
+        "2": 3,
+        "3": 2,
+        "4": 430
+      },
+      "mean_probability": 0.7101952765042979,
+      "mean_margin": 0.01223290687679084
+    },
+    "ripping paper": {
+      "num_videos": 447,
+      "description_counts": {
+        "0": 32,
+        "1": 11,
+        "2": 227,
+        "3": 30,
+        "4": 147
+      },
+      "mean_probability": 0.5559278590604025,
+      "mean_margin": 0.0069975906040268465
+    },
+    "robot dancing": {
+      "num_videos": 733,
+      "description_counts": {
+        "0": 4,
+        "1": 102,
+        "2": 521,
+        "3": 49,
+        "4": 57
+      },
+      "mean_probability": 0.619446889495225,
+      "mean_margin": 0.012690125511596187
+    },
+    "rock climbing": {
+      "num_videos": 977,
+      "description_counts": {
+        "0": 429,
+        "2": 6,
+        "3": 14,
+        "4": 528
+      },
+      "mean_probability": 0.6412469662231328,
+      "mean_margin": 0.009542229273285564
+    },
+    "rock scissors paper": {
+      "num_videos": 271,
+      "description_counts": {
+        "0": 2,
+        "1": 134,
+        "2": 8,
+        "3": 70,
+        "4": 57
+      },
+      "mean_probability": 0.5868411107011072,
+      "mean_margin": 0.009906616236162364
+    },
+    "roller skating": {
+      "num_videos": 801,
+      "description_counts": {
+        "0": 23,
+        "1": 174,
+        "3": 587,
+        "4": 17
+      },
+      "mean_probability": 0.7698116504369545,
+      "mean_margin": 0.021081127340823968
+    },
+    "running on treadmill": {
+      "num_videos": 271,
+      "description_counts": {
+        "0": 7,
+        "1": 230,
+        "3": 19,
+        "4": 15
+      },
+      "mean_probability": 0.7567657011070107,
+      "mean_margin": 0.01700473062730627
+    },
+    "sailing": {
+      "num_videos": 706,
+      "description_counts": {
+        "0": 584,
+        "1": 11,
+        "2": 50,
+        "3": 28,
+        "4": 33
+      },
+      "mean_probability": 0.5922144220963171,
+      "mean_margin": 0.010795777620396607
+    },
+    "salsa dancing": {
+      "num_videos": 984,
+      "description_counts": {
+        "0": 2,
+        "1": 521,
+        "2": 50,
+        "3": 6,
+        "4": 405
+      },
+      "mean_probability": 0.6083403729674801,
+      "mean_margin": 0.008321361788617886
+    },
+    "sanding floor": {
+      "num_videos": 422,
+      "description_counts": {
+        "0": 379,
+        "1": 35,
+        "4": 8
+      },
+      "mean_probability": 0.8151687867298577,
+      "mean_margin": 0.021406263033175367
+    },
+    "scrambling eggs": {
+      "num_videos": 646,
+      "description_counts": {
+        "0": 203,
+        "2": 10,
+        "3": 433
+      },
+      "mean_probability": 0.6970460433436534,
+      "mean_margin": 0.012917159442724462
+    },
+    "scuba diving": {
+      "num_videos": 799,
+      "description_counts": {
+        "0": 124,
+        "1": 137,
+        "2": 34,
+        "3": 33,
+        "4": 471
+      },
+      "mean_probability": 0.5171705256570712,
+      "mean_margin": 0.008429570713391734
+    },
+    "setting table": {
+      "num_videos": 323,
+      "description_counts": {
+        "0": 45,
+        "1": 110,
+        "2": 139,
+        "3": 1,
+        "4": 28
+      },
+      "mean_probability": 0.5549444736842111,
+      "mean_margin": 0.009171160990712069
+    },
+    "shaking hands": {
+      "num_videos": 479,
+      "description_counts": {
+        "0": 11,
+        "1": 2,
+        "2": 359,
+        "3": 96,
+        "4": 11
+      },
+      "mean_probability": 0.6392595657620045,
+      "mean_margin": 0.012033486430062622
+    },
+    "shaking head": {
+      "num_videos": 726,
+      "description_counts": {
+        "0": 2,
+        "1": 73,
+        "2": 122,
+        "3": 1,
+        "4": 528
+      },
+      "mean_probability": 0.5726378842975207,
+      "mean_margin": 0.009213103305785123
+    },
+    "sharpening knives": {
+      "num_videos": 270,
+      "description_counts": {
+        "0": 136,
+        "1": 3,
+        "3": 130,
+        "4": 1
+      },
+      "mean_probability": 0.681778085185185,
+      "mean_margin": 0.01070916666666667
+    },
+    "sharpening pencil": {
+      "num_videos": 596,
+      "description_counts": {
+        "0": 81,
+        "1": 7,
+        "2": 162,
+        "3": 235,
+        "4": 111
+      },
+      "mean_probability": 0.5896647516778517,
+      "mean_margin": 0.011807634228187917
+    },
+    "shaving head": {
+      "num_videos": 786,
+      "description_counts": {
+        "0": 189,
+        "2": 545,
+        "3": 51,
+        "4": 1
+      },
+      "mean_probability": 0.6939364834605597,
+      "mean_margin": 0.014517508905852412
+    },
+    "shaving legs": {
+      "num_videos": 352,
+      "description_counts": {
+        "0": 98,
+        "1": 30,
+        "2": 45,
+        "3": 178,
+        "4": 1
+      },
+      "mean_probability": 0.5421315795454542,
+      "mean_margin": 0.00845615909090909
+    },
+    "shearing sheep": {
+      "num_videos": 827,
+      "description_counts": {
+        "0": 665,
+        "1": 21,
+        "2": 4,
+        "3": 6,
+        "4": 131
+      },
+      "mean_probability": 0.6739831051995155,
+      "mean_margin": 0.012692818621523563
+    },
+    "shining shoes": {
+      "num_videos": 450,
+      "description_counts": {
+        "0": 55,
+        "1": 342,
+        "2": 2,
+        "3": 50,
+        "4": 1
+      },
+      "mean_probability": 0.6767583688888886,
+      "mean_margin": 0.013401417777777778
+    },
+    "shooting basketball": {
+      "num_videos": 439,
+      "description_counts": {
+        "0": 39,
+        "1": 43,
+        "2": 159,
+        "3": 22,
+        "4": 176
+      },
+      "mean_probability": 0.5104404965831435,
+      "mean_margin": 0.006712471526195903
+    },
+    "shooting goal (soccer)": {
+      "num_videos": 279,
+      "description_counts": {
+        "1": 35,
+        "2": 21,
+        "3": 215,
+        "4": 8
+      },
+      "mean_probability": 0.5679121971326164,
+      "mean_margin": 0.010003197132616487
+    },
+    "shot put": {
+      "num_videos": 821,
+      "description_counts": {
+        "1": 137,
+        "2": 661,
+        "3": 9,
+        "4": 14
+      },
+      "mean_probability": 0.6334902119366626,
+      "mean_margin": 0.009463488428745444
+    },
+    "shoveling snow": {
+      "num_videos": 716,
+      "description_counts": {
+        "0": 44,
+        "1": 383,
+        "2": 282,
+        "3": 7
+      },
+      "mean_probability": 0.6057896326815638,
+      "mean_margin": 0.008966699720670384
+    },
+    "shredding paper": {
+      "num_videos": 249,
+      "description_counts": {
+        "0": 222,
+        "1": 5,
+        "3": 3,
+        "4": 19
+      },
+      "mean_probability": 0.7716196746987954,
+      "mean_margin": 0.020703437751004
+    },
+    "shuffling cards": {
+      "num_videos": 657,
+      "description_counts": {
+        "0": 504,
+        "1": 99,
+        "2": 1,
+        "3": 1,
+        "4": 52
+      },
+      "mean_probability": 0.6384793637747338,
+      "mean_margin": 0.010387114155251143
+    },
+    "side kick": {
+      "num_videos": 821,
+      "description_counts": {
+        "0": 703,
+        "1": 35,
+        "2": 39,
+        "3": 32,
+        "4": 12
+      },
+      "mean_probability": 0.6192961266747867,
+      "mean_margin": 0.01211735809987819
+    },
+    "sign language interpreting": {
+      "num_videos": 288,
+      "description_counts": {
+        "0": 14,
+        "2": 264,
+        "3": 4,
+        "4": 6
+      },
+      "mean_probability": 0.6962644583333331,
+      "mean_margin": 0.015603406250000004
+    },
+    "singing": {
+      "num_videos": 979,
+      "description_counts": {
+        "0": 512,
+        "1": 4,
+        "2": 93,
+        "3": 331,
+        "4": 39
+      },
+      "mean_probability": 0.5767544065372829,
+      "mean_margin": 0.009393790602655772
+    },
+    "situp": {
+      "num_videos": 652,
+      "description_counts": {
+        "0": 237,
+        "1": 49,
+        "2": 81,
+        "3": 66,
+        "4": 219
+      },
+      "mean_probability": 0.5344899110429451,
+      "mean_margin": 0.009260501533742325
+    },
+    "skateboarding": {
+      "num_videos": 953,
+      "description_counts": {
+        "0": 913,
+        "1": 9,
+        "2": 21,
+        "3": 1,
+        "4": 9
+      },
+      "mean_probability": 0.8849595603357834,
+      "mean_margin": 0.031054530954879315
+    },
+    "ski jumping": {
+      "num_videos": 874,
+      "description_counts": {
+        "0": 3,
+        "2": 763,
+        "4": 108
+      },
+      "mean_probability": 0.8075090892448521,
+      "mean_margin": 0.019075225400457686
+    },
+    "skiing (not slalom or crosscountry)": {
+      "num_videos": 964,
+      "description_counts": {
+        "0": 866,
+        "1": 43,
+        "2": 23,
+        "3": 2,
+        "4": 30
+      },
+      "mean_probability": 0.7274782811203319,
+      "mean_margin": 0.0177864221991701
+    },
+    "skiing crosscountry": {
+      "num_videos": 312,
+      "description_counts": {
+        "0": 23,
+        "2": 28,
+        "3": 261
+      },
+      "mean_probability": 0.7174792307692299,
+      "mean_margin": 0.014150740384615394
+    },
+    "skiing slalom": {
+      "num_videos": 351,
+      "description_counts": {
+        "1": 163,
+        "3": 1,
+        "4": 187
+      },
+      "mean_probability": 0.649786173789174,
+      "mean_margin": 0.007244222222222218
+    },
+    "skipping rope": {
+      "num_videos": 333,
+      "description_counts": {
+        "0": 20,
+        "1": 296,
+        "2": 11,
+        "3": 1,
+        "4": 5
+      },
+      "mean_probability": 0.821154168168168,
+      "mean_margin": 0.02914327027027028
+    },
+    "skydiving": {
+      "num_videos": 350,
+      "description_counts": {
+        "0": 101,
+        "1": 10,
+        "2": 1,
+        "3": 238
+      },
+      "mean_probability": 0.6736307142857145,
+      "mean_margin": 0.009948720000000003
+    },
+    "slacklining": {
+      "num_videos": 623,
+      "description_counts": {
+        "0": 527,
+        "1": 6,
+        "2": 20,
+        "3": 63,
+        "4": 7
+      },
+      "mean_probability": 0.6734276211878008,
+      "mean_margin": 0.014926669341894046
+    },
+    "slapping": {
+      "num_videos": 304,
+      "description_counts": {
+        "0": 59,
+        "2": 29,
+        "3": 2,
+        "4": 214
+      },
+      "mean_probability": 0.5308363947368421,
+      "mean_margin": 0.00739246710526316
+    },
+    "sled dog racing": {
+      "num_videos": 620,
+      "description_counts": {
+        "0": 74,
+        "1": 40,
+        "2": 502,
+        "3": 3,
+        "4": 1
+      },
+      "mean_probability": 0.7538810419354844,
+      "mean_margin": 0.018720654838709692
+    },
+    "smoking": {
+      "num_videos": 893,
+      "description_counts": {
+        "0": 614,
+        "1": 35,
+        "2": 83,
+        "3": 52,
+        "4": 109
+      },
+      "mean_probability": 0.583218326987683,
+      "mean_margin": 0.01048613437849945
+    },
+    "smoking hookah": {
+      "num_videos": 686,
+      "description_counts": {
+        "0": 69,
+        "1": 141,
+        "2": 453,
+        "3": 6,
+        "4": 17
+      },
+      "mean_probability": 0.6382042332361513,
+      "mean_margin": 0.014315849854227415
+    },
+    "snatch weight lifting": {
+      "num_videos": 785,
+      "description_counts": {
+        "0": 47,
+        "1": 449,
+        "2": 105,
+        "4": 184
+      },
+      "mean_probability": 0.5473194178343946,
+      "mean_margin": 0.009335029299363067
+    },
+    "sneezing": {
+      "num_videos": 341,
+      "description_counts": {
+        "0": 298,
+        "1": 2,
+        "2": 10,
+        "3": 25,
+        "4": 6
+      },
+      "mean_probability": 0.6655609824046921,
+      "mean_margin": 0.01236203519061583
+    },
+    "sniffing": {
+      "num_videos": 244,
+      "description_counts": {
+        "0": 159,
+        "1": 19,
+        "2": 7,
+        "3": 48,
+        "4": 11
+      },
+      "mean_probability": 0.5343692950819672,
+      "mean_margin": 0.008720532786885248
+    },
+    "snorkeling": {
+      "num_videos": 825,
+      "description_counts": {
+        "0": 132,
+        "2": 677,
+        "3": 6,
+        "4": 10
+      },
+      "mean_probability": 0.6940601284848488,
+      "mean_margin": 0.01697354787878789
+    },
+    "snowboarding": {
+      "num_videos": 782,
+      "description_counts": {
+        "0": 479,
+        "2": 3,
+        "3": 233,
+        "4": 67
+      },
+      "mean_probability": 0.6060332173913046,
+      "mean_margin": 0.010636033248081843
+    },
+    "snowkiting": {
+      "num_videos": 987,
+      "description_counts": {
+        "0": 840,
+        "3": 95,
+        "4": 52
+      },
+      "mean_probability": 0.7783542066869295,
+      "mean_margin": 0.02023448328267476
+    },
+    "snowmobiling": {
+      "num_videos": 452,
+      "description_counts": {
+        "0": 433,
+        "1": 1,
+        "2": 14,
+        "3": 2,
+        "4": 2
+      },
+      "mean_probability": 0.8047080508849553,
+      "mean_margin": 0.024748139380530956
+    },
+    "somersaulting": {
+      "num_videos": 823,
+      "description_counts": {
+        "0": 334,
+        "1": 162,
+        "2": 13,
+        "4": 314
+      },
+      "mean_probability": 0.5468862563791012,
+      "mean_margin": 0.007734044957472661
+    },
+    "spinning poi": {
+      "num_videos": 979,
+      "description_counts": {
+        "0": 63,
+        "1": 69,
+        "2": 160,
+        "3": 647,
+        "4": 40
+      },
+      "mean_probability": 0.5274292921348311,
+      "mean_margin": 0.009293053115423897
+    },
+    "spray painting": {
+      "num_videos": 745,
+      "description_counts": {
+        "0": 473,
+        "1": 47,
+        "2": 87,
+        "3": 4,
+        "4": 134
+      },
+      "mean_probability": 0.6918021100671147,
+      "mean_margin": 0.014767571812080521
+    },
+    "spraying": {
+      "num_videos": 313,
+      "description_counts": {
+        "0": 183,
+        "1": 54,
+        "2": 65,
+        "3": 1,
+        "4": 10
+      },
+      "mean_probability": 0.5764940127795527,
+      "mean_margin": 0.009863517571884984
+    },
+    "springboard diving": {
+      "num_videos": 225,
+      "description_counts": {
+        "0": 2,
+        "1": 2,
+        "2": 8,
+        "3": 213
+      },
+      "mean_probability": 0.8429481333333337,
+      "mean_margin": 0.025279408888888875
+    },
+    "squat": {
+      "num_videos": 984,
+      "description_counts": {
+        "0": 114,
+        "1": 102,
+        "2": 657,
+        "3": 11,
+        "4": 100
+      },
+      "mean_probability": 0.6641302479674799,
+      "mean_margin": 0.01511077947154472
+    },
+    "sticking tongue out": {
+      "num_videos": 610,
+      "description_counts": {
+        "0": 34,
+        "1": 503,
+        "2": 72,
+        "4": 1
+      },
+      "mean_probability": 0.7012663393442616,
+      "mean_margin": 0.017125870491803263
+    },
+    "stomping grapes": {
+      "num_videos": 291,
+      "description_counts": {
+        "0": 33,
+        "1": 250,
+        "2": 7,
+        "3": 1
+      },
+      "mean_probability": 0.8555442371134026,
+      "mean_margin": 0.035248501718213095
+    },
+    "stretching arm": {
+      "num_videos": 556,
+      "description_counts": {
+        "0": 198,
+        "1": 72,
+        "2": 80,
+        "3": 10,
+        "4": 196
+      },
+      "mean_probability": 0.5509173741007196,
+      "mean_margin": 0.008469147482014383
+    },
+    "stretching leg": {
+      "num_videos": 658,
+      "description_counts": {
+        "0": 371,
+        "1": 150,
+        "2": 72,
+        "4": 65
+      },
+      "mean_probability": 0.5450806884498478,
+      "mean_margin": 0.007527161094224924
+    },
+    "strumming guitar": {
+      "num_videos": 318,
+      "description_counts": {
+        "1": 187,
+        "2": 14,
+        "3": 57,
+        "4": 60
+      },
+      "mean_probability": 0.49449148113207536,
+      "mean_margin": 0.006408301886792456
+    },
+    "surfing crowd": {
+      "num_videos": 712,
+      "description_counts": {
+        "0": 135,
+        "1": 14,
+        "2": 39,
+        "4": 524
+      },
+      "mean_probability": 0.5460784325842699,
+      "mean_margin": 0.008855912921348297
+    },
+    "surfing water": {
+      "num_videos": 592,
+      "description_counts": {
+        "0": 289,
+        "1": 25,
+        "3": 276,
+        "4": 2
+      },
+      "mean_probability": 0.633202633445946,
+      "mean_margin": 0.007930866554054058
+    },
+    "sweeping floor": {
+      "num_videos": 438,
+      "description_counts": {
+        "0": 40,
+        "1": 12,
+        "2": 5,
+        "3": 380,
+        "4": 1
+      },
+      "mean_probability": 0.7337440296803651,
+      "mean_margin": 0.015788066210045658
+    },
+    "swimming backstroke": {
+      "num_videos": 843,
+      "description_counts": {
+        "0": 22,
+        "1": 21,
+        "2": 788,
+        "3": 12
+      },
+      "mean_probability": 0.740794486358245,
+      "mean_margin": 0.01607011862396204
+    },
+    "swimming breast stroke": {
+      "num_videos": 617,
+      "description_counts": {
+        "0": 45,
+        "1": 2,
+        "3": 113,
+        "4": 457
+      },
+      "mean_probability": 0.5947511118314421,
+      "mean_margin": 0.010666807131280383
+    },
+    "swimming butterfly stroke": {
+      "num_videos": 484,
+      "description_counts": {
+        "0": 2,
+        "1": 163,
+        "3": 41,
+        "4": 278
+      },
+      "mean_probability": 0.5932460702479339,
+      "mean_margin": 0.008466731404958676
+    },
+    "swing dancing": {
+      "num_videos": 355,
+      "description_counts": {
+        "0": 61,
+        "1": 257,
+        "2": 15,
+        "3": 21,
+        "4": 1
+      },
+      "mean_probability": 0.5577863774647882,
+      "mean_margin": 0.010177216901408447
+    },
+    "swinging legs": {
+      "num_videos": 254,
+      "description_counts": {
+        "0": 28,
+        "1": 85,
+        "2": 45,
+        "3": 1,
+        "4": 95
+      },
+      "mean_probability": 0.5774474251968509,
+      "mean_margin": 0.009821874015748024
+    },
+    "swinging on something": {
+      "num_videos": 316,
+      "description_counts": {
+        "0": 3,
+        "1": 45,
+        "2": 238,
+        "4": 30
+      },
+      "mean_probability": 0.6363478765822784,
+      "mean_margin": 0.012146768987341775
+    },
+    "sword fighting": {
+      "num_videos": 313,
+      "description_counts": {
+        "0": 28,
+        "1": 21,
+        "2": 238,
+        "4": 26
+      },
+      "mean_probability": 0.5934028817891378,
+      "mean_margin": 0.010349067092651746
+    },
+    "tai chi": {
+      "num_videos": 909,
+      "description_counts": {
+        "0": 121,
+        "1": 174,
+        "2": 7,
+        "3": 23,
+        "4": 584
+      },
+      "mean_probability": 0.5946318844884491,
+      "mean_margin": 0.012179370737073696
+    },
+    "taking a shower": {
+      "num_videos": 227,
+      "description_counts": {
+        "0": 28,
+        "1": 41,
+        "2": 1,
+        "3": 21,
+        "4": 136
+      },
+      "mean_probability": 0.5769236740088107,
+      "mean_margin": 0.010254977973568271
+    },
+    "tango dancing": {
+      "num_videos": 952,
+      "description_counts": {
+        "2": 120,
+        "3": 757,
+        "4": 75
+      },
+      "mean_probability": 0.6947029096638654,
+      "mean_margin": 0.014600357142857135
+    },
+    "tap dancing": {
+      "num_videos": 785,
+      "description_counts": {
+        "0": 58,
+        "1": 2,
+        "2": 13,
+        "3": 708,
+        "4": 4
+      },
+      "mean_probability": 0.7313582343949044,
+      "mean_margin": 0.01716324458598724
+    },
+    "tapping guitar": {
+      "num_videos": 658,
+      "description_counts": {
+        "0": 4,
+        "1": 6,
+        "2": 9,
+        "3": 638,
+        "4": 1
+      },
+      "mean_probability": 0.7631379544072946,
+      "mean_margin": 0.019450530395136792
+    },
+    "tapping pen": {
+      "num_videos": 539,
+      "description_counts": {
+        "0": 76,
+        "1": 29,
+        "2": 2,
+        "3": 17,
+        "4": 415
+      },
+      "mean_probability": 0.5468246994434142,
+      "mean_margin": 0.00799482374768089
+    },
+    "tasting beer": {
+      "num_videos": 436,
+      "description_counts": {
+        "0": 142,
+        "3": 264,
+        "4": 30
+      },
+      "mean_probability": 0.6226997064220184,
+      "mean_margin": 0.009023956422018354
+    },
+    "tasting food": {
+      "num_videos": 439,
+      "description_counts": {
+        "0": 339,
+        "1": 1,
+        "3": 91,
+        "4": 8
+      },
+      "mean_probability": 0.7117388929384963,
+      "mean_margin": 0.013912141230068353
+    },
+    "testifying": {
+      "num_videos": 346,
+      "description_counts": {
+        "0": 3,
+        "1": 261,
+        "2": 82
+      },
+      "mean_probability": 0.7314502369942197,
+      "mean_margin": 0.014756739884393072
+    },
+    "texting": {
+      "num_videos": 546,
+      "description_counts": {
+        "0": 80,
+        "1": 20,
+        "2": 145,
+        "3": 48,
+        "4": 253
+      },
+      "mean_probability": 0.49350634249084274,
+      "mean_margin": 0.0072850860805860765
+    },
+    "throwing axe": {
+      "num_videos": 658,
+      "description_counts": {
+        "0": 42,
+        "1": 8,
+        "2": 3,
+        "3": 487,
+        "4": 118
+      },
+      "mean_probability": 0.7080219042553196,
+      "mean_margin": 0.017252712765957443
+    },
+    "throwing ball": {
+      "num_videos": 479,
+      "description_counts": {
+        "0": 5,
+        "1": 327,
+        "2": 57,
+        "3": 2,
+        "4": 88
+      },
+      "mean_probability": 0.5488057139874745,
+      "mean_margin": 0.009302327766179536
+    },
+    "throwing discus": {
+      "num_videos": 933,
+      "description_counts": {
+        "0": 863,
+        "1": 1,
+        "2": 21,
+        "3": 29,
+        "4": 19
+      },
+      "mean_probability": 0.8253821532690246,
+      "mean_margin": 0.02915648660235797
+    },
+    "tickling": {
+      "num_videos": 441,
+      "description_counts": {
+        "0": 7,
+        "1": 284,
+        "2": 138,
+        "3": 12
+      },
+      "mean_probability": 0.6437833219954651,
+      "mean_margin": 0.013063464852607716
+    },
+    "tobogganing": {
+      "num_videos": 983,
+      "description_counts": {
+        "0": 901,
+        "1": 3,
+        "3": 3,
+        "4": 76
+      },
+      "mean_probability": 0.8380754130213638,
+      "mean_margin": 0.02403184231943034
+    },
+    "tossing coin": {
+      "num_videos": 305,
+      "description_counts": {
+        "0": 41,
+        "1": 88,
+        "2": 5,
+        "3": 8,
+        "4": 163
+      },
+      "mean_probability": 0.6937475999999997,
+      "mean_margin": 0.015669832786885253
+    },
+    "tossing salad": {
+      "num_videos": 306,
+      "description_counts": {
+        "0": 161,
+        "1": 130,
+        "2": 3,
+        "3": 2,
+        "4": 10
+      },
+      "mean_probability": 0.6503028660130724,
+      "mean_margin": 0.012121643790849667
+    },
+    "training dog": {
+      "num_videos": 322,
+      "description_counts": {
+        "0": 152,
+        "1": 30,
+        "2": 137,
+        "3": 1,
+        "4": 2
+      },
+      "mean_probability": 0.594143481366459,
+      "mean_margin": 0.0095813602484472
+    },
+    "trapezing": {
+      "num_videos": 629,
+      "description_counts": {
+        "0": 618,
+        "2": 1,
+        "3": 10
+      },
+      "mean_probability": 0.9567141367249595,
+      "mean_margin": 0.04576530524642289
+    },
+    "trimming or shaving beard": {
+      "num_videos": 805,
+      "description_counts": {
+        "0": 104,
+        "1": 9,
+        "2": 507,
+        "3": 169,
+        "4": 16
+      },
+      "mean_probability": 0.6301390633540375,
+      "mean_margin": 0.012679228571428568
+    },
+    "trimming trees": {
+      "num_videos": 472,
+      "description_counts": {
+        "0": 13,
+        "1": 5,
+        "2": 265,
+        "3": 122,
+        "4": 67
+      },
+      "mean_probability": 0.6298341864406776,
+      "mean_margin": 0.01257504872881355
+    },
+    "triple jump": {
+      "num_videos": 625,
+      "description_counts": {
+        "0": 1,
+        "1": 6,
+        "2": 11,
+        "3": 607
+      },
+      "mean_probability": 0.8439242096,
+      "mean_margin": 0.027443156799999997
+    },
+    "tying bow tie": {
+      "num_videos": 217,
+      "description_counts": {
+        "0": 14,
+        "1": 117,
+        "2": 32,
+        "3": 10,
+        "4": 44
+      },
+      "mean_probability": 0.6346407557603685,
+      "mean_margin": 0.012159202764976965
+    },
+    "tying knot (not on a tie)": {
+      "num_videos": 674,
+      "description_counts": {
+        "0": 549,
+        "1": 46,
+        "2": 6,
+        "3": 48,
+        "4": 25
+      },
+      "mean_probability": 0.6373972181008903,
+      "mean_margin": 0.012317163204747765
+    },
+    "tying tie": {
+      "num_videos": 510,
+      "description_counts": {
+        "0": 425,
+        "1": 15,
+        "3": 31,
+        "4": 39
+      },
+      "mean_probability": 0.6438974647058826,
+      "mean_margin": 0.010659123529411767
+    },
+    "unboxing": {
+      "num_videos": 693,
+      "description_counts": {
+        "0": 524,
+        "2": 38,
+        "3": 75,
+        "4": 56
+      },
+      "mean_probability": 0.6161140447330442,
+      "mean_margin": 0.011532904761904758
+    },
+    "unloading truck": {
+      "num_videos": 252,
+      "description_counts": {
+        "0": 37,
+        "1": 6,
+        "2": 5,
+        "3": 9,
+        "4": 195
+      },
+      "mean_probability": 0.631572436507936,
+      "mean_margin": 0.012929742063492072
+    },
+    "using computer": {
+      "num_videos": 757,
+      "description_counts": {
+        "0": 356,
+        "1": 12,
+        "2": 154,
+        "3": 200,
+        "4": 35
+      },
+      "mean_probability": 0.5470462470277415,
+      "mean_margin": 0.008081795244385728
+    },
+    "using remote controller (not gaming)": {
+      "num_videos": 393,
+      "description_counts": {
+        "0": 123,
+        "1": 29,
+        "2": 117,
+        "3": 22,
+        "4": 102
+      },
+      "mean_probability": 0.6277899185750639,
+      "mean_margin": 0.012089938931297707
+    },
+    "using segway": {
+      "num_videos": 221,
+      "description_counts": {
+        "0": 216,
+        "3": 4,
+        "4": 1
+      },
+      "mean_probability": 0.9032264298642533,
+      "mean_margin": 0.0294012443438914
+    },
+    "vault": {
+      "num_videos": 410,
+      "description_counts": {
+        "1": 408,
+        "2": 1,
+        "4": 1
+      },
+      "mean_probability": 0.9672523878048785,
+      "mean_margin": 0.05026230243902436
+    },
+    "waiting in line": {
+      "num_videos": 276,
+      "description_counts": {
+        "0": 33,
+        "2": 1,
+        "3": 41,
+        "4": 201
+      },
+      "mean_probability": 0.6870488514492752,
+      "mean_margin": 0.016494525362318834
+    },
+    "walking the dog": {
+      "num_videos": 944,
+      "description_counts": {
+        "0": 345,
+        "1": 126,
+        "2": 470,
+        "3": 2,
+        "4": 1
+      },
+      "mean_probability": 0.6089518930084749,
+      "mean_margin": 0.010246143008474573
+    },
+    "washing dishes": {
+      "num_videos": 878,
+      "description_counts": {
+        "0": 267,
+        "1": 110,
+        "2": 3,
+        "3": 39,
+        "4": 459
+      },
+      "mean_probability": 0.5632941651480639,
+      "mean_margin": 0.008935726651480633
+    },
+    "washing feet": {
+      "num_videos": 696,
+      "description_counts": {
+        "0": 110,
+        "1": 567,
+        "3": 4,
+        "4": 15
+      },
+      "mean_probability": 0.8195558477011493,
+      "mean_margin": 0.026610294540229923
+    },
+    "washing hair": {
+      "num_videos": 253,
+      "description_counts": {
+        "0": 37,
+        "1": 82,
+        "2": 1,
+        "3": 127,
+        "4": 6
+      },
+      "mean_probability": 0.6036430039525693,
+      "mean_margin": 0.01017864031620553
+    },
+    "washing hands": {
+      "num_videos": 750,
+      "description_counts": {
+        "0": 90,
+        "1": 564,
+        "2": 21,
+        "3": 5,
+        "4": 70
+      },
+      "mean_probability": 0.664062833333334,
+      "mean_margin": 0.015871913333333317
+    },
+    "water skiing": {
+      "num_videos": 569,
+      "description_counts": {
+        "0": 132,
+        "3": 390,
+        "4": 47
+      },
+      "mean_probability": 0.7438248330404215,
+      "mean_margin": 0.016817602811950785
+    },
+    "water sliding": {
+      "num_videos": 257,
+      "description_counts": {
+        "0": 169,
+        "1": 48,
+        "2": 4,
+        "3": 24,
+        "4": 12
+      },
+      "mean_probability": 0.6966576381322955,
+      "mean_margin": 0.014227136186770432
+    },
+    "watering plants": {
+      "num_videos": 508,
+      "description_counts": {
+        "0": 304,
+        "1": 201,
+        "2": 1,
+        "4": 2
+      },
+      "mean_probability": 0.7173038818897637,
+      "mean_margin": 0.01564712598425197
+    },
+    "waxing back": {
+      "num_videos": 385,
+      "description_counts": {
+        "0": 307,
+        "1": 6,
+        "2": 25,
+        "3": 47
+      },
+      "mean_probability": 0.6470189428571425,
+      "mean_margin": 0.011234264935064924
+    },
+    "waxing chest": {
+      "num_videos": 605,
+      "description_counts": {
+        "0": 563,
+        "1": 5,
+        "2": 11,
+        "3": 22,
+        "4": 4
+      },
+      "mean_probability": 0.7761908165289246,
+      "mean_margin": 0.021613115702479334
+    },
+    "waxing eyebrows": {
+      "num_videos": 558,
+      "description_counts": {
+        "0": 31,
+        "1": 23,
+        "2": 478,
+        "3": 21,
+        "4": 5
+      },
+      "mean_probability": 0.6966950985663076,
+      "mean_margin": 0.01616819892473118
+    },
+    "waxing legs": {
+      "num_videos": 777,
+      "description_counts": {
+        "0": 493,
+        "1": 49,
+        "2": 51,
+        "3": 173,
+        "4": 11
+      },
+      "mean_probability": 0.6018870772200765,
+      "mean_margin": 0.00997928571428572
+    },
+    "weaving basket": {
+      "num_videos": 588,
+      "description_counts": {
+        "0": 286,
+        "1": 261,
+        "3": 34,
+        "4": 7
+      },
+      "mean_probability": 0.6990481224489802,
+      "mean_margin": 0.013467581632653053
+    },
+    "welding": {
+      "num_videos": 600,
+      "description_counts": {
+        "0": 43,
+        "1": 6,
+        "2": 1,
+        "3": 17,
+        "4": 533
+      },
+      "mean_probability": 0.7232686483333333,
+      "mean_margin": 0.014135320000000003
+    },
+    "whistling": {
+      "num_videos": 260,
+      "description_counts": {
+        "0": 13,
+        "1": 9,
+        "2": 79,
+        "3": 116,
+        "4": 43
+      },
+      "mean_probability": 0.47759772307692294,
+      "mean_margin": 0.006661311538461539
+    },
+    "windsurfing": {
+      "num_videos": 933,
+      "description_counts": {
+        "0": 244,
+        "1": 374,
+        "2": 161,
+        "4": 154
+      },
+      "mean_probability": 0.5824156473740614,
+      "mean_margin": 0.010193986066452304
+    },
+    "wrapping present": {
+      "num_videos": 672,
+      "description_counts": {
+        "0": 33,
+        "1": 633,
+        "2": 2,
+        "3": 4
+      },
+      "mean_probability": 0.838796702380952,
+      "mean_margin": 0.0263773779761905
+    },
+    "wrestling": {
+      "num_videos": 335,
+      "description_counts": {
+        "0": 68,
+        "2": 214,
+        "3": 25,
+        "4": 28
+      },
+      "mean_probability": 0.6583809611940303,
+      "mean_margin": 0.014806961194029864
+    },
+    "writing": {
+      "num_videos": 564,
+      "description_counts": {
+        "0": 14,
+        "1": 122,
+        "2": 346,
+        "3": 55,
+        "4": 27
+      },
+      "mean_probability": 0.5804958368794326,
+      "mean_margin": 0.00961607092198582
+    },
+    "yawning": {
+      "num_videos": 238,
+      "description_counts": {
+        "0": 4,
+        "1": 142,
+        "2": 39,
+        "3": 48,
+        "4": 5
+      },
+      "mean_probability": 0.6337285630252102,
+      "mean_margin": 0.014314533613445375
+    },
+    "yoga": {
+      "num_videos": 946,
+      "description_counts": {
+        "0": 644,
+        "2": 190,
+        "3": 107,
+        "4": 5
+      },
+      "mean_probability": 0.5611301289640593,
+      "mean_margin": 0.008611121564482025
+    },
+    "zumba": {
+      "num_videos": 935,
+      "description_counts": {
+        "0": 59,
+        "1": 2,
+        "2": 41,
+        "3": 81,
+        "4": 752
+      },
+      "mean_probability": 0.6219833465240637,
+      "mean_margin": 0.013366781818181801
+    }
+  },
+  "dataset_root": "/tudelft.net/staff-umbrella/MoDDL/Pascal/motion_only_AR/datasets/Kinetics/k400/train",
+  "descriptions_json": "/tudelft.net/staff-umbrella/MoDDL/Pascal/motion_only_AR/models/appearance_free_cross_domain_action_recognition/tc-clip/labels/custom/Kinetics_descriptions.json",
+  "output_csv": "/tudelft.net/staff-umbrella/MoDDL/Pascal/motion_only_AR/models/appearance_free_cross_domain_action_recognition/text_embeddings/kinetics400_train_description_matches_clip.csv",
+  "clip_model": "ViT-B/32",
+  "device": "cuda",
+  "num_frames": 8,
+  "batch_size": 32
+}

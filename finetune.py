@@ -40,7 +40,7 @@ from dataset import (
 )
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from model_svt import TwoStreamSVT_CLIP
+from svt import TwoStreamSVT_CLIP
 from augment import (
     temporal_splice_mixup,
     mixup_batch,
@@ -482,6 +482,7 @@ def main():
     ap.add_argument("--mixup_alpha", type=float, default=0.0)
     ap.add_argument("--mixup_prob", type=float, default=0.0)
     ap.add_argument("--p_affine", type=float, default=0.25, help="Probability of applying geometric affine augmentation in MotionTwoStreamZstdDataset.")
+    ap.add_argument("--motion_spatial_crop",type=str,default="random",choices=["random", "motion"])
     ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
     ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
     ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
@@ -618,6 +619,7 @@ def main():
         print(
             "[SVT] "
             f"patch={args.svt_patch_size} depth={args.svt_depth} heads={args.svt_num_heads} "
+            f"svt_embed_dim=600 semantic_dim={embed_dim} "
             f"mlp_ratio={args.svt_mlp_ratio} max_frames={args.svt_max_frames if args.svt_max_frames is not None else max(mhi_frames, flow_frames)} "
             f"mask={args.svt_motion_mask_enabled} keep_ratio={args.svt_motion_keep_ratio} "
             f"score_mode={args.svt_motion_score_mode} mhi_weight={args.svt_motion_mhi_weight}",
@@ -683,6 +685,7 @@ def main():
                 out_dtype=data_dtype,
                 p_hflip=0.5,
                 p_affine=args.p_affine,
+                spatial_crop_mode=args.motion_spatial_crop,
                 seed=args.seed,
                 dataset_split_txt=manifest_path,
                 class_id_to_label_csv=args.class_id_to_label_csv,
@@ -843,7 +846,7 @@ def main():
             flow_frames=flow_frames,
             img_size=img_size,
             embed_dim=embed_dim,
-            semantic_dim=512,
+            semantic_dim=embed_dim,
             patch_size=args.svt_patch_size,
             depth=args.svt_depth,
             num_heads=args.svt_num_heads,

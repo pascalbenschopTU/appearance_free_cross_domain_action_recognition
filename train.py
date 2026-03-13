@@ -11,7 +11,7 @@ from dataset import (
 )
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from model_svt import TwoStreamSVT_CLIP
+from svt import TwoStreamSVT_CLIP
 from augment import (
     temporal_splice_mixup,
     soft_target_cross_entropy,
@@ -22,10 +22,15 @@ from util import (
     find_latest_ckpt,
     load_checkpoint,
     make_ckpt_payload,
+    build_description_match_resolver,
+    build_description_text_bank,
     build_clip_text_bank_and_logit_scale,
     load_precomputed_text_bank_and_logit_scale,
+    build_text_bank,
     expand_manifest_args,
     apply_per_class_subset,
+    load_clip_text_encoder,
+    LogitScale,
 )
 import argparse
 import torch
@@ -124,7 +129,12 @@ def main():
     ap.add_argument("--probability_hflip", type=float, default=0.5)
     ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
     ap.add_argument("--probability_affine", type=float, default=0.0, help="rotate,translate,scale,shear")
+    ap.add_argument("--motion_spatial_crop",type=str,default="random",choices=["random", "motion"])
     ap.add_argument("--class_text_json", type=str, default="")
+    ap.add_argument("--text_supervision_mode", type=str, default="class_proto",
+                    choices=["class_proto", "desc_soft_margin"])
+    ap.add_argument("--description_match_csv", type=str, default="",
+                    help="CSV with per-video matched descriptions for desc_soft_margin supervision.")
     ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
     ap.add_argument("--precomputed_text_embeddings", type=str, default="")
     ap.add_argument("--precomputed_text_index", type=str, default="")
@@ -192,6 +202,13 @@ def main():
             raise ValueError(
                 "--text_bank_backend precomputed requires --precomputed_text_embeddings and --precomputed_text_index."
             )
+    if args.text_supervision_mode == "desc_soft_margin":
+        if args.text_bank_backend != "clip":
+            raise ValueError("--text_supervision_mode desc_soft_margin requires --text_bank_backend clip.")
+        if not args.class_text_json.strip():
+            raise ValueError("--text_supervision_mode desc_soft_margin requires --class_text_json.")
+        if not args.description_match_csv.strip():
+            raise ValueError("--text_supervision_mode desc_soft_margin requires --description_match_csv.")
 
     if args.compute_second_only:
         if args.active_branch not in ("both", "second"):
@@ -267,6 +284,7 @@ def main():
             p_hflip=args.probability_hflip,
             p_max_drop_frame=args.max_probability_drop_frame,
             p_affine=args.probability_affine,
+            spatial_crop_mode=args.motion_spatial_crop,
             seed=args.seed,
         )
         collate_fn = collate_motion
@@ -281,9 +299,15 @@ def main():
         drop_last=True,
     )
 
+    class_texts = None
+    if args.text_bank_backend == "clip" and args.class_text_json.strip():
+        with open(args.class_text_json, "r") as f:
+            class_texts = json.load(f)
+
     val_dataset = None
     val_loader = None
     val_clip_text_bank = None
+    val_class_to_desc_indices = None
     val_eval_args = None
     val_eval_out_dir = None
     val_manifest_path = None
@@ -379,8 +403,31 @@ def main():
             if args.text_bank_backend == "clip" and args.val_class_text_json.strip():
                 with open(args.val_class_text_json, "r") as f:
                     val_class_texts = json.load(f)
+            elif args.text_bank_backend == "clip":
+                val_class_texts = class_texts
 
-            if args.text_bank_backend == "precomputed":
+            if args.text_supervision_mode == "desc_soft_margin" and args.val_class_text_json.strip():
+                clip_text_model_val, clip_tokenize_fn_val = load_clip_text_encoder(device)
+                val_desc_text_bank = build_description_text_bank(
+                    clip_model=clip_text_model_val,
+                    tokenize_fn=clip_tokenize_fn_val,
+                    classnames=list(val_dataset.classnames),
+                    device=device,
+                    templates=[
+                        "{}",
+                        "a video of {}",
+                        "a video of a person {}",
+                        "a person is {}",
+                        "someone is {}",
+                        "the action of {}",
+                        "a clip of {}",
+                    ],
+                    class_texts=val_class_texts,
+                    apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+                )
+                val_clip_text_bank = val_desc_text_bank.text_bank.to(dtype=torch.float16).to(device).detach()
+                val_class_to_desc_indices = val_desc_text_bank.class_to_desc_indices
+            elif args.text_bank_backend == "precomputed":
                 val_clip_text_bank, _ = load_precomputed_text_bank_and_logit_scale(
                     dataset_classnames=val_dataset.classnames,
                     device=device,
@@ -392,6 +439,12 @@ def main():
                     dtype=torch.float16,
                 )
             else:
+                if args.text_supervision_mode == "desc_soft_margin":
+                    print(
+                        "[VAL] desc_soft_margin training active but no --val_class_text_json provided; "
+                        "falling back to class-prototype validation bank.",
+                        flush=True,
+                    )
                 val_clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
                     dataset_classnames=val_dataset.classnames,
                     device=device,
@@ -418,12 +471,65 @@ def main():
                 flush=True,
             )
     
-    class_texts = None
-    if args.text_bank_backend == "clip" and args.class_text_json.strip():
-        with open(args.class_text_json, "r") as f:
-            class_texts = json.load(f)
+    train_desc_match_resolver = None
+    class_proto_text_bank = None
 
-    if args.text_bank_backend == "precomputed":
+    if args.text_supervision_mode == "desc_soft_margin":
+        clip_text_model, clip_tokenize_fn = load_clip_text_encoder(device)
+        logit_scale = LogitScale(init_temp=0.07).to(device)
+
+        class_proto_text_bank = build_text_bank(
+            clip_model=clip_text_model,
+            tokenize_fn=clip_tokenize_fn,
+            classnames=list(dataset.classnames),
+            device=device,
+            templates=[
+                "{}",
+                "a video of {}",
+                "a video of a person {}",
+                "a person is {}",
+                "someone is {}",
+                "the action of {}",
+                "a clip of {}",
+            ],
+            class_texts=class_texts,
+            apply_templates_to_class_texts=args.apply_templates_to_class_texts,
+            class_text_label_weight=args.class_text_label_weight,
+            apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+        ).to(dtype=torch.float16).to(device).detach()
+        desc_text_bank = build_description_text_bank(
+            clip_model=clip_text_model,
+            tokenize_fn=clip_tokenize_fn,
+            classnames=list(dataset.classnames),
+            device=device,
+            templates=[
+                "{}",
+                "a video of {}",
+                "a video of a person {}",
+                "a person is {}",
+                "someone is {}",
+                "the action of {}",
+                "a clip of {}",
+            ],
+            class_texts=class_texts,
+            apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+        )
+        clip_text_bank = desc_text_bank.text_bank.to(dtype=torch.float16).to(device).detach()
+        train_desc_match_resolver = build_description_match_resolver(
+            csv_path=args.description_match_csv,
+            root_dir=args.root_dir,
+            classnames=dataset.classnames,
+            class_to_desc_indices=desc_text_bank.class_to_desc_indices,
+        )
+        train_desc_match_resolver.validate_paths(dataset.paths)
+        print(
+            f"[DESC] enabled: descriptions={clip_text_bank.shape[0]} "
+            f"per_class={desc_text_bank.descriptions_per_class} "
+            f"margin_p50={train_desc_match_resolver.margin_p50:.6f} "
+            f"margin_p90={train_desc_match_resolver.margin_p90:.6f}",
+            flush=True,
+        )
+    elif args.text_bank_backend == "precomputed":
         clip_text_bank, logit_scale = load_precomputed_text_bank_and_logit_scale(
             dataset_classnames=dataset.classnames,
             device=device,
@@ -445,6 +551,9 @@ def main():
             class_text_label_weight=args.class_text_label_weight,
             apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
         )
+        class_proto_text_bank = clip_text_bank
+    if class_proto_text_bank is None:
+        class_proto_text_bank = clip_text_bank
     # Frozen by default
     if not args.unfreeze_logit_scale:
         for p in logit_scale.parameters():
@@ -534,6 +643,10 @@ def main():
             num_classes=num_classes if args.lambda_ce > 0 else 0,
             active_branch=args.active_branch,
         ).to(device)
+        print(
+            f"[SVT] semantic_dim={args.embed_dim} svt_embed_dim=600 heads={args.svt_num_heads}",
+            flush=True,
+        )
     else:
         raise ValueError(f"Unsupported model: {args.model}")
 
@@ -544,7 +657,7 @@ def main():
         )
     class_text_sim = None
     if args.rep_mix_semantic:
-        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+        t_norm = F.normalize(class_proto_text_bank, dim=-1).float()
         class_text_sim = (t_norm @ t_norm.t()).detach()
     clip_text_bank_loss = clip_text_bank.float().detach()
 
@@ -617,7 +730,7 @@ def main():
         running_ce_loss = 0.0
         n_logs = 0
 
-        for step_in_epoch, (mhi_top, flow_bot, labels, cnames) in enumerate(loader):
+        for step_in_epoch, (mhi_top, flow_bot, labels, sample_ids) in enumerate(loader):
             mhi_top  = mhi_top.to(device, non_blocking=True)   # (B,C,32,224,224)
             flow_bot = flow_bot.to(device, non_blocking=True)  # (B,2,128,112,112)
             labels = labels.to(device, non_blocking=True)
@@ -627,21 +740,59 @@ def main():
 
             use_amp = (device.type == "cuda")
             with torch.autocast(device_type=device.type, enabled=use_amp):
-                labels_soft = None
+                labels_soft_class = None
+                labels_soft_desc = None
+                matched_desc_onehot = None
+                mix_pair_idx = None
+                mix_lam = None
                 use_temporal_mixup = (
                     args.temporal_mixup_prob > 0.0 and
                     np.random.rand() < float(args.temporal_mixup_prob)
                 )
                 if use_temporal_mixup:
-                    mhi_top, flow_bot, labels_soft = temporal_splice_mixup(
-                        mhi_top,
-                        flow_bot,
-                        labels,
-                        num_classes=num_classes,
-                        label_smoothing=args.label_smoothing,
-                        y_min_frac=args.temporal_mixup_y_min,
-                        y_max_frac=args.temporal_mixup_y_max,
+                    if args.text_supervision_mode == "desc_soft_margin":
+                        mhi_top, flow_bot, labels_soft_class, mix_meta = temporal_splice_mixup(
+                            mhi_top,
+                            flow_bot,
+                            labels,
+                            num_classes=num_classes,
+                            label_smoothing=args.label_smoothing,
+                            y_min_frac=args.temporal_mixup_y_min,
+                            y_max_frac=args.temporal_mixup_y_max,
+                            return_mix_metadata=True,
+                        )
+                        mix_pair_idx = mix_meta["pair_idx"]
+                        mix_lam = float(mix_meta["lam"])
+                    else:
+                        mhi_top, flow_bot, labels_soft_class = temporal_splice_mixup(
+                            mhi_top,
+                            flow_bot,
+                            labels,
+                            num_classes=num_classes,
+                            label_smoothing=args.label_smoothing,
+                            y_min_frac=args.temporal_mixup_y_min,
+                            y_max_frac=args.temporal_mixup_y_max,
+                        )
+
+                if args.text_supervision_mode == "desc_soft_margin":
+                    labels_soft_desc, matched_desc_indices = train_desc_match_resolver.build_targets(
+                        sample_ids,
+                        device=labels.device,
+                        dtype=torch.float32,
                     )
+                    matched_desc_onehot = F.one_hot(
+                        matched_desc_indices,
+                        num_classes=int(clip_text_bank.shape[0]),
+                    ).to(dtype=torch.float32)
+                    if mix_pair_idx is not None and mix_lam is not None:
+                        labels_soft_desc = (
+                            mix_lam * labels_soft_desc +
+                            (1.0 - mix_lam) * labels_soft_desc.index_select(0, mix_pair_idx)
+                        )
+                        matched_desc_onehot = (
+                            mix_lam * matched_desc_onehot +
+                            (1.0 - mix_lam) * matched_desc_onehot.index_select(0, mix_pair_idx)
+                        )
 
                 out = model(mhi_top, flow_bot)
                 emb_fuse = out["emb_fuse"]
@@ -655,9 +806,11 @@ def main():
                 def ce_from_emb(emb):
                     emb = F.normalize(emb, dim=-1)
                     logits = s * (emb @ clip_text_bank.t())
-                    if labels_soft is None:
+                    if args.text_supervision_mode == "desc_soft_margin":
+                        return soft_target_cross_entropy(logits, labels_soft_desc)
+                    if labels_soft_class is None:
                         return F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
-                    return soft_target_cross_entropy(logits, labels_soft)
+                    return soft_target_cross_entropy(logits, labels_soft_class)
 
                 if args.lambda_clip_ce > 0:
                     loss_fuse = ce_from_emb(emb_fuse)
@@ -667,10 +820,12 @@ def main():
                     loss_clip = loss_fuse
 
                 if args.lambda_embed_l2 > 0 or args.lambda_embed_cos > 0:
-                    if labels_soft is None:
+                    if args.text_supervision_mode == "desc_soft_margin":
+                        target_emb = matched_desc_onehot.to(dtype=clip_text_bank_loss.dtype) @ clip_text_bank_loss
+                    elif labels_soft_class is None:
                         target_emb = clip_text_bank_loss.index_select(0, labels)
                     else:
-                        target_emb = labels_soft.to(dtype=clip_text_bank_loss.dtype) @ clip_text_bank_loss
+                        target_emb = labels_soft_class.to(dtype=clip_text_bank_loss.dtype) @ clip_text_bank_loss
                     pred_emb = emb_fuse.float()
                     pred_emb = F.normalize(pred_emb, dim=-1)
                     target_emb = F.normalize(target_emb, dim=-1)
@@ -692,10 +847,10 @@ def main():
                     logits_ce = out.get("logits_cls", None)
                     if logits_ce is None:
                         raise RuntimeError("lambda_ce > 0 but model returned no logits_cls.")
-                    if labels_soft is None:
+                    if labels_soft_class is None:
                         loss_ce = F.cross_entropy(logits_ce, labels, label_smoothing=args.label_smoothing)
                     else:
-                        loss_ce = soft_target_cross_entropy(logits_ce, labels_soft)
+                        loss_ce = soft_target_cross_entropy(logits_ce, labels_soft_class)
                 else:
                     loss_ce = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
 
@@ -703,12 +858,12 @@ def main():
                     loss_rep_mix = representation_mix_consistency_loss(
                         emb_fuse,
                         labels,
-                        clip_text_bank,
+                        class_proto_text_bank,
                         alpha=args.rep_mix_alpha,
                         semantic_mix=args.rep_mix_semantic,
                         semantic_topk=args.rep_mix_semantic_topk,
                         semantic_min_sim=args.rep_mix_semantic_min_sim,
-                        labels_soft=labels_soft,
+                        labels_soft=labels_soft_class,
                         class_text_sim=class_text_sim,
                     ).to(dtype=loss_clip.dtype)
                 else:
@@ -863,6 +1018,7 @@ def main():
                     clip_model=None,
                     clip_preprocess=None,
                     text_bank=val_clip_text_bank,
+                    class_to_desc_indices=val_class_to_desc_indices,
                     scale_motion=float(logit_scale().exp().item()),
                     scale_clip=0.0,
                     num_classes=len(val_dataset.classnames),
