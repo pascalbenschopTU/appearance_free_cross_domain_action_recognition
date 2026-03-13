@@ -7,3 +7,6 @@ run_scripts.txt
 workspace/
 logs/
 scripts/
+PrivacyAttributes/
+privacy/_stprivacy_src/
+privacy/_downloads/
