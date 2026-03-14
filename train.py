@@ -1,5 +1,6 @@
 import json
 import sys
+from config import parse_train_args
 from dataset import (
     MotionTwoStreamZstdDataset,
     VideoMotionDataset,
@@ -27,10 +28,10 @@ from util import (
     build_clip_text_bank_and_logit_scale,
     load_precomputed_text_bank_and_logit_scale,
     build_text_bank,
-    expand_manifest_args,
     apply_per_class_subset,
     load_clip_text_encoder,
     LogitScale,
+    resolve_single_manifest,
 )
 import argparse
 import torch
@@ -45,155 +46,8 @@ from torch.utils.data import DataLoader
 import time
 
 
-def resolve_single_manifest(manifest_arg: str):
-    if manifest_arg is None:
-        return None
-    s = str(manifest_arg).strip()
-    if not s:
-        return None
-    matches = expand_manifest_args([s])
-    if not matches:
-        raise FileNotFoundError(f"Validation manifest not found / glob matched nothing: {manifest_arg}")
-    if len(matches) > 1:
-        print(f"[WARN] multiple validation manifests matched; using first: {matches[0]}", flush=True)
-    return matches[0]
-
-
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root_dir", type=str, required=True)
-    ap.add_argument("--input_modality", type=str, default="motion", choices=["motion", "rgb"])
-
-    # Two-stream input size and temporal length
-    ap.add_argument("--img_size", type=int, default=224)
-    ap.add_argument("--mhi_frames", type=int, default=32)
-    ap.add_argument("--flow_frames", type=int, default=128, help="frames to produce 128 flows")
-    ap.add_argument("--flow_hw", type=int, default=112)
-    ap.add_argument("--second_type", type=str, default="flow")
-    ap.add_argument("--rgb_frames", type=int, default=64)
-    ap.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
-    ap.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
-
-    # MHI & flow params
-    ap.add_argument("--mhi_windows", type=str, default="15", help="comma list, e.g. 5,25")
-    ap.add_argument("--diff_threshold", type=float, default=15.0)
-    ap.add_argument("--flow_max_disp", type=float, default=20.0)
-    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
-    ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
-    ap.add_argument("--fb_levels", type=int, default=3)
-    ap.add_argument("--fb_winsize", type=int, default=15)
-    ap.add_argument("--fb_iterations", type=int, default=3)
-    ap.add_argument("--fb_poly_n", type=int, default=5)
-    ap.add_argument("--fb_poly_sigma", type=float, default=1.2)
-    ap.add_argument("--fb_flags", type=int, default=0)
-    ap.add_argument("--motion_img_resize", type=int, default=None)
-    ap.add_argument("--motion_flow_resize", type=int, default=None)
-    ap.add_argument("--motion_resize_mode", type=str, default="square", choices=["square", "short_side"])
-    ap.add_argument("--motion_eval_crop_mode", type=str, default="none", choices=["none", "random", "center"])
-
-    # Model / training
-    ap.add_argument("--embed_dim", type=int, default=512)
-    ap.add_argument("--fuse", type=str, default="avg_then_proj", choices=["avg_then_proj", "concat"])
-    ap.add_argument("--model", type=str, default="i3d", choices=["i3d", "x3d", "svt"])
-    ap.add_argument("--dropout", type=float, default=0.0)
-    ap.add_argument("--svt_patch_size", type=int, default=16)
-    ap.add_argument("--svt_depth", type=int, default=12)
-    ap.add_argument("--svt_num_heads", type=int, default=12)
-    ap.add_argument("--svt_mlp_ratio", type=float, default=4.0)
-    ap.add_argument("--svt_attn_drop", type=float, default=0.0)
-    ap.add_argument("--svt_proj_drop", type=float, default=0.0)
-    ap.add_argument("--svt_max_frames", type=int, default=None)
-    ap.add_argument("--svt_motion_mask_enabled", action="store_true")
-    ap.add_argument("--svt_motion_keep_ratio", type=float, default=0.5)
-    ap.add_argument("--svt_motion_score_mode", type=str, default="mhi_flow", choices=["mhi_flow", "l1_mean"])
-    ap.add_argument("--svt_motion_mhi_weight", type=float, default=1.0)
-    ap.add_argument("--svt_motion_eps", type=float, default=1e-6)
-
-    ap.add_argument("--batch_size", type=int, default=16)
-    ap.add_argument("--epochs", type=int, default=40)
-    ap.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "sgd"])
-    ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--sgd_momentum", type=float, default=0.9)
-    ap.add_argument("--sgd_nesterov", action="store_true")
-    ap.add_argument("--warmup_steps", type=int, default=4000)
-    ap.add_argument("--min_lr", type=float, default=1e-6)
-    ap.add_argument("--use_stems", action="store_true")
-    ap.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
-    ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
-    ap.add_argument("--use_projection", action="store_true",
-                    help="Enable separate fused clip/CE heads (LayerNorm+Linear for CLIP, Dropout+Linear for CE).")
-    ap.add_argument("--use_nonlinear_projection", action="store_true", help=argparse.SUPPRESS)  # legacy alias
-    ap.add_argument("--probability_hflip", type=float, default=0.5)
-    ap.add_argument("--max_probability_drop_frame", type=float, default=0.0, help="max probability for zeroing frames")
-    ap.add_argument("--probability_affine", type=float, default=0.0, help="rotate,translate,scale,shear")
-    ap.add_argument("--motion_spatial_crop",type=str,default="random",choices=["random", "motion"])
-    ap.add_argument("--class_text_json", type=str, default="")
-    ap.add_argument("--text_supervision_mode", type=str, default="class_proto",
-                    choices=["class_proto", "desc_soft_margin"])
-    ap.add_argument("--description_match_csv", type=str, default="",
-                    help="CSV with per-video matched descriptions for desc_soft_margin supervision.")
-    ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
-    ap.add_argument("--precomputed_text_embeddings", type=str, default="")
-    ap.add_argument("--precomputed_text_index", type=str, default="")
-    ap.add_argument("--precomputed_text_key", type=str, default="")
-    ap.add_argument("--apply_templates_to_class_texts", dest="apply_templates_to_class_texts", action="store_true",
-                    help="Apply CLIP templates to class labels/custom class texts.")
-    ap.add_argument("--no_apply_templates_to_class_texts", dest="apply_templates_to_class_texts", action="store_false",
-                    help="Disable templates for class labels/custom class texts.")
-    ap.set_defaults(apply_templates_to_class_texts=True)
-    ap.add_argument("--apply_templates_to_class_descriptions", action="store_true",
-                    help="Also apply CLIP templates to long-form descriptions (default: disabled).")
-    ap.add_argument("--class_text_label_weight", type=float, default=0.5,
-                    help="alpha in alpha*t_label + (1-alpha)*t_desc when descriptions are available.")
-    ap.add_argument("--label_smoothing", type=float, default=0.0)
-    ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
-    ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
-    ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
-    ap.add_argument("--lambda_rep_mix", type=float, default=0.0,
-                    help="Weight for representation-space mix consistency loss.")
-    ap.add_argument("--rep_mix_alpha", type=float, default=0.4,
-                    help="Beta(alpha, alpha) parameter for representation-space mix.")
-    ap.add_argument("--rep_mix_semantic", action="store_true",
-                    help="Select representation-mix partners from semantically close classes within the current batch.")
-    ap.add_argument("--rep_mix_semantic_topk", type=int, default=3,
-                    help="Randomly choose among top-k semantic partners found in-batch.")
-    ap.add_argument("--rep_mix_semantic_min_sim", type=float, default=-1.0,
-                    help="Minimum cosine similarity for semantic partner candidates; values <= -1 disable filtering.")
-    ap.add_argument("--lambda_clip_ce", type=float, default=1.0,
-                    help="Weight for CLIP-style CE over text bank similarities.")
-    ap.add_argument("--lambda_embed_l2", type=float, default=0.0,
-                    help="Weight for embedding regression using squared L2 distance against target class text embeddings.")
-    ap.add_argument("--lambda_embed_cos", type=float, default=0.0,
-                    help="Weight for cosine embedding alignment against target class text embeddings.")
-    ap.add_argument("--lambda_ce", type=float, default=0.0,
-                    help="Weight for auxiliary CE loss using a linear head on fused embeddings.")
-    ap.add_argument("--unfreeze_logit_scale", action="store_true",
-                    help="Freeze logit_scale parameter while keeping it in the optimizer param list for checkpoint compatibility.")
-
-    # Validation on raw videos (optional)
-    ap.add_argument("--val_modality", type=str, default="motion", choices=["motion", "rgb"])
-    ap.add_argument("--val_root_dir", type=str, default="")
-    ap.add_argument("--val_manifest", type=str, default="", help="Validation split manifest (file or glob).")
-    ap.add_argument("--val_class_id_to_label_csv", type=str, default="")
-    ap.add_argument("--val_class_text_json", type=str, default="")
-    ap.add_argument("--val_every", type=int, default=1, help="Run validation every N epochs (0 disables).")
-    ap.add_argument("--val_samples_per_class", type=int, default=0,
-                    help="If >0, subsample validation set to at most this many samples per class.")
-    ap.add_argument("--val_subset_seed", type=int, default=0,
-                    help="Seed for deterministic validation per-class subsampling.")
-
-    ap.add_argument("--num_workers", type=int, default=16)
-    ap.add_argument("--log_every", type=int, default=100)
-    ap.add_argument("--save_every", type=int, default=2000)
-    ap.add_argument("--seed", type=int, default=0)
-
-    ap.add_argument("--out_dir", type=str, default="out/train")
-    ap.add_argument("--tb_dir", type=str, default="runs")
-    ap.add_argument("--ckpt_dir", type=str, default="checkpoints")
-
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    args = ap.parse_args()
+    args = parse_train_args(default_device="cuda" if torch.cuda.is_available() else "cpu")
     args.text_bank_backend = str(args.text_bank_backend).lower()
     if args.text_bank_backend == "precomputed":
         if not args.precomputed_text_embeddings.strip() or not args.precomputed_text_index.strip():
@@ -207,6 +61,15 @@ def main():
             raise ValueError("--text_supervision_mode desc_soft_margin requires --class_text_json.")
         if not args.description_match_csv.strip():
             raise ValueError("--text_supervision_mode desc_soft_margin requires --description_match_csv.")
+    if args.embed_target_mode == "matched_desc":
+        if args.text_bank_backend != "clip":
+            raise ValueError("--embed_target_mode matched_desc requires --text_bank_backend clip.")
+        if not args.class_text_json.strip():
+            raise ValueError("--embed_target_mode matched_desc requires --class_text_json.")
+        if not args.description_match_csv.strip():
+            raise ValueError("--embed_target_mode matched_desc requires --description_match_csv.")
+    if int(args.motion_eval_num_views) < 1:
+        raise ValueError("--motion_eval_num_views must be >= 1.")
 
     if args.compute_second_only:
         if args.active_branch not in ("both", "second"):
@@ -214,6 +77,8 @@ def main():
         args.active_branch = "second"
     args.compute_second_only = (args.active_branch == "second")
     if args.use_nonlinear_projection:
+        args.use_projection = True
+    if args.dual_projection_heads:
         args.use_projection = True
 
     print(args)
@@ -315,10 +180,18 @@ def main():
 
         from eval import evaluate_one_split
 
-        val_manifest_path = resolve_single_manifest(args.val_manifest)
+        val_manifest_path = resolve_single_manifest(args.val_manifest, label="Validation manifest")
         val_class_id_to_label_csv = args.val_class_id_to_label_csv.strip() or None
         data_dtype = torch.float16 if device.type == "cuda" else torch.float32
         val_modality = str(args.val_modality).lower()
+        val_motion_crop_mode = str(args.motion_eval_crop_mode).lower()
+        if int(args.motion_eval_num_views) > 1 and val_motion_crop_mode == "none":
+            print(
+                "[VAL] --motion_eval_num_views > 1 requires spatial cropping; "
+                "overriding motion_eval_crop_mode none -> center.",
+                flush=True,
+            )
+            val_motion_crop_mode = "center"
 
         if val_modality == "rgb":
             if args.active_branch == "second":
@@ -361,7 +234,8 @@ def main():
                 motion_img_resize=args.motion_img_resize,
                 motion_flow_resize=args.motion_flow_resize,
                 motion_resize_mode=args.motion_resize_mode,
-                motion_crop_mode=args.motion_eval_crop_mode,
+                motion_crop_mode=val_motion_crop_mode,
+                num_views=int(args.motion_eval_num_views),
                 out_dtype=data_dtype,
                 dataset_split_txt=val_manifest_path,
                 class_id_to_label_csv=val_class_id_to_label_csv,
@@ -466,6 +340,11 @@ def main():
     
     train_desc_match_resolver = None
     class_proto_text_bank = None
+    embed_target_text_bank_loss = None
+    label_target_text_bank_loss = None
+    head_kl_text_bank_loss = None
+    embed_target_desc_count = 0
+    desc_text_bank = None
 
     if args.text_supervision_mode == "desc_soft_margin":
         clip_text_model, clip_tokenize_fn = load_clip_text_encoder(device)
@@ -508,6 +387,9 @@ def main():
             apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
         )
         clip_text_bank = desc_text_bank.text_bank.to(dtype=torch.float16).to(device).detach()
+        embed_target_text_bank_loss = clip_text_bank.float().detach()
+        head_kl_text_bank_loss = embed_target_text_bank_loss
+        embed_target_desc_count = int(clip_text_bank.shape[0])
         train_desc_match_resolver = build_description_match_resolver(
             csv_path=args.description_match_csv,
             root_dir=args.root_dir,
@@ -545,8 +427,65 @@ def main():
             apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
         )
         class_proto_text_bank = clip_text_bank
+        if args.embed_target_mode == "matched_desc":
+            clip_text_model, clip_tokenize_fn = load_clip_text_encoder(device)
+            desc_text_bank = build_description_text_bank(
+                clip_model=clip_text_model,
+                tokenize_fn=clip_tokenize_fn,
+                classnames=list(dataset.classnames),
+                device=device,
+                templates=[
+                    "{}",
+                    "a video of {}",
+                    "a video of a person {}",
+                    "a person is {}",
+                    "someone is {}",
+                    "the action of {}",
+                    "a clip of {}",
+                ],
+                class_texts=class_texts,
+                apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+            )
+            embed_target_text_bank_loss = desc_text_bank.text_bank.float().to(device).detach()
+            head_kl_text_bank_loss = embed_target_text_bank_loss
+            embed_target_desc_count = int(embed_target_text_bank_loss.shape[0])
+            train_desc_match_resolver = build_description_match_resolver(
+                csv_path=args.description_match_csv,
+                root_dir=args.root_dir,
+                classnames=dataset.classnames,
+                class_to_desc_indices=desc_text_bank.class_to_desc_indices,
+            )
+            train_desc_match_resolver.validate_paths(dataset.paths)
+            print(
+                f"[DESC-TGT] matched_desc embed targets enabled: descriptions={embed_target_desc_count} "
+                f"per_class={desc_text_bank.descriptions_per_class} "
+                f"margin_p50={train_desc_match_resolver.margin_p50:.6f} "
+                f"margin_p90={train_desc_match_resolver.margin_p90:.6f}",
+                    flush=True,
+                )
     if class_proto_text_bank is None:
         class_proto_text_bank = clip_text_bank
+    if embed_target_text_bank_loss is None:
+        embed_target_text_bank_loss = clip_text_bank.float().detach()
+        embed_target_desc_count = int(clip_text_bank.shape[0])
+    if head_kl_text_bank_loss is None:
+        head_kl_text_bank_loss = embed_target_text_bank_loss if embed_target_text_bank_loss is not None else clip_text_bank.float().detach()
+    if args.embed_target_label_mix_weight > 0:
+        if args.text_bank_backend != "clip":
+            raise ValueError("--embed_target_label_mix_weight requires --text_bank_backend clip.")
+        if "clip_text_model" not in locals() or "clip_tokenize_fn" not in locals():
+            clip_text_model, clip_tokenize_fn = load_clip_text_encoder(device)
+        label_target_text_bank_loss = build_text_bank(
+            clip_model=clip_text_model,
+            tokenize_fn=clip_tokenize_fn,
+            classnames=list(dataset.classnames),
+            device=device,
+            templates=[args.embed_target_label_template],
+            class_texts=None,
+            apply_templates_to_class_texts=True,
+            class_text_label_weight=1.0,
+            apply_templates_to_class_descriptions=False,
+        ).float().to(device).detach()
     # Frozen by default
     if not args.unfreeze_logit_scale:
         for p in logit_scale.parameters():
@@ -571,12 +510,34 @@ def main():
         raise ValueError("--rep_mix_alpha must be > 0 when --lambda_rep_mix > 0")
     if args.rep_mix_semantic_topk <= 0:
         raise ValueError("--rep_mix_semantic_topk must be >= 1")
+    if args.lambda_head_kl < 0:
+        raise ValueError("--lambda_head_kl must be >= 0")
+    if args.head_kl_temperature <= 0:
+        raise ValueError("--head_kl_temperature must be > 0")
+    if not (0.0 <= args.embed_target_label_mix_weight <= 1.0):
+        raise ValueError("--embed_target_label_mix_weight must be in [0, 1]")
     if args.lambda_ce > 0 and args.model in ("i3d", "x3d") and not args.use_projection:
         raise ValueError("--lambda_ce > 0 requires --use_projection to enable cls_head.")
-    if (args.lambda_clip_ce + args.lambda_embed_l2 + args.lambda_embed_cos + args.lambda_ce + args.lambda_rep_mix) <= 0:
+    if args.lambda_head_kl > 0 and not args.dual_projection_heads:
+        raise ValueError("--lambda_head_kl > 0 requires --dual_projection_heads.")
+    if args.embed_target_label_mix_weight > 0 and not (
+        args.text_supervision_mode == "desc_soft_margin" or args.embed_target_mode == "matched_desc"
+    ):
+        raise ValueError(
+            "--embed_target_label_mix_weight requires description-based embed targets "
+            "(desc_soft_margin or --embed_target_mode matched_desc)."
+        )
+    if (
+        args.lambda_clip_ce
+        + args.lambda_embed_l2
+        + args.lambda_embed_cos
+        + args.lambda_ce
+        + args.lambda_rep_mix
+        + args.lambda_head_kl
+    ) <= 0:
         raise ValueError(
             "At least one loss weight must be > 0 among "
-            "--lambda_clip_ce, --lambda_embed_l2, --lambda_embed_cos, --lambda_ce, --lambda_rep_mix."
+            "--lambda_clip_ce, --lambda_embed_l2, --lambda_embed_cos, --lambda_ce, --lambda_rep_mix, --lambda_head_kl."
         )
 
     # Student model
@@ -589,6 +550,7 @@ def main():
             dropout=args.dropout,
             use_stems=args.use_stems,
             use_projection=args.use_projection,
+            dual_projection_heads=args.dual_projection_heads,
             num_classes=num_classes if args.lambda_ce > 0 else 0,
             active_branch=args.active_branch,
         ).to(device)
@@ -605,6 +567,7 @@ def main():
             dropout=args.dropout,
             active_branch=args.active_branch,
             use_projection=args.use_projection,
+            dual_projection_heads=args.dual_projection_heads,
             num_classes=num_classes if args.lambda_ce > 0 else 0,
         ).to(device)
     elif args.model == "svt":
@@ -633,6 +596,8 @@ def main():
             motion_score_mode=args.svt_motion_score_mode,
             motion_mhi_weight=args.svt_motion_mhi_weight,
             motion_eps=args.svt_motion_eps,
+            use_projection=args.use_projection,
+            dual_projection_heads=args.dual_projection_heads,
             num_classes=num_classes if args.lambda_ce > 0 else 0,
             active_branch=args.active_branch,
         ).to(device)
@@ -708,6 +673,7 @@ def main():
     global_running_clip_loss = 0.0
     global_running_embed_l2 = 0.0
     global_running_embed_cos = 0.0
+    global_running_head_kl = 0.0
     global_running_rep_mix = 0.0
     global_running_ce_loss = 0.0
     global_n_logs = 0
@@ -719,6 +685,7 @@ def main():
         running_clip_loss = 0.0
         running_embed_l2 = 0.0
         running_embed_cos = 0.0
+        running_head_kl = 0.0
         running_rep_mix = 0.0
         running_ce_loss = 0.0
         n_logs = 0
@@ -767,7 +734,7 @@ def main():
                             y_max_frac=args.temporal_mixup_y_max,
                         )
 
-                if args.text_supervision_mode == "desc_soft_margin":
+                if args.text_supervision_mode == "desc_soft_margin" or args.embed_target_mode == "matched_desc":
                     labels_soft_desc, matched_desc_indices = train_desc_match_resolver.build_targets(
                         sample_ids,
                         device=labels.device,
@@ -775,13 +742,14 @@ def main():
                     )
                     matched_desc_onehot = F.one_hot(
                         matched_desc_indices,
-                        num_classes=int(clip_text_bank.shape[0]),
+                        num_classes=embed_target_desc_count,
                     ).to(dtype=torch.float32)
-                    if mix_pair_idx is not None and mix_lam is not None:
+                    if args.text_supervision_mode == "desc_soft_margin" and mix_pair_idx is not None and mix_lam is not None:
                         labels_soft_desc = (
                             mix_lam * labels_soft_desc +
                             (1.0 - mix_lam) * labels_soft_desc.index_select(0, mix_pair_idx)
                         )
+                    if mix_pair_idx is not None and mix_lam is not None:
                         matched_desc_onehot = (
                             mix_lam * matched_desc_onehot +
                             (1.0 - mix_lam) * matched_desc_onehot.index_select(0, mix_pair_idx)
@@ -789,37 +757,54 @@ def main():
 
                 out = model(mhi_top, flow_bot)
                 emb_fuse = out["emb_fuse"]
-                if emb_fuse.shape[-1] != clip_text_bank.shape[-1]:
+                emb_fuse_clip = out.get("emb_fuse_clip", emb_fuse)
+                emb_fuse_embed = out.get("emb_fuse_embed", emb_fuse_clip)
+                if emb_fuse_clip.shape[-1] != clip_text_bank.shape[-1]:
                     raise ValueError(
-                        f"Model embedding dim {emb_fuse.shape[-1]} does not match text bank dim {clip_text_bank.shape[-1]}"
+                        f"Model embedding dim {emb_fuse_clip.shape[-1]} does not match text bank dim {clip_text_bank.shape[-1]}"
                     )
                 
                 s = logit_scale().exp()
 
-                def ce_from_emb(emb):
-                    emb = F.normalize(emb, dim=-1)
-                    logits = s * (emb @ clip_text_bank.t())
+                def logits_from_emb(emb, text_bank, *, temperature: float = 1.0):
+                    emb = F.normalize(emb.float(), dim=-1)
+                    bank = text_bank.float()
+                    scale = s.float() / float(temperature)
+                    return scale * (emb @ bank.t())
+
+                def ce_from_logits(logits):
                     if args.text_supervision_mode == "desc_soft_margin":
                         return soft_target_cross_entropy(logits, labels_soft_desc)
                     if labels_soft_class is None:
                         return F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
                     return soft_target_cross_entropy(logits, labels_soft_class)
 
+                logits_clip_head = logits_from_emb(emb_fuse_clip, clip_text_bank)
                 if args.lambda_clip_ce > 0:
-                    loss_fuse = ce_from_emb(emb_fuse)
+                    loss_fuse = ce_from_logits(logits_clip_head)
                     loss_clip = loss_fuse
                 else:
-                    loss_fuse = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
+                    loss_fuse = torch.zeros((), device=emb_fuse_clip.device, dtype=emb_fuse_clip.dtype)
                     loss_clip = loss_fuse
 
                 if args.lambda_embed_l2 > 0 or args.lambda_embed_cos > 0:
-                    if args.text_supervision_mode == "desc_soft_margin":
-                        target_emb = matched_desc_onehot.to(dtype=clip_text_bank_loss.dtype) @ clip_text_bank_loss
+                    if args.text_supervision_mode == "desc_soft_margin" or args.embed_target_mode == "matched_desc":
+                        target_emb = matched_desc_onehot.to(dtype=embed_target_text_bank_loss.dtype) @ embed_target_text_bank_loss
                     elif labels_soft_class is None:
                         target_emb = clip_text_bank_loss.index_select(0, labels)
                     else:
                         target_emb = labels_soft_class.to(dtype=clip_text_bank_loss.dtype) @ clip_text_bank_loss
-                    pred_emb = emb_fuse.float()
+                    if (
+                        label_target_text_bank_loss is not None
+                        and args.embed_target_label_mix_weight > 0.0
+                    ):
+                        if labels_soft_class is None:
+                            label_emb = label_target_text_bank_loss.index_select(0, labels)
+                        else:
+                            label_emb = labels_soft_class.to(dtype=label_target_text_bank_loss.dtype) @ label_target_text_bank_loss
+                        mix_w = float(args.embed_target_label_mix_weight)
+                        target_emb = (1.0 - mix_w) * target_emb + mix_w * label_emb
+                    pred_emb = emb_fuse_embed.float()
                     pred_emb = F.normalize(pred_emb, dim=-1)
                     target_emb = F.normalize(target_emb, dim=-1)
                     
@@ -827,14 +812,37 @@ def main():
                         diff = pred_emb - target_emb
                         loss_embed_l2 = (diff * diff).sum(dim=-1).mean()
                     else:
-                        loss_embed_l2 = torch.zeros((), device=emb_fuse.device, dtype=pred_emb.dtype)
+                        loss_embed_l2 = torch.zeros((), device=emb_fuse_embed.device, dtype=pred_emb.dtype)
                     if args.lambda_embed_cos > 0:
                         loss_embed_cos = (1.0 - F.cosine_similarity(pred_emb, target_emb, dim=-1)).mean()
                     else:
-                        loss_embed_cos = torch.zeros((), device=emb_fuse.device, dtype=pred_emb.dtype)
+                        loss_embed_cos = torch.zeros((), device=emb_fuse_embed.device, dtype=pred_emb.dtype)
                 else:
-                    loss_embed_l2 = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
-                    loss_embed_cos = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
+                    loss_embed_l2 = torch.zeros((), device=emb_fuse_embed.device, dtype=torch.float32)
+                    loss_embed_cos = torch.zeros((), device=emb_fuse_embed.device, dtype=torch.float32)
+
+                if args.lambda_head_kl > 0:
+                    logits_head_clip_kl = logits_from_emb(
+                        emb_fuse_clip,
+                        head_kl_text_bank_loss,
+                        temperature=args.head_kl_temperature,
+                    )
+                    logits_head_embed_kl = logits_from_emb(
+                        emb_fuse_embed,
+                        head_kl_text_bank_loss,
+                        temperature=args.head_kl_temperature,
+                    )
+                    log_p = F.log_softmax(logits_head_clip_kl, dim=-1)
+                    log_q = F.log_softmax(logits_head_embed_kl, dim=-1)
+                    p = log_p.exp()
+                    q = log_q.exp()
+                    temp_sq = float(args.head_kl_temperature) ** 2
+                    loss_head_kl = 0.5 * temp_sq * (
+                        F.kl_div(log_p, q, reduction="batchmean") +
+                        F.kl_div(log_q, p, reduction="batchmean")
+                    )
+                else:
+                    loss_head_kl = torch.zeros((), device=emb_fuse_clip.device, dtype=torch.float32)
 
                 if args.lambda_ce > 0:
                     logits_ce = out.get("logits_cls", None)
@@ -849,7 +857,7 @@ def main():
 
                 if args.lambda_rep_mix > 0:
                     loss_rep_mix = representation_mix_consistency_loss(
-                        emb_fuse,
+                        emb_fuse_clip,
                         labels,
                         class_proto_text_bank,
                         alpha=args.rep_mix_alpha,
@@ -866,6 +874,7 @@ def main():
                     args.lambda_clip_ce * loss_clip
                     + args.lambda_embed_l2 * loss_embed_l2
                     + args.lambda_embed_cos * loss_embed_cos
+                    + args.lambda_head_kl * loss_head_kl
                     + args.lambda_rep_mix * loss_rep_mix
                     + args.lambda_ce * loss_ce
                 )
@@ -893,6 +902,7 @@ def main():
                         writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
                         writer.add_scalar("loss/embed_l2", float(loss_embed_l2.item()), global_step)
                         writer.add_scalar("loss/embed_cos", float(loss_embed_cos.item()), global_step)
+                        writer.add_scalar("loss/head_kl", float(loss_head_kl.item()), global_step)
                         writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
                         writer.add_scalar("loss/ce", float(loss_ce.item()), global_step)
                         writer.add_scalar("params/lr", opt.param_groups[0]["lr"], global_step)
@@ -904,6 +914,7 @@ def main():
                 running_clip_loss += float(loss_clip.item())
                 running_embed_l2 += float(loss_embed_l2.item())
                 running_embed_cos += float(loss_embed_cos.item())
+                running_head_kl += float(loss_head_kl.item())
                 running_rep_mix += float(loss_rep_mix.item())
                 running_ce_loss += float(loss_ce.item())
                 n_logs += 1
@@ -911,6 +922,7 @@ def main():
                 global_running_clip_loss += float(loss_clip.item())
                 global_running_embed_l2 += float(loss_embed_l2.item())
                 global_running_embed_cos += float(loss_embed_cos.item())
+                global_running_head_kl += float(loss_head_kl.item())
                 global_running_rep_mix += float(loss_rep_mix.item())
                 global_running_ce_loss += float(loss_ce.item())
                 global_n_logs += 1
@@ -922,6 +934,7 @@ def main():
                     running_avg_clip = global_running_clip_loss / max(global_n_logs, 1)
                     running_avg_embed_l2 = global_running_embed_l2 / max(global_n_logs, 1)
                     running_avg_embed_cos = global_running_embed_cos / max(global_n_logs, 1)
+                    running_avg_head_kl = global_running_head_kl / max(global_n_logs, 1)
                     running_avg_rep_mix = global_running_rep_mix / max(global_n_logs, 1)
                     running_avg_ce = global_running_ce_loss / max(global_n_logs, 1)
                     msg = (
@@ -930,6 +943,7 @@ def main():
                         f"clip={running_avg_clip:.4f} "
                         f"embed_l2={running_avg_embed_l2:.4f} "
                         f"embed_cos={running_avg_embed_cos:.4f} "
+                        f"head_kl={running_avg_head_kl:.4f} "
                         f"rep_mix={running_avg_rep_mix:.4f} "
                         f"ce={running_avg_ce:.4f} "
                         f"time={elapsed/60:.1f}m"
@@ -966,6 +980,7 @@ def main():
                 f"clip={running_clip_loss/n_logs:.4f} "
                 f"embed_l2={running_embed_l2/n_logs:.4f} "
                 f"embed_cos={running_embed_cos/n_logs:.4f} "
+                f"head_kl={running_head_kl/n_logs:.4f} "
                 f"rep_mix={running_rep_mix/n_logs:.4f} "
                 f"ce={running_ce_loss/n_logs:.4f}"
             )

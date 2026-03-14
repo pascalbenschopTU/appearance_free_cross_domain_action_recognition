@@ -527,15 +527,33 @@ def _sample_motion_crop_anchor(crop_mode: str) -> Optional[Tuple[float, float]]:
     return float(torch.rand(()).item()), float(torch.rand(()).item())
 
 
+def _multi_view_motion_crop_anchors(crop_mode: str, num_views: int) -> List[Optional[Tuple[float, float]]]:
+    num_views = max(1, int(num_views))
+    crop_mode = str(crop_mode).lower()
+    if num_views == 1:
+        return [_sample_motion_crop_anchor(crop_mode)]
+    if crop_mode == "none":
+        return [None] * num_views
+    if num_views == 2:
+        xs = [0.0, 1.0]
+    elif num_views == 3:
+        xs = [0.0, 0.5, 1.0]
+    else:
+        xs = np.linspace(0.0, 1.0, num=num_views, dtype=np.float32).tolist()
+    return [(float(x), 0.5) for x in xs]
+
+
 def _resize_and_crop_square(
     frame: np.ndarray,
     *,
-    resize_hw: int,
+    resize_hw: Optional[int],
     out_hw: int,
     resize_mode: str,
     crop_mode: str,
     crop_anchor: Optional[Tuple[float, float]],
 ) -> np.ndarray:
+    if resize_hw is None:
+        resize_hw = int(out_hw)
     if resize_hw <= 0 or out_hw <= 0:
         raise ValueError(f"resize/out sizes must be > 0, got resize={resize_hw}, out={out_hw}")
 
@@ -607,6 +625,7 @@ def compute_mhi_and_flow_stream(
     motion_flow_resize: Optional[int] = None,
     motion_resize_mode: str = "square",
     motion_crop_mode: str = "none",
+    crop_anchor: Optional[Tuple[float, float]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Returns:
@@ -617,7 +636,7 @@ def compute_mhi_and_flow_stream(
     flow_backend = str(flow_backend).lower()
     if flow_backend != "farneback":
         raise ValueError(f"Unsupported flow_backend: {flow_backend}")
-    crop_anchor = _sample_motion_crop_anchor(motion_crop_mode)
+    crop_anchor = crop_anchor if crop_anchor is not None else _sample_motion_crop_anchor(motion_crop_mode)
     use_legacy_resize_path = (
         motion_crop_mode == "none"
         and motion_img_resize == img_size
@@ -748,6 +767,7 @@ class VideoMotionDataset(Dataset):
         motion_flow_resize: Optional[int] = None,
         motion_resize_mode: str = "square",
         motion_crop_mode: str = "none",
+        num_views: int = 1,
         yolo_model: str = "yolo11n.pt",
         yolo_conf: float = 0.25,
         yolo_device: Optional[str] = None,
@@ -778,6 +798,7 @@ class VideoMotionDataset(Dataset):
         self.motion_flow_resize = motion_flow_resize
         self.motion_resize_mode = motion_resize_mode
         self.motion_crop_mode = motion_crop_mode
+        self.num_views = max(1, int(num_views))
         self.yolo_model = str(yolo_model)
         self.yolo_conf = float(yolo_conf)
         self.yolo_device = yolo_device
@@ -816,29 +837,46 @@ class VideoMotionDataset(Dataset):
         y = self.labels[idx]
         try:
             roi_xyxy = self._get_roi_xyxy(path)
-            mhi, flow = compute_mhi_and_flow_stream(
-                path,
-                mhi_windows=self.mhi_windows,
-                diff_threshold=self.diff_threshold,
-                img_size=self.img_size,
-                mhi_frames=self.mhi_frames,
-                flow_hw=self.flow_hw,
-                flow_frames=self.flow_frames,
-                flow_backend=self.flow_backend,
-                fb_params=self.fb_params,
-                flow_max_disp=self.flow_max_disp,
-                flow_normalize=self.flow_normalize,
-                roi_xyxy=roi_xyxy,
-                motion_img_resize=self.motion_img_resize,
-                motion_flow_resize=self.motion_flow_resize,
-                motion_resize_mode=self.motion_resize_mode,
-                motion_crop_mode=self.motion_crop_mode,
-                out_dtype=self.out_dtype,
-            )
+            crop_anchors = _multi_view_motion_crop_anchors(self.motion_crop_mode, self.num_views)
+            mhi_views = []
+            flow_views = []
+            for crop_anchor in crop_anchors:
+                mhi, flow = compute_mhi_and_flow_stream(
+                    path,
+                    mhi_windows=self.mhi_windows,
+                    diff_threshold=self.diff_threshold,
+                    img_size=self.img_size,
+                    mhi_frames=self.mhi_frames,
+                    flow_hw=self.flow_hw,
+                    flow_frames=self.flow_frames,
+                    flow_backend=self.flow_backend,
+                    fb_params=self.fb_params,
+                    flow_max_disp=self.flow_max_disp,
+                    flow_normalize=self.flow_normalize,
+                    roi_xyxy=roi_xyxy,
+                    motion_img_resize=self.motion_img_resize,
+                    motion_flow_resize=self.motion_flow_resize,
+                    motion_resize_mode=self.motion_resize_mode,
+                    motion_crop_mode=self.motion_crop_mode,
+                    crop_anchor=crop_anchor,
+                    out_dtype=self.out_dtype,
+                )
+                mhi_views.append(mhi)
+                flow_views.append(flow)
+            if self.num_views == 1:
+                mhi = mhi_views[0]
+                flow = flow_views[0]
+            else:
+                mhi = torch.stack(mhi_views, dim=0)
+                flow = torch.stack(flow_views, dim=0)
         except Exception:
             C = len(self.mhi_windows)
-            mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
-            flow = torch.zeros((2, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
+            if self.num_views == 1:
+                mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
+                flow = torch.zeros((2, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
+            else:
+                mhi = torch.zeros((self.num_views, C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
+                flow = torch.zeros((self.num_views, 2, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
         return mhi, flow, y, path
 
 
@@ -902,6 +940,7 @@ def compute_mhi_and_paired_frames(
     motion_flow_resize: Optional[int] = None,
     motion_resize_mode: str = "square",
     motion_crop_mode: str = "none",
+    crop_anchor: Optional[Tuple[float, float]] = None,
     out_mhi_dtype=torch.float16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -911,7 +950,7 @@ def compute_mhi_and_paired_frames(
     All returned tensors are CPU.
     """
     assert flow_hw % 8 == 0, "flow_hw must be divisible by 8 to avoid padding in RAFT"
-    crop_anchor = _sample_motion_crop_anchor(motion_crop_mode)
+    crop_anchor = crop_anchor if crop_anchor is not None else _sample_motion_crop_anchor(motion_crop_mode)
     use_legacy_resize_path = (
         motion_crop_mode == "none"
         and motion_img_resize == img_size
@@ -1043,6 +1082,7 @@ class VideoMHIFramesDataset(Dataset):
         motion_flow_resize: Optional[int] = None,
         motion_resize_mode: str = "square",
         motion_crop_mode: str = "none",
+        num_views: int = 1,
         out_mhi_dtype=torch.float16,
         dataset_split_txt=None,
         class_id_to_label_csv=None,
@@ -1060,6 +1100,7 @@ class VideoMHIFramesDataset(Dataset):
         self.motion_flow_resize = motion_flow_resize
         self.motion_resize_mode = motion_resize_mode
         self.motion_crop_mode = motion_crop_mode
+        self.num_views = max(1, int(num_views))
         self.out_mhi_dtype = out_mhi_dtype
 
     def __len__(self):
@@ -1069,24 +1110,41 @@ class VideoMHIFramesDataset(Dataset):
         path = self.paths[idx]
         y = self.labels[idx]
         try:
-            mhi, pairs = compute_mhi_and_paired_frames(
-                path,
-                mhi_windows=self.mhi_windows,
-                diff_threshold=self.diff_threshold,
-                img_size=self.img_size,
-                mhi_frames=self.mhi_frames,
-                flow_hw=self.flow_hw,
-                flow_pairs=self.flow_pairs,
-                motion_img_resize=self.motion_img_resize,
-                motion_flow_resize=self.motion_flow_resize,
-                motion_resize_mode=self.motion_resize_mode,
-                motion_crop_mode=self.motion_crop_mode,
-                out_mhi_dtype=self.out_mhi_dtype,
-            )
+            crop_anchors = _multi_view_motion_crop_anchors(self.motion_crop_mode, self.num_views)
+            mhi_views = []
+            pairs_views = []
+            for crop_anchor in crop_anchors:
+                mhi, pairs = compute_mhi_and_paired_frames(
+                    path,
+                    mhi_windows=self.mhi_windows,
+                    diff_threshold=self.diff_threshold,
+                    img_size=self.img_size,
+                    mhi_frames=self.mhi_frames,
+                    flow_hw=self.flow_hw,
+                    flow_pairs=self.flow_pairs,
+                    motion_img_resize=self.motion_img_resize,
+                    motion_flow_resize=self.motion_flow_resize,
+                    motion_resize_mode=self.motion_resize_mode,
+                    motion_crop_mode=self.motion_crop_mode,
+                    crop_anchor=crop_anchor,
+                    out_mhi_dtype=self.out_mhi_dtype,
+                )
+                mhi_views.append(mhi)
+                pairs_views.append(pairs)
+            if self.num_views == 1:
+                mhi = mhi_views[0]
+                pairs = pairs_views[0]
+            else:
+                mhi = torch.stack(mhi_views, dim=0)
+                pairs = torch.stack(pairs_views, dim=0)
         except Exception:
             C = len(self.mhi_windows)
-            mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_mhi_dtype)
-            pairs = torch.zeros((self.flow_pairs, 2, 3, self.flow_hw, self.flow_hw), dtype=torch.uint8)
+            if self.num_views == 1:
+                mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_mhi_dtype)
+                pairs = torch.zeros((self.flow_pairs, 2, 3, self.flow_hw, self.flow_hw), dtype=torch.uint8)
+            else:
+                mhi = torch.zeros((self.num_views, C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_mhi_dtype)
+                pairs = torch.zeros((self.num_views, self.flow_pairs, 2, 3, self.flow_hw, self.flow_hw), dtype=torch.uint8)
 
         return mhi, pairs, y, path
 

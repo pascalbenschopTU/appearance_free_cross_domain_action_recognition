@@ -1,0 +1,507 @@
+{
+  "ApplyEyeMakeup": [
+    "Small precise hand movement near one eye with short repeated strokes.",
+    "Delicate wrist and finger action around the eyelid area with brief pauses.",
+    "Careful grooming motion near the face using fine repeated touches."
+  ],
+  "ApplyLipstick": [
+    "Short controlled hand movement across the lips with steady wrist motion.",
+    "Precise repeated strokes near the mouth while the hand tracks along the lip line.",
+    "Small cosmetic motion focused on the lower face with careful finger control."
+  ],
+  "Archery": [
+    "Pulling the arms apart to draw tension before a sharp forward release.",
+    "Steady upper-body hold followed by controlled arm extension and release.",
+    "Aiming posture with one arm extended and the other drawing back in a smooth motion."
+  ],
+  "BabyCrawling": [
+    "Low forward movement with alternating hand and knee placement.",
+    "Rhythmic crawling motion close to the ground using hands and knees.",
+    "Short repeated body shifts forward with coordinated arm and leg support."
+  ],
+  "BalanceBeam": [
+    "Careful stepping along a narrow line with arms adjusting for balance.",
+    "Slow controlled foot placement with subtle side-to-side balance corrections.",
+    "Tight full-body control while moving forward on a narrow elevated surface."
+  ],
+  "BandMarching": [
+    "Synchronized forward stepping in formation with repeated leg rhythm.",
+    "Coordinated marching motion with upright posture and steady group timing.",
+    "Uniform walking cadence with repeated arm and leg movement across a formation."
+  ],
+  "BaseballPitch": [
+    "A winding arm action building into a fast overhand release.",
+    "Forward stride with torso rotation and a sharp throwing follow-through.",
+    "Explosive upper-body motion that transfers from the legs into a quick arm release."
+  ],
+  "Basketball": [
+    "Quick running and dribbling movement followed by an upward shooting action.",
+    "Repeated ball control near the ground with sudden changes into a shot or pass.",
+    "Fast full-body court movement with coordinated hand and footwork."
+  ],
+  "BasketballDunk": [
+    "Explosive jump toward the rim with one or both arms extending overhead.",
+    "Fast approach steps followed by a powerful upward leap and downward finish.",
+    "Strong takeoff and overhead arm motion ending in a forceful scoring action."
+  ],
+  "BenchPress": [
+    "Repeated lowering and pressing motion of the arms while lying on a bench.",
+    "Controlled chest-level descent followed by a straight upward push.",
+    "Steady upper-body lifting pattern with both arms extending against resistance."
+  ],
+  "Biking": [
+    "Continuous pedaling motion with cyclical leg movement and forward travel.",
+    "Rhythmic lower-body rotation while the hands keep a steady steering position.",
+    "Repeated leg drive with balanced upper-body posture during riding."
+  ],
+  "Billiards": [
+    "Small precise arm motion guiding a cue in a straight forward strike.",
+    "Controlled upper-body lean with a measured push of the leading hand and arm.",
+    "Brief aiming pause followed by a smooth linear striking motion across the table."
+  ],
+  "BlowDryHair": [
+    "Repeated hand movement around the head with small directional sweeps.",
+    "Upper-body grooming motion near the hairline with controlled wrist positioning.",
+    "Alternating passes around the head with steady arm movement and short pauses."
+  ],
+  "BlowingCandles": [
+    "Forward lean and brief exhalation toward a small target in front of the face.",
+    "Compact upper-body movement ending in a short blowing action.",
+    "Head and mouth directed forward with a quick burst of air to extinguish flames."
+  ],
+  "BodyWeightSquats": [
+    "Repeated lowering and rising of the body with bent knees and upright balance.",
+    "Vertical up-and-down exercise movement driven by the hips and legs.",
+    "Controlled descent followed by a strong return to standing."
+  ],
+  "Bowling": [
+    "A smooth arm swing and forward step ending in a low rolling release.",
+    "Approach movement with one arm pendulum-like before letting the ball travel forward.",
+    "Coordinated lower-body slide and underhand release down the lane."
+  ],
+  "BoxingPunchingBag": [
+    "Repeated forward punching motion into a suspended target with quick recoil.",
+    "Fast alternating arm strikes with shifting footwork and guarded posture.",
+    "Rhythmic upper-body impact motion combining jabs, crosses, and body rotation."
+  ],
+  "BoxingSpeedBag": [
+    "Very rapid compact hand strikes in a tight repeated rhythm.",
+    "Quick alternating punches with minimal arm travel and steady shoulder motion.",
+    "Fast cyclical striking pattern close to the body with continuous tempo."
+  ],
+  "BreastStroke": [
+    "Symmetrical arm sweeps and frog-like leg kicks in a repeated swimming rhythm.",
+    "Forward glide phases alternating with wide arm pulls and compact kicks.",
+    "Cyclical full-body water movement centered on simultaneous arm and leg action."
+  ],
+  "BrushingTeeth": [
+    "Small repeated hand motion near the mouth with quick wrist strokes.",
+    "Short rhythmic brushing action focused on the lower face.",
+    "Compact arm movement around the mouth during repeated cleaning motion."
+  ],
+  "CleanAndJerk": [
+    "A powerful upward pull followed by a quick reset into an overhead drive.",
+    "Explosive full-body lift in two phases with fast leg and arm extension.",
+    "Strong upward acceleration from the floor into a second sharp overhead motion."
+  ],
+  "CliffDiving": [
+    "A jump from height followed by a long downward body trajectory toward water.",
+    "Brief takeoff from an edge with controlled airborne descent into the water below.",
+    "Extended falling motion after leaving a high platform or cliff."
+  ],
+  "CricketBowling": [
+    "A run-up flowing into a circular overarm release with full follow-through.",
+    "Forward approach steps followed by a whipping arm motion and planted front leg.",
+    "Coordinated whole-body delivery action ending in a fast release."
+  ],
+  "CricketShot": [
+    "A bat swing timed to meet an incoming ball with torso rotation and follow-through.",
+    "Quick stepping and striking motion using both arms and a controlled body turn.",
+    "Measured setup followed by a sharp lateral or forward batting action."
+  ],
+  "CuttingInKitchen": [
+    "Repeated downward hand motion with short controlled chopping strokes.",
+    "Rhythmic slicing action over a surface with steady wrist and forearm movement.",
+    "Fine repeated cutting motion using one hand while the upper body leans forward."
+  ],
+  "Diving": [
+    "An upward or forward takeoff followed by a streamlined entry into water.",
+    "Controlled airborne body shape ending in a downward water entry.",
+    "Jumping motion that transitions into a clean head-first or body-first descent."
+  ],
+  "Drumming": [
+    "Repeated arm and wrist strikes in alternating rhythmic patterns.",
+    "Fast up-and-down hand motion over a percussion setup with steady tempo.",
+    "Coordinated upper-body rhythm driven by repeated stick or hand impacts."
+  ],
+  "Fencing": [
+    "Quick lunges forward with one arm extending and the rear leg pushing off.",
+    "Fast directional footwork with guarded posture and sudden thrusting motion.",
+    "Repeated advance-and-retreat movement paired with sharp upper-body attacks."
+  ],
+  "FieldHockeyPenalty": [
+    "A controlled approach ending in a low powerful striking motion toward goal.",
+    "Quick stick swing with a forward step and compact follow-through.",
+    "Focused attacking movement that builds into a single decisive shot."
+  ],
+  "FloorGymnastics": [
+    "A flowing sequence of flips, rolls, and springing movements across the floor.",
+    "Dynamic tumbling motion with repeated takeoffs and controlled landings.",
+    "Full-body acrobatic movement combining rotation, balance, and forward travel."
+  ],
+  "FrisbeeCatch": [
+    "Arm extension toward a flying object followed by a quick grasping motion.",
+    "Short running adjustment and timed hand movement to receive a disc in the air.",
+    "Throwing or catching action with smooth upper-body reach and tracking."
+  ],
+  "FrontCrawl": [
+    "Alternating overarm strokes with flutter kicks in a continuous swimming rhythm.",
+    "Repeated forward-reaching arm recovery paired with fast lower-body kicking.",
+    "Long streamlined body motion through water with alternating pulls."
+  ],
+  "GolfSwing": [
+    "A backswing rotation that builds into a fast downward and forward strike.",
+    "Coiled upper-body setup followed by a sweeping arc through the ball.",
+    "Full-body rotational motion with weight transfer and extended follow-through."
+  ],
+  "Haircut": [
+    "Small repeated hand motion around the head with short trimming actions.",
+    "Careful grooming movement near the hairline using controlled wrist adjustments.",
+    "Precise cutting motion around the scalp with repeated repositioning."
+  ],
+  "Hammering": [
+    "Repeated up-and-down arm motion ending in short forceful impacts.",
+    "Compact striking action with a raised hand descending onto a fixed point.",
+    "Rhythmic overhead-to-downward movement focused on repeated contact."
+  ],
+  "HammerThrow": [
+    "Rapid spinning footwork building into a powerful circular release.",
+    "Full-body rotational movement with repeated turns before letting go.",
+    "Strong pivoting motion that transfers momentum into a final throwing release."
+  ],
+  "HandstandPushups": [
+    "Vertical pressing motion while upside down with repeated lowering and rising.",
+    "Arms bend and extend under body weight while the legs remain overhead.",
+    "Controlled inverted exercise movement driven by shoulder and arm strength."
+  ],
+  "HandstandWalking": [
+    "Forward travel while inverted using alternating hand placements.",
+    "Repeated hand steps with the body balanced upside down.",
+    "Careful inverted locomotion with small weight shifts from hand to hand."
+  ],
+  "HeadMassage": [
+    "Small circular hand motion across the scalp with gentle repeated pressure.",
+    "Repeated rubbing and kneading action around the top of the head.",
+    "Controlled grooming-like movement focused on the scalp and hairline."
+  ],
+  "HighJump": [
+    "A curved approach run leading into a single explosive upward leap over a bar.",
+    "Fast takeoff from one foot with the body arching high through the air.",
+    "Coordinated run-up and vertical jump ending in a backward clearance motion."
+  ],
+  "HorseRace": [
+    "Fast forward racing movement with repeated galloping strides.",
+    "Continuous high-speed motion across a track with rhythmic leg cycling.",
+    "Rapid travel driven by powerful repeated hoofbeats and forward momentum."
+  ],
+  "HorseRiding": [
+    "Steady up-and-down body movement while traveling on horseback.",
+    "Repeated balance adjustments through the hips and torso during riding.",
+    "Forward mounted motion with rhythmic vertical bounce and rein control."
+  ],
+  "HulaHoop": [
+    "Continuous circular hip motion keeping a hoop rotating around the waist.",
+    "Rhythmic torso pulses with repeated side-to-side and forward-back control.",
+    "Smooth cyclical body movement sustaining rotation around the midsection."
+  ],
+  "IceDancing": [
+    "Gliding footwork with coordinated turns, holds, and smooth partner motion.",
+    "Flowing skating movement across the ice with controlled spins and edges.",
+    "Balanced paired motion combining rotation, glide, and upright dance posture."
+  ],
+  "JavelinThrow": [
+    "A fast run-up ending in a long overarm release and full-body follow-through.",
+    "Forward acceleration with the arm drawn back before a sharp throwing motion.",
+    "Coordinated approach steps leading into a powerful overhead launch."
+  ],
+  "JugglingBalls": [
+    "Repeated tossing and catching in a steady alternating rhythm.",
+    "Continuous upward hand throws with precise timing as objects cycle through the air.",
+    "Compact arm motion maintaining multiple objects in a regular airborne pattern."
+  ],
+  "JumpingJack": [
+    "Repeated jumps with the arms and legs opening and closing together.",
+    "Rhythmic full-body exercise motion expanding outward and returning inward.",
+    "Fast vertical hops paired with synchronized arm swings overhead."
+  ],
+  "JumpRope": [
+    "Repeated small jumps timed to a rotating rope with steady arm circles.",
+    "Rhythmic lower-body hops and compact wrist motion in continuous cycles.",
+    "Fast repeated takeoffs from the ground coordinated with rope turns."
+  ],
+  "Kayaking": [
+    "Alternating paddle strokes on either side producing steady forward water movement.",
+    "Seated upper-body rotation with repeated arm pulls through the water.",
+    "Rhythmic paddling motion driven by the shoulders, arms, and torso."
+  ],
+  "Knitting": [
+    "Fine repeated finger motion with small hand adjustments in front of the body.",
+    "Delicate coordinated hand movement forming loops with steady wrist control.",
+    "Compact repetitive handwork using both hands in a careful rhythm."
+  ],
+  "LongJump": [
+    "A fast approach run ending in a single extended leap forward.",
+    "Powerful takeoff from one foot with the body traveling far through the air.",
+    "Sprint-to-jump motion combining speed, lift, and long horizontal distance."
+  ],
+  "Lunges": [
+    "Repeated stepping motion into a deep split-leg lowering movement.",
+    "Controlled forward stride followed by a vertical rise back to center.",
+    "Lower-body exercise pattern with alternating leg bends and upright recovery."
+  ],
+  "MilitaryParade": [
+    "Synchronized marching in rigid formation with uniform step timing.",
+    "Disciplined forward movement with upright posture and repeated group cadence.",
+    "Coordinated formation walking marked by sharp leg rhythm and alignment."
+  ],
+  "Mixing": [
+    "Circular hand motion inside a container with repeated stirring movement.",
+    "Continuous wrist and forearm rotation while blending ingredients together.",
+    "Compact repeated stirring action focused on a bowl or mixing area."
+  ],
+  "MoppingFloor": [
+    "Back-and-forth sweeping motion across the ground with long arm strokes.",
+    "Repeated pushing and pulling movement over the floor with a slight forward lean.",
+    "Wide cleaning motion that shifts across the ground in steady passes."
+  ],
+  "Nunchucks": [
+    "Fast circular arm and wrist motion with repeated spinning around the body.",
+    "Quick directional swings and catches using compact upper-body control.",
+    "Rapid martial-arts style rotation with sharp changes in hand position."
+  ],
+  "ParallelBars": [
+    "Upper-body support and swinging motion between two bars with repeated transitions.",
+    "Controlled arm-driven movement combining lifts, swings, and body turns.",
+    "Gymnastic travel over parallel supports using strength and rhythmic momentum."
+  ],
+  "PizzaTossing": [
+    "Repeated upward throws and spinning catches of dough with both hands.",
+    "Circular hand motion that sends a flat object rotating in the air.",
+    "Smooth toss-and-catch pattern with wrist control and overhead spinning."
+  ],
+  "PlayingCello": [
+    "Long arm strokes on the strings paired with steady hand placement on the neck.",
+    "Repeated bowing motion with subtle upper-body sway during performance.",
+    "Controlled two-hand musical movement combining horizontal bow motion and finger shifts."
+  ],
+  "PlayingDaf": [
+    "Repeated striking and shaking motion on a handheld frame drum.",
+    "Rhythmic hand impacts with small wrist snaps and circular instrument movement.",
+    "Fast percussion motion driven by alternating taps and brief shakes."
+  ],
+  "PlayingDhol": [
+    "Energetic repeated arm strikes on a large drum with strong tempo.",
+    "Alternating stick movement producing broad rhythmic hits from both sides.",
+    "Forceful percussion action with visible shoulder and elbow repetition."
+  ],
+  "PlayingFlute": [
+    "Sustained arm position near the face with fine finger movement along the instrument.",
+    "Controlled breathing posture paired with small precise hand changes.",
+    "Subtle upper-body performance motion focused on finger timing and steady hold."
+  ],
+  "PlayingGuitar": [
+    "Repeated strumming or picking motion with one hand and finger placement with the other.",
+    "Rhythmic arm action across the strings paired with steady fret-hand adjustments.",
+    "Continuous musical hand movement over the body and neck of the instrument."
+  ],
+  "PlayingPiano": [
+    "Rapid finger taps across a keyboard with repeated hand travel left and right.",
+    "Seated upper-body performance motion centered on precise key pressing.",
+    "Continuous two-hand movement over a row of keys with changing tempo."
+  ],
+  "PlayingSitar": [
+    "Repeated plucking motion with one hand and controlled finger placement with the other.",
+    "Steady seated performance posture with rhythmic string strikes and small wrist action.",
+    "Fine musical hand movement across strings and neck with measured tempo."
+  ],
+  "PlayingTabla": [
+    "Fast alternating hand strikes on paired drums with complex rhythmic timing.",
+    "Repeated finger and palm impacts producing compact percussion motion.",
+    "Quick hand drumming pattern with visible wrist speed and controlled rebounds."
+  ],
+  "PlayingViolin": [
+    "Repeated bowing motion across the strings with fine finger control on the neck.",
+    "Smooth arm sweeps paired with small left-hand adjustments during performance.",
+    "Steady upper-body posture with rhythmic bow travel and precise finger placement."
+  ],
+  "PoleVault": [
+    "A sprinting approach that converts into an upward vault over a high bar.",
+    "Fast forward run followed by pole plant, lift, and inverted clearance motion.",
+    "Explosive takeoff using a pole to drive the body upward and over."
+  ],
+  "PommelHorse": [
+    "Continuous circular leg swings supported by strong arm balance on the apparatus.",
+    "Rhythmic full-body rotation with the legs extended and moving around the torso.",
+    "Gymnastic support motion driven by repeated leg circles and hand shifts."
+  ],
+  "PullUps": [
+    "Repeated upward pulling of the body toward a fixed overhead bar.",
+    "Arms bend and extend in a vertical lifting rhythm using upper-body strength.",
+    "Controlled rise and lowering motion with the body hanging beneath a bar."
+  ],
+  "Punch": [
+    "A sharp forward arm strike followed by quick retraction.",
+    "Explosive upper-body motion sending one fist outward in a direct line.",
+    "Compact striking action with shoulder rotation and fast recovery."
+  ],
+  "PushUps": [
+    "Repeated lowering and raising of the body using the arms.",
+    "Full-body exercise motion close to the ground with steady arm extension.",
+    "Controlled chest-down and press-up movement in a regular rhythm."
+  ],
+  "Rafting": [
+    "Repeated group paddling strokes while the body braces against rough water movement.",
+    "Fast coordinated arm pulls through the water with unstable forward motion.",
+    "Rhythmic paddling and balance adjustments in a moving raft."
+  ],
+  "RockClimbingIndoor": [
+    "Upward climbing motion with alternating hand reaches and foothold pushes.",
+    "Careful vertical movement on a wall using repeated arm pulls and leg extensions.",
+    "Controlled body repositioning upward through a sequence of holds."
+  ],
+  "RopeClimbing": [
+    "Hand-over-hand upward movement with repeated pulling and leg bracing.",
+    "Vertical climbing motion driven by strong arm pulls and compact body lifts.",
+    "Repeated upward reach and pull pattern along a hanging rope."
+  ],
+  "Rowing": [
+    "Cyclical pulling motion with both arms and a coordinated leg drive.",
+    "Repeated backward lean and forward recovery in a smooth water rhythm.",
+    "Long synchronized strokes that propel a boat through the water."
+  ],
+  "SalsaSpin": [
+    "Quick turning dance motion with repeated pivots and torso control.",
+    "Rhythmic footwork leading into fast spins and directional changes.",
+    "Lively dance movement marked by rotational steps and balanced turns."
+  ],
+  "ShavingBeard": [
+    "Small repeated hand motion across the lower face with careful directional strokes.",
+    "Controlled grooming movement around the cheeks and chin using short passes.",
+    "Compact wrist action over facial hair with steady repositioning."
+  ],
+  "Shotput": [
+    "A powerful push from the shoulder after a compact loading movement.",
+    "Explosive full-body drive ending in a short-range heavy release.",
+    "Rotational or gliding setup followed by a forceful arm extension."
+  ],
+  "SkateBoarding": [
+    "Rolling movement with balance adjustments and quick lower-body shifts on a board.",
+    "Smooth forward travel combined with occasional jumps, turns, or trick motions.",
+    "Dynamic riding posture with repeated foot and torso control over a wheeled board."
+  ],
+  "Skiing": [
+    "Gliding downhill with repeated weight shifts and bent-knee balance.",
+    "Fast snow travel marked by carving turns and steady lower-body control.",
+    "Continuous forward sliding motion with coordinated leg and torso adjustments."
+  ],
+  "Skijet": [
+    "Fast water travel with the body leaning to steer through surface chop.",
+    "Forward riding motion over water with repeated balance corrections and turns.",
+    "Dynamic seated or standing control during rapid movement on a personal watercraft."
+  ],
+  "SkyDiving": [
+    "Extended freefall posture with the limbs spread to control descent through the air.",
+    "Airborne downward motion with subtle arm and leg adjustments for balance.",
+    "Long falling sequence after a jump from height with controlled body positioning."
+  ],
+  "SoccerJuggling": [
+    "Repeated light kicks keeping the ball in the air without letting it drop.",
+    "Quick lower-body taps and balance control centered on one airborne ball.",
+    "Rhythmic foot and leg motion maintaining continuous ball contact in the air."
+  ],
+  "SoccerPenalty": [
+    "A short approach run ending in one strong kick directed toward goal.",
+    "Focused lower-body striking motion with planted support leg and follow-through.",
+    "Brief attacking setup followed by a fast decisive shot."
+  ],
+  "StillRings": [
+    "Suspended upper-body control with holds, lifts, and slow strength-driven transitions.",
+    "Minimal swinging combined with powerful arm support and static body positions.",
+    "Gymnastic movement on hanging rings emphasizing controlled holds and raises."
+  ],
+  "SumoWrestling": [
+    "Forceful pushing and grappling motion between two bodies in close contact.",
+    "Short explosive steps and upper-body shoving used to drive an opponent backward.",
+    "Heavy contact movement with repeated attempts to unbalance and displace."
+  ],
+  "Surfing": [
+    "Balancing on a board while the body adjusts to the motion of a wave.",
+    "Low stable stance with repeated weight shifts and arm corrections on moving water.",
+    "Smooth riding movement over a wave with coordinated balance through turns."
+  ],
+  "Swing": [
+    "Repeated back-and-forth motion with the body arcing through the air.",
+    "Rhythmic forward and backward travel driven by leg pumping and posture shifts.",
+    "Pendulum-like playground movement with alternating rise and fall."
+  ],
+  "TableTennisShot": [
+    "Quick compact racket swings with fast side-to-side footwork near a table.",
+    "Repeated striking motion using short arm acceleration and rapid recovery.",
+    "Fast reaction movement with brief forward strokes and small directional steps."
+  ],
+  "TaiChi": [
+    "Slow deliberate whole-body movement with flowing arm paths and weight shifts.",
+    "Controlled martial-arts form using smooth transitions and balanced stances.",
+    "Calm continuous motion marked by steady tempo and precise posture changes."
+  ],
+  "TennisSwing": [
+    "A fast racket swing with torso rotation and quick foot adjustment.",
+    "Repeated forehand or backhand striking motion followed by immediate recovery.",
+    "Sharp lateral arm action combined with court movement and follow-through."
+  ],
+  "ThrowDiscus": [
+    "Spinning footwork builds into a wide-arc release from the throwing arm.",
+    "Rotational whole-body motion with balance control before a final outward launch.",
+    "Powerful pivoting movement that transfers momentum into a flat circular throw."
+  ],
+  "TrampolineJumping": [
+    "Repeated vertical bouncing with the body rising and falling in regular cycles.",
+    "Spring-driven upward motion followed by soft balanced landings.",
+    "Continuous jumping rhythm with controlled airtime above a flexible surface."
+  ],
+  "Typing": [
+    "Rapid repeated finger taps over a keyboard with small wrist motion.",
+    "Compact hand movement across rows of keys in a steady working rhythm.",
+    "Fast alternating finger action concentrated in front of the torso."
+  ],
+  "UnevenBars": [
+    "Swinging and transferring movement between two bars at different heights.",
+    "Gymnastic aerial transitions driven by momentum, grip changes, and leg extension.",
+    "Continuous bar-to-bar motion with rotation, release, and regrasp phases."
+  ],
+  "VolleyballSpiking": [
+    "A fast jump followed by a powerful overhead arm strike toward the other side.",
+    "Explosive approach steps and upward takeoff ending in a downward hitting motion.",
+    "Quick attacking movement combining leap, reach, and forceful contact above the net."
+  ],
+  "WalkingWithDog": [
+    "Steady forward walking with a second moving body alongside on a leash.",
+    "Rhythmic travel at a moderate pace with repeated arm and leg coordination.",
+    "Calm side-by-side motion with occasional leash-guided adjustments."
+  ],
+  "WallPushups": [
+    "Repeated leaning and pressing motion against a vertical surface.",
+    "Upper-body exercise movement with the arms bending and extending while standing.",
+    "Controlled forward body shift toward a wall followed by a push back."
+  ],
+  "WritingOnBoard": [
+    "Small repeated hand motion across a vertical surface in short strokes.",
+    "Fine arm and wrist movement while marking lines or symbols on a board.",
+    "Upper-body motion focused on precise drawing or writing gestures in front of the body."
+  ],
+  "YoYo": [
+    "Repeated up-and-down hand motion controlling an object on a string.",
+    "Quick wrist flicks send the object downward and guide it back upward.",
+    "Compact hand action coordinating release, spin, and return timing."
+  ]
+}

@@ -5,21 +5,15 @@ finetune.py (simplified)
 - Finetune projection heads (+ logit_scale) on a new dataset of new classes.
 - Optionally freeze backbone trunks (default: frozen).
 - Uses ONE manifest file for the finetune split (dataset_split_txt).
-- Reuses helper functions from util (as you requested):
-    - find_latest_ckpt
-    - load_checkpoint
-    - (assumed in util) expand_manifest_args (or you can pass manifest directly)
-    - (assumed in util) extract_motion_config_from_ckpt  (checkpoint arg extraction)
+- Uses shared parser/config definitions from config.py and shared helpers from util.py.
 
 CLI behavior:
 - If you don't pass img/frames/windows/embed_dim/fuse/dropout, we inherit them from the pretrained checkpoint (ckpt['args']).
 - If you pass them explicitly, CLI wins.
 """
 
-import argparse
 import json
 import os
-import random
 import time
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +24,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
+from config import parse_finetune_args
 from dataset import (
     MotionTwoStreamZstdDataset,
     RGBVideoClipDataset,
@@ -53,50 +48,19 @@ from util import (
     build_clip_text_bank_and_logit_scale,
     load_precomputed_text_bank_and_logit_scale,
     build_warmup_cosine_scheduler,
+    build_fb_params,
     make_ckpt_payload,
-    find_latest_ckpt,
     load_checkpoint,
-    expand_manifest_args,            # optional; used for glob support
-    extract_motion_config_from_ckpt, # ckpt arg extraction helper
+    extract_motion_config_from_ckpt,
+    force_bn_eval,
+    freeze_module,
+    resolve_ckpt_path,
+    resolve_single_manifest,
+    set_seed,
+    unfreeze_named_submodules,
 )
 
 from eval import evaluate_one_split
-
-
-# -----------------------------
-# Small helpers
-# -----------------------------
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-def force_bn_eval(module: nn.Module):
-    """Keep all BatchNorm layers in eval mode (prevents running stats drift)."""
-    for m in module.modules():
-        if isinstance(m, nn.BatchNorm3d):
-            m.eval()
-
-
-def freeze_module(module: nn.Module):
-    for p in module.parameters():
-        p.requires_grad_(False)
-    module.eval()
-
-
-def unfreeze_named_submodules(root: nn.Module, name_substrings: List[str]):
-    """Unfreeze parameters for submodules whose dotted name contains any substring."""
-    if not name_substrings:
-        return
-    for name, m in root.named_modules():
-        if any(s in name for s in name_substrings):
-            # recurse=True is required here because container modules
-            # (e.g., mixed_4b) hold trainable params in child submodules.
-            for p in m.parameters(recurse=True):
-                p.requires_grad_(True)
 
 
 def get_trainable_params(model: nn.Module, extra_modules: Optional[List[nn.Module]] = None):
@@ -119,33 +83,6 @@ def _load_class_text_file(class_text_file: str) -> Dict[str, List[Any]]:
     if not isinstance(data, dict):
         raise ValueError(f"Class-text file must be a dict (or have dict at 'groups'): {class_text_file}")
     return data
-
-
-def resolve_ckpt_path(path_or_dir: str) -> str:
-    if os.path.isdir(path_or_dir):
-        latest = find_latest_ckpt(path_or_dir)
-        if latest is None:
-            raise FileNotFoundError(f"No checkpoints found in directory: {path_or_dir}")
-        return latest
-    return path_or_dir
-
-
-def resolve_single_manifest(manifest_arg: Optional[str]) -> Optional[str]:
-    """
-    Accept a single manifest argument that may be a glob.
-    Returns:
-      - None if not provided
-      - absolute path if provided (or first match if glob)
-    """
-    if not manifest_arg:
-        return None
-    matches = expand_manifest_args([manifest_arg])  # supports glob + absolute normalization
-    if not matches:
-        raise FileNotFoundError(f"Manifest not found / glob matched nothing: {manifest_arg}")
-    if len(matches) > 1:
-        # You said finetune uses only one split; pick the first deterministically.
-        print(f"[WARN] multiple manifests matched; using first: {matches[0]}")
-    return matches[0]
 
 
 # -----------------------------
@@ -193,21 +130,6 @@ def maybe_make_fixed_subset(dataset, subset_size: int, seed: int):
     if subset_size is None or int(subset_size) <= 0 or len(dataset) <= int(subset_size):
         return dataset
     return make_fixed_subset(dataset, k=int(subset_size), seed=seed)
-
-
-def build_fb_params(args, ckpt_cfg) -> Dict[str, Any]:
-    def _pick(v, fallback):
-        return fallback if v is None else v
-
-    return dict(
-        pyr_scale=float(_pick(args.fb_pyr_scale, ckpt_cfg.fb_pyr_scale)),
-        levels=int(_pick(args.fb_levels, ckpt_cfg.fb_levels)),
-        winsize=int(_pick(args.fb_winsize, ckpt_cfg.fb_winsize)),
-        iterations=int(_pick(args.fb_iterations, ckpt_cfg.fb_iterations)),
-        poly_n=int(_pick(args.fb_poly_n, ckpt_cfg.fb_poly_n)),
-        poly_sigma=float(_pick(args.fb_poly_sigma, ckpt_cfg.fb_poly_sigma)),
-        flags=int(_pick(args.fb_flags, ckpt_cfg.fb_flags)),
-    )
 
 
 def eval_on_validation_split(
@@ -366,136 +288,6 @@ def _build_eval_class_texts_from_groups(
 # -----------------------------
 
 def main():
-    ap = argparse.ArgumentParser()
-
-    # Data
-    ap.add_argument("-r", "--root_dir", type=str, required=True)
-    ap.add_argument("-m", "--manifest", type=str, default=None, help="ONE split manifest (file or glob). Optional.")
-    ap.add_argument("-c", "--class_id_to_label_csv", type=str, default=None)
-    ap.add_argument("--train_modality", type=str, default="motion", choices=["motion", "rgb"])
-    ap.add_argument("--val_modality", type=str, default="motion", choices=["motion", "rgb"])
-    ap.add_argument("--motion_data_source", type=str,default="zstd",choices=["zstd", "video"], help="For --train_modality motion: 'zstd' loads precomputed motion tensors, 'video' computes MHI+flow on-the-fly.")
-    ap.add_argument("--val_root_dir", type=str, default=None)
-    ap.add_argument("--val_manifest", type=str, default=None, help="ONE validation split manifest (file or glob). Optional.")
-    ap.add_argument("--val_class_id_to_label_csv", type=str, default=None)
-    ap.add_argument("--val_class_text_json", type=str, default=None, help="Optional JSON mapping validation classes to prompt lists.")
-    ap.add_argument("--train_class_text_json", type=str, default=None, help="Optional JSON mapping training classes to prompt lists/descriptions.")
-    ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"],
-                    help="Text embedding backend for class bank: CLIP encoder or precomputed embeddings.")
-    ap.add_argument("--precomputed_text_embeddings", type=str, default=None,
-                    help="Path to precomputed text embeddings .npy (e.g., sentence_transformer_embeddings.npy).")
-    ap.add_argument("--precomputed_text_index", type=str, default=None,
-                    help="Path to index JSON for precomputed text embeddings.")
-    ap.add_argument("--precomputed_text_key", type=str, default=None,
-                    help="Dataset key in precomputed index JSON (e.g., kinetics_400_llm_labels).")
-    ap.add_argument("--val_subset_size", type=int, default=400, help="Use a fixed random subset for validation if >0; <=0 means full split.")
-
-    # Pretrained
-    ap.add_argument("-p", "--pretrained_ckpt", type=str, default=None, help="checkpoint path OR directory (optional; omit for scratch training)")
-
-    # If not provided, inherit from ckpt['args']
-    ap.add_argument("--img_size", type=int, default=None)
-    ap.add_argument("--mhi_frames", type=int, default=None)
-    ap.add_argument("--flow_frames", type=int, default=None)
-    ap.add_argument("--flow_hw", type=int, default=None)
-    ap.add_argument("--mhi_windows", type=str, default=None, help="comma list, e.g. 5,25 (None -> inherit)")
-    ap.add_argument("--diff_threshold", type=float, default=15.0, help="diff threshold for mhi")
-    ap.add_argument("--flow_max_disp", type=float, default=None, help="Clip flow to [-x, x] before model input.")
-    ap.add_argument("--flow_normalize", action="store_true", default=True, help="Normalize flow by --flow_max_disp.")
-    ap.add_argument("--no_flow_normalize", action="store_false", dest="flow_normalize")
-    ap.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
-    ap.add_argument("--fb_pyr_scale", type=float, default=None)
-    ap.add_argument("--fb_levels", type=int, default=None)
-    ap.add_argument("--fb_winsize", type=int, default=None)
-    ap.add_argument("--fb_iterations", type=int, default=None)
-    ap.add_argument("--fb_poly_n", type=int, default=None)
-    ap.add_argument("--fb_poly_sigma", type=float, default=None)
-    ap.add_argument("--fb_flags", type=int, default=None)
-    ap.add_argument("--motion_img_resize", type=int, default=256, help="None keeps the target-size legacy path.")
-    ap.add_argument("--motion_flow_resize", type=int, default=128,help="None keeps the target-size legacy path.")
-    ap.add_argument("--motion_resize_mode", type=str, default="short_side", choices=["square", "short_side"],help="Spatial resize policy.")
-    ap.add_argument("--motion_train_crop_mode", type=str, default="random", choices=["none", "random", "center"],help="Spatial crop mode for training.")
-    ap.add_argument("--motion_eval_crop_mode", type=str, default="center", choices=["none", "random", "center"],help="Spatial crop mode for evaluation.")
-    ap.add_argument("--roi_mode", type=str, default="none", choices=["none", "largest_motion", "yolo_person"])
-    ap.add_argument("--roi_stride", type=int, default=3)
-    ap.add_argument("--motion_roi_threshold", type=float, default=None)
-    ap.add_argument("--motion_roi_min_area", type=int, default=64)
-    ap.add_argument("--yolo_model", type=str, default="yolo11n.pt")
-    ap.add_argument("--yolo_conf", type=float, default=0.25)
-    ap.add_argument("--yolo_device", type=str, default=None)
-    ap.add_argument("--rgb_frames", type=int, default=64)
-    ap.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
-    ap.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
-
-
-    ap.add_argument("--model", type=str, default=None, choices=["i3d", "x3d", "svt"],
-                    help="None -> inherit from pretrained checkpoint")
-    ap.add_argument("--embed_dim", type=int, default=None)
-    ap.add_argument("--fuse", type=str, default=None, choices=[None, "avg_then_proj", "concat"])
-    ap.add_argument("--dropout", type=float, default=None)
-    ap.add_argument("--active_branch", type=str, default=None, choices=["both", "first", "second"],
-                    help="None -> inherit from pretrained checkpoint")
-    ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
-    ap.add_argument("--svt_patch_size", type=int, default=16)
-    ap.add_argument("--svt_depth", type=int, default=12)
-    ap.add_argument("--svt_num_heads", type=int, default=12)
-    ap.add_argument("--svt_mlp_ratio", type=float, default=4.0)
-    ap.add_argument("--svt_attn_drop", type=float, default=0.0)
-    ap.add_argument("--svt_proj_drop", type=float, default=0.0)
-    ap.add_argument("--svt_max_frames", type=int, default=None)
-    ap.add_argument("--svt_motion_mask_enabled", action="store_true")
-    ap.add_argument("--svt_motion_keep_ratio", type=float, default=0.5)
-    ap.add_argument("--svt_motion_score_mode", type=str, default="mhi_flow", choices=["mhi_flow", "l1_mean"])
-    ap.add_argument("--svt_motion_mhi_weight", type=float, default=1.0)
-    ap.add_argument("--svt_motion_eps", type=float, default=1e-6)
-
-    # Finetune behavior
-    ap.add_argument("--freeze_backbone", action="store_true", default=True)
-    ap.add_argument("--no_freeze_backbone", action="store_false", dest="freeze_backbone")
-    ap.add_argument("--unfreeze_modules", type=str, default="", help="e.g. 'mixed_5b,mixed_5c'")
-    ap.add_argument("--freeze_bn_stats", action="store_true", default=True,
-                    help="Keep BatchNorm layers in eval mode (no running-stat updates).")
-    ap.add_argument("--no_freeze_bn_stats", action="store_false", dest="freeze_bn_stats",
-                    help="Allow BatchNorm running stats to adapt during finetuning.")
-
-    # Training
-    ap.add_argument("--batch_size", type=int, default=16)
-    ap.add_argument("--epochs", type=int, default=50)
-    ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--warmup_steps", type=int, default=1000)
-    ap.add_argument("--min_lr", type=float, default=1e-6)
-    ap.add_argument("--lambda_align", type=float, default=0.0)
-    ap.add_argument("--lambda_cls", type=float, default=0.0, help="Weight for auxiliary CLS-token classification loss when model provides logits_cls.")
-    ap.add_argument("--label_smoothing", type=float, default=0.0)
-    ap.add_argument("--mixup_alpha", type=float, default=0.0)
-    ap.add_argument("--mixup_prob", type=float, default=0.0)
-    ap.add_argument("--p_affine", type=float, default=0.25, help="Probability of applying geometric affine augmentation in MotionTwoStreamZstdDataset.")
-    ap.add_argument("--motion_spatial_crop",type=str,default="random",choices=["random", "motion"])
-    ap.add_argument("--temporal_mixup_prob", type=float, default=0.0)
-    ap.add_argument("--temporal_mixup_y_min", type=float, default=0.35)
-    ap.add_argument("--temporal_mixup_y_max", type=float, default=0.65)
-    ap.add_argument("--lambda_rep_mix", type=float, default=0.0, help="Weight for representation-space mix consistency loss.")
-    ap.add_argument("--rep_mix_alpha", type=float, default=0.4, help="Beta(alpha, alpha) parameter for representation-space mix.")
-    ap.add_argument("--rep_mix_semantic", action="store_true", help="Select representation-mix partners from semantically close classes within the current batch.")
-    ap.add_argument("--rep_mix_semantic_topk", type=int, default=3, help="Randomly choose among top-k semantic partners found in-batch.")
-    ap.add_argument("--rep_mix_semantic_min_sim", type=float, default=-1.0, help="Minimum cosine similarity for semantic partner candidates; values <= -1 disable filtering.")
-
-    ap.add_argument("--num_workers", type=int, default=16)
-    ap.add_argument("--log_every", type=int, default=100)
-    ap.add_argument("--save_every", type=int, default=200)
-    ap.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
-    ap.add_argument("--seed", type=int, default=0)
-
-    ap.add_argument("--out_dir", type=str, default="out/finetune")
-    ap.add_argument("--tb_dir", type=str, default="runs")
-    ap.add_argument("--ckpt_dir", type=str, default="checkpoints")
-    ap.add_argument("--eval_dir", type=str, default="eval_out")
-    ap.add_argument("--val_skip_epochs", type=int, default=5, help="Skip validation for the first N epochs.")
-    ap.add_argument("--val_every", type=int, default=1, help="Validation interval after the skip.")
-    ap.add_argument("--early_stop_patience", type=int, default=0, help="Stop if validation top1 does not improve for N validation checks (0 disables).")
-    ap.add_argument("--early_stop_min_delta", type=float, default=0.0, help="Minimum top1 improvement required to reset early stopping counter.")
-
     _default_device = (
         "mps"
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
@@ -503,9 +295,7 @@ def main():
         if torch.cuda.is_available()
         else "cpu"
     )
-    ap.add_argument("--device", type=str, default=_default_device)
-
-    args = ap.parse_args()
+    args = parse_finetune_args(default_device=_default_device)
 
     print(args)
 
@@ -534,8 +324,12 @@ def main():
 
     # Resolve paths
     pretrained_path = resolve_ckpt_path(args.pretrained_ckpt) if args.pretrained_ckpt else None
-    manifest_path = resolve_single_manifest(args.manifest)
-    val_manifest_path = resolve_single_manifest(args.val_manifest) if args.val_manifest else None
+    manifest_path = resolve_single_manifest(args.manifest, label="Train manifest")
+    val_manifest_path = (
+        resolve_single_manifest(args.val_manifest, label="Validation manifest")
+        if args.val_manifest
+        else None
+    )
 
     # Read pretrained ckpt args -> defaults
     pretrained_ckpt_raw = torch.load(pretrained_path, map_location=device) if pretrained_path else {}
@@ -849,6 +643,7 @@ def main():
             init_scratch=(pretrained_path is None),
             use_stems=ckpt_cfg.use_stems,
             use_projection=ckpt_cfg.use_projection,
+            dual_projection_heads=ckpt_cfg.dual_projection_heads,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "x3d":
@@ -863,6 +658,7 @@ def main():
             fuse=fuse,
             dropout=dropout,
             use_projection=ckpt_cfg.use_projection,
+            dual_projection_heads=ckpt_cfg.dual_projection_heads,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "svt":
@@ -886,6 +682,8 @@ def main():
             motion_score_mode=args.svt_motion_score_mode,
             motion_mhi_weight=args.svt_motion_mhi_weight,
             motion_eps=args.svt_motion_eps,
+            use_projection=ckpt_cfg.use_projection,
+            dual_projection_heads=ckpt_cfg.dual_projection_heads,
             num_classes=num_classes,
             active_branch=active_branch,
         ).to(device)

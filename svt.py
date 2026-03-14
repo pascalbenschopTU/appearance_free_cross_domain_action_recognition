@@ -587,6 +587,8 @@ class TwoStreamSVT_CLIP(nn.Module):
         motion_score_mode: str = "mhi_flow",
         motion_mhi_weight: float = 1.0,
         motion_eps: float = 1e-6,
+        use_projection: bool = False,
+        dual_projection_heads: bool = False,
         num_classes: int = 0,
         compute_second_only: bool = False,
         active_branch: str = "both",
@@ -615,6 +617,8 @@ class TwoStreamSVT_CLIP(nn.Module):
         self.embed_dim = int(embed_dim)
         self.semantic_dim = int(semantic_dim)
         self.svt_embed_dim = SVT_EMBED_DIM
+        self.use_projection = bool(use_projection)
+        self.dual_projection_heads = bool(self.use_projection and dual_projection_heads)
 
         self.backbone = SemanticVideoTransformer(
             img_size=self.img_size,
@@ -634,6 +638,19 @@ class TwoStreamSVT_CLIP(nn.Module):
             motion_mhi_weight=float(motion_mhi_weight),
             motion_eps=float(motion_eps),
         )
+
+        self.clip_head = None
+        self.embed_head = None
+        if self.use_projection:
+            self.clip_head = nn.Sequential(
+                nn.LayerNorm(self.semantic_dim),
+                nn.Linear(self.semantic_dim, self.semantic_dim),
+            )
+            if self.dual_projection_heads:
+                self.embed_head = nn.Sequential(
+                    nn.LayerNorm(self.semantic_dim),
+                    nn.Linear(self.semantic_dim, self.semantic_dim),
+                )
 
         # Optional auxiliary classification head over the 600-d CLS token.
         self.cls_head = nn.Linear(self.svt_embed_dim, int(num_classes)) if int(num_classes) > 0 else None
@@ -709,12 +726,16 @@ class TwoStreamSVT_CLIP(nn.Module):
     def forward(self, mhi_bcthw: Optional[torch.Tensor], flow_bcthw: Optional[torch.Tensor]):
         x = self._to_svt_input(mhi_bcthw, flow_bcthw)
         cls_token = self.backbone.forward_features(x)
-        output = self.backbone.semantic_head(cls_token)
+        output_raw = self.backbone.semantic_head(cls_token)
+        output_clip = self.clip_head(output_raw) if self.clip_head is not None else output_raw
+        output_embed = self.embed_head(output_raw) if self.embed_head is not None else output_clip
         logits_cls = self.cls_head(cls_token) if self.cls_head is not None else None
 
         return {
-            "emb_fuse": output,
-            "emb_fuse_raw": output,
+            "emb_fuse": output_clip,
+            "emb_fuse_clip": output_clip,
+            "emb_fuse_embed": output_embed,
+            "emb_fuse_raw": output_raw,
             "logits_cls": logits_cls,
         }
 

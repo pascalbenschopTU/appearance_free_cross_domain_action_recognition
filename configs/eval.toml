@@ -1,0 +1,37 @@
+# Partial eval config. CLI flags still override these values.
+
+[data]
+root_dir = "/path/to/eval_root"
+ckpt = "/path/to/checkpoint.pt"
+manifests = []
+input_modality = "motion"
+
+[motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "15"
+diff_threshold = 15.0
+flow_max_disp = 20.0
+flow_backend = "farneback"
+motion_img_resize = 256
+motion_flow_resize = 128
+motion_resize_mode = "short_side"
+motion_eval_crop_mode = "center"
+
+[text]
+text_bank_backend = "clip"
+class_text_json = ""
+use_heads = "fuse"
+head_weights = "1.0"
+no_rgb = false
+rgb_frames = 1
+rgb_sampling = "center"
+rgb_weight = 0.5
+
+[runtime]
+batch_size = 8
+num_workers = 0
+out_dir = "eval_out"
+device = "cuda"

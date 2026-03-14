@@ -28,10 +28,8 @@ import os
 import csv
 import json
 import time
-import argparse
 import contextlib
 from typing import List, Dict, Optional
-import glob
 import math
 from pathlib import Path
 import cv2
@@ -43,11 +41,16 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
+from config import parse_eval_args
 from util import (
     aggregate_description_logits_to_classes,
     build_text_bank,
+    expand_manifest_args,
     LogitScale,
     load_precomputed_text_bank_and_logit_scale,
+    parse_floats,
+    parse_list,
+    split_name_from_manifest,
 )
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
@@ -151,29 +154,6 @@ def save_cm_pdf(cm: np.ndarray, classnames: List[str], out_pdf: str, title: str 
             plt.close(fig)
 
 
-def expand_manifest_args(manifest_args: Optional[List[str]]) -> List[str]:
-    """Accept explicit files and/or globs; return sorted unique file paths."""
-    if not manifest_args:
-        return []
-    out = []
-    for s in manifest_args:
-        # allow globs
-        matches = glob.glob(s)
-        if matches:
-            out.extend(matches)
-        else:
-            out.append(s)
-    # unique + stable order
-    out = sorted({os.path.abspath(p) for p in out})
-    return out
-
-
-def split_name_from_manifest(manifest_path: Optional[str]) -> str:
-    if manifest_path is None:
-        return "all"
-    return os.path.splitext(os.path.basename(manifest_path))[0]
-
-
 def mean_std(vals: List[float]) -> Dict[str, float]:
     """Sample std (ddof=1) if >=2 else 0."""
     if not vals:
@@ -211,18 +191,6 @@ CLIP_TEMPLATES = [
     "the action of {}",
     "a clip of {}",
 ]
-
-# -----------------------------
-# Utility
-# -----------------------------
-
-def parse_list(s: str) -> List[str]:
-    return [x.strip() for x in s.split(",") if x.strip()]
-
-
-def parse_floats(s: str) -> List[float]:
-    return [float(x.strip()) for x in s.split(",") if x.strip()]
-
 
 # -----------------------------
 # Metrics
@@ -470,7 +438,19 @@ def evaluate_one_split(
     with torch.no_grad():
         for mhi, second, y, paths in dataloader:
             b = y.shape[0]
+            num_views = 1
             n += b
+
+            if mhi is not None and mhi.ndim == 6:
+                num_views = int(mhi.shape[1])
+                mhi = mhi.view(b * num_views, *mhi.shape[2:]).contiguous()
+            if second is not None:
+                if flow_backend == "raft_large" and second.ndim == 7:
+                    num_views = max(num_views, int(second.shape[1]))
+                    second = second.view(b * num_views, *second.shape[2:]).contiguous()
+                elif flow_backend != "raft_large" and second.ndim == 6:
+                    num_views = max(num_views, int(second.shape[1]))
+                    second = second.view(b * num_views, *second.shape[2:]).contiguous()
 
             if mhi is not None:
                 mhi = mhi.to(device, non_blocking=True)
@@ -503,6 +483,8 @@ def evaluate_one_split(
                 emb_top = out.get("emb_top", None) if isinstance(out, dict) else None
                 emb_bot = out.get("emb_bot", None) if isinstance(out, dict) else None
                 emb_fuse = out.get("emb_fuse", None) if isinstance(out, dict) else None
+                emb_fuse_clip = out.get("emb_fuse_clip", emb_fuse) if isinstance(out, dict) else None
+                emb_fuse_embed = out.get("emb_fuse_embed", emb_fuse_clip) if isinstance(out, dict) else None
                 if emb_top is not None:
                     v = F.normalize(emb_top.float(), dim=-1)
                     logits_by_head["top"] = scale_motion * (v @ text_bank.t().float())
@@ -510,10 +492,23 @@ def evaluate_one_split(
                     v = F.normalize(emb_bot.float(), dim=-1)
                     logits_by_head["bot"] = scale_motion * (v @ text_bank.t().float())
 
-                if emb_fuse is None:
+                if emb_fuse is None and emb_fuse_clip is None:
                     raise RuntimeError("Model output missing required key 'emb_fuse'.")
-                v = F.normalize(emb_fuse.float(), dim=-1)
-                logits_by_head["fuse"] = scale_motion * (v @ text_bank.t().float())
+                if emb_fuse_clip is not None:
+                    v = F.normalize(emb_fuse_clip.float(), dim=-1)
+                    logits_by_head["fuse_clip"] = scale_motion * (v @ text_bank.t().float())
+                if emb_fuse_embed is not None:
+                    v = F.normalize(emb_fuse_embed.float(), dim=-1)
+                    logits_by_head["fuse_embed"] = scale_motion * (v @ text_bank.t().float())
+                if "fuse_clip" in logits_by_head and "fuse_embed" in logits_by_head:
+                    logits_by_head["fuse"] = 0.5 * (logits_by_head["fuse_clip"] + logits_by_head["fuse_embed"])
+                elif "fuse_clip" in logits_by_head:
+                    logits_by_head["fuse"] = logits_by_head["fuse_clip"]
+                elif "fuse_embed" in logits_by_head:
+                    logits_by_head["fuse"] = logits_by_head["fuse_embed"]
+                if num_views > 1:
+                    for head_name, head_logits in list(logits_by_head.items()):
+                        logits_by_head[head_name] = head_logits.view(b, num_views, -1).mean(dim=1)
                 if class_to_desc_indices is not None:
                     for head_name, head_logits in list(logits_by_head.items()):
                         logits_by_head[head_name] = aggregate_description_logits_to_classes(
@@ -636,91 +631,7 @@ def evaluate_one_split(
 # -----------------------------
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root_dir", type=str, required=True)
-    ap.add_argument("--ckpt", type=str, required=True)
-    ap.add_argument("--out_dir", type=str, default="eval_out")
-    ap.add_argument("--manifests", type=str, nargs="*", default=None, help="evaluation splits")
-    ap.add_argument("--input_modality", type=str, default="motion", choices=["motion", "rgb"])
-
-    ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    ap.add_argument("--batch_size", type=int, default=8)
-    ap.add_argument("--num_workers", type=int, default=0)
-    ap.add_argument("--class_id_to_label_csv", type=str, default=None)
-
-    # Motion stream params (match training defaults)
-    ap.add_argument("--img_size", type=int, default=224)
-    ap.add_argument("--mhi_frames", type=int, default=32)
-    ap.add_argument("--flow_frames", type=int, default=128)
-    ap.add_argument("--flow_hw", type=int, default=112)
-    ap.add_argument("--mhi_windows", type=str, default="15")
-    ap.add_argument("--diff_threshold", type=float, default=15.0)
-    ap.add_argument("--flow_max_disp", type=float, default=20.0)
-    ap.add_argument("--model_rgb_frames", type=int, default=64)
-    ap.add_argument("--model_rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
-    ap.add_argument("--model_rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
-    ap.add_argument(
-        "--flow_backend",
-        type=str,
-        default="farneback",
-        choices=["farneback", "raft_large"],
-        help="Flow extractor for on-the-fly evaluation.",
-    )
-    ap.add_argument(
-        "--raft_flow_clip",
-        type=float,
-        default=1.0,
-        help="Clip RAFT flow to [-x, x] before model input (default: 1.0, matching RAFT zst conversion). Set <=0 to disable.",
-    )
-    ap.add_argument("--raft_amp", action="store_true", default=True, help="Use AMP for RAFT inference on CUDA.")
-    ap.add_argument("--no_raft_amp", action="store_false", dest="raft_amp", help="Disable AMP for RAFT inference.")
-    ap.add_argument(
-        "--roi_mode",
-        type=str,
-        default="none",
-        choices=["none", "largest_motion", "yolo_person"],
-        help="Optional ROI pre-crop mode for VideoMotionDataset",
-    )
-    ap.add_argument("--roi_stride", type=int, default=3, help="Frame stride for ROI prepass")
-    ap.add_argument("--motion_roi_threshold", type=float, default=None, help="Threshold for largest_motion ROI (default: --diff_threshold)")
-    ap.add_argument("--motion_roi_min_area", type=int, default=64, help="Min CC area for largest_motion ROI")
-    ap.add_argument("--yolo_model", type=str, default="yolo11n.pt", help="YOLO model name/path (ultralytics)")
-    ap.add_argument("--yolo_conf", type=float, default=0.25, help="YOLO confidence threshold")
-    ap.add_argument("--yolo_device", type=str, default=None, help="YOLO device, e.g. cpu or 0")
-
-    # Farneback params
-    ap.add_argument("--fb_pyr_scale", type=float, default=0.5)
-    ap.add_argument("--fb_levels", type=int, default=3) #3
-    ap.add_argument("--fb_winsize", type=int, default=15) #15
-    ap.add_argument("--fb_iterations", type=int, default=3) #3
-    ap.add_argument("--fb_poly_n", type=int, default=5) # 5
-    ap.add_argument("--fb_poly_sigma", type=float, default=1.2) # 1.2
-    ap.add_argument("--fb_flags", type=int, default=0)
-    ap.add_argument("--motion_img_resize", type=int, default=256, help="None keeps the target-size legacy path.")
-    ap.add_argument("--motion_flow_resize", type=int, default=128,help="None keeps the target-size legacy path.")
-    ap.add_argument("--motion_resize_mode", type=str, default="short_side", choices=["square", "short_side"],help="Spatial resize policy.")
-    ap.add_argument("--motion_eval_crop_mode", type=str, default="center", choices=["none", "random", "center"],help="Spatial crop mode for evaluation.")
-
-    # Text bank options
-    ap.add_argument("--text_bank_backend", type=str, default="clip", choices=["clip", "precomputed"])
-    ap.add_argument("--precomputed_text_embeddings", type=str, default="")
-    ap.add_argument("--precomputed_text_index", type=str, default="")
-    ap.add_argument("--precomputed_text_key", type=str, default="")
-    ap.add_argument("--class_text_json", type=str, default="")
-    ap.add_argument("--use_heads", type=str, default="fuse")
-    ap.add_argument("--head_weights", type=str, default="1.0")
-    ap.add_argument("--logit_scale", type=float, default=0.0)
-    ap.add_argument("--active_branch", type=str, default=None, choices=["both", "first", "second"],
-                    help="None -> use checkpoint setting")
-    ap.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)  # legacy alias
-
-    ap.add_argument("--no_rgb", action="store_true", help="Skip CLIP RGB embeddings; evaluate motion-only only")
-    ap.add_argument("--rgb_frames", type=int, default=1)
-    ap.add_argument("--rgb_sampling", type=str, default="center", choices=["center", "uniform", "random"])
-    ap.add_argument("--rgb_weight", type=float, default=0.5)
-    ap.add_argument("--clip_vision_scale", type=float, default=0.0)
-
-    args = ap.parse_args()
+    args = parse_eval_args(default_device="cuda" if torch.cuda.is_available() else "cpu")
     args.text_bank_backend = str(args.text_bank_backend).lower()
     if args.text_bank_backend == "precomputed":
         if not args.precomputed_text_embeddings.strip() or not args.precomputed_text_index.strip():
@@ -782,6 +693,7 @@ def main():
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
     use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", False)))
+    dual_projection_heads = bool(_get(ckpt_args, "dual_projection_heads", False))
     second_channels = 1 if second_type in ("dphase", "phase") else 2
     selected_model = str(_get(ckpt_args, "model", "i3d"))
 
@@ -804,6 +716,14 @@ def main():
     motion_eval_crop_mode = str(
         _get(ckpt_args, "motion_eval_crop_mode", args.motion_eval_crop_mode or "none")
     ).lower()
+    motion_eval_num_views = max(1, int(getattr(args, "motion_eval_num_views", 1)))
+    if motion_eval_num_views > 1 and motion_eval_crop_mode == "none":
+        print(
+            "[EVAL] --motion_eval_num_views > 1 requires spatial cropping; "
+            "overriding motion_eval_crop_mode none -> center.",
+            flush=True,
+        )
+        motion_eval_crop_mode = "center"
     args.motion_img_resize = motion_img_resize
     args.motion_flow_resize = motion_flow_resize
     args.motion_resize_mode = motion_resize_mode
@@ -872,6 +792,7 @@ def main():
             dropout=dropout,
             use_stems=use_stems,
             use_projection=use_projection,
+            dual_projection_heads=dual_projection_heads,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "x3d":
@@ -887,6 +808,7 @@ def main():
             fuse=fuse,
             dropout=dropout,
             use_projection=use_projection,
+            dual_projection_heads=dual_projection_heads,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "svt":
@@ -922,6 +844,8 @@ def main():
             motion_score_mode=str(_get(ckpt_args, "svt_motion_score_mode", "mhi_flow")),
             motion_mhi_weight=float(_get(ckpt_args, "svt_motion_mhi_weight", 1.0)),
             motion_eps=float(_get(ckpt_args, "svt_motion_eps", 1e-6)),
+            use_projection=use_projection,
+            dual_projection_heads=dual_projection_heads,
             active_branch=active_branch,
         ).to(device)
     else:
@@ -989,6 +913,7 @@ def main():
                     motion_flow_resize=motion_flow_resize,
                     motion_resize_mode=motion_resize_mode,
                     motion_crop_mode=motion_eval_crop_mode,
+                    num_views=motion_eval_num_views,
                     out_mhi_dtype=torch.float16,
                     dataset_split_txt=manifest_path,
                     class_id_to_label_csv=args.class_id_to_label_csv,
@@ -1014,6 +939,7 @@ def main():
                     motion_flow_resize=motion_flow_resize,
                     motion_resize_mode=motion_resize_mode,
                     motion_crop_mode=motion_eval_crop_mode,
+                    num_views=motion_eval_num_views,
                     yolo_model=args.yolo_model,
                     yolo_conf=float(args.yolo_conf),
                     yolo_device=args.yolo_device,
@@ -1086,6 +1012,7 @@ def main():
             "motion_flow_resize": motion_flow_resize,
             "motion_resize_mode": motion_resize_mode,
             "motion_eval_crop_mode": motion_eval_crop_mode,
+            "motion_eval_num_views": int(motion_eval_num_views),
             "raft_flow_clip": float(args.raft_flow_clip),
             "model_rgb_frames": int(args.model_rgb_frames),
             "model_rgb_sampling": args.model_rgb_sampling,

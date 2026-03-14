@@ -1,0 +1,46 @@
+# Partial train config. CLI flags still override these values.
+
+[data]
+root_dir = "/path/to/train_root"
+input_modality = "motion"
+val_root_dir = ""
+val_manifest = ""
+
+[motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "15"
+diff_threshold = 15.0
+flow_max_disp = 20.0
+flow_backend = "farneback"
+motion_resize_mode = "square"
+motion_eval_crop_mode = "none"
+
+[model]
+model = "i3d"
+embed_dim = 512
+fuse = "avg_then_proj"
+dropout = 0.0
+active_branch = "both"
+
+[text]
+text_bank_backend = "clip"
+class_text_json = ""
+
+[optimization]
+batch_size = 16
+epochs = 40
+optimizer = "adamw"
+lr = 0.0002
+weight_decay = 0.0001
+warmup_steps = 4000
+min_lr = 0.000001
+
+[runtime]
+num_workers = 16
+out_dir = "out/train"
+tb_dir = "runs"
+ckpt_dir = "checkpoints"
+device = "cuda"

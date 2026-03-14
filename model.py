@@ -308,6 +308,7 @@ class TwoStreamI3D_CLIP(nn.Module):
         init_scratch: bool = True,
         compute_second_only: bool = False,
         use_projection: bool = False,
+        dual_projection_heads: bool = False,
         num_classes: int = 0,
         projection_dropout: float = 0.5,
         use_nonlinear_projection: Optional[bool] = None,  # legacy alias
@@ -328,6 +329,7 @@ class TwoStreamI3D_CLIP(nn.Module):
         self.has_bot = active_branch in ("both", "second")
         self.compute_second_only = (active_branch == "second")
         self.use_projection = bool(use_projection)
+        self.dual_projection_heads = bool(self.use_projection and dual_projection_heads)
         if use_stems:
             top_stem = InputStem3D(
                 in_channels=mhi_channels,
@@ -374,12 +376,18 @@ class TwoStreamI3D_CLIP(nn.Module):
             raise ValueError("fuse must be one of: concat, avg_then_proj")
 
         self.clip_head = None
+        self.embed_head = None
         self.cls_head = None
         if self.use_projection:
             self.clip_head = nn.Sequential(
                 nn.LayerNorm(embed_dim),
                 nn.Linear(embed_dim, embed_dim),
             )
+            if self.dual_projection_heads:
+                self.embed_head = nn.Sequential(
+                    nn.LayerNorm(embed_dim),
+                    nn.Linear(embed_dim, embed_dim),
+                )
             if int(num_classes) > 0:
                 self.cls_head = nn.Sequential(
                     nn.Dropout(float(projection_dropout)),
@@ -419,10 +427,19 @@ class TwoStreamI3D_CLIP(nn.Module):
         else:
             ef_raw = self.proj_fuse(0.5 * (et + eb))
 
-        ef = self.clip_head(ef_raw) if self.clip_head is not None else ef_raw
+        ef_clip = self.clip_head(ef_raw) if self.clip_head is not None else ef_raw
+        ef_embed = self.embed_head(ef_raw) if self.embed_head is not None else ef_clip
         logits_cls = self.cls_head(ef_raw) if self.cls_head is not None else None
 
-        return {"emb_top": et, "emb_bot": eb, "emb_fuse": ef, "emb_fuse_raw": ef_raw, "logits_cls": logits_cls}
+        return {
+            "emb_top": et,
+            "emb_bot": eb,
+            "emb_fuse": ef_clip,
+            "emb_fuse_clip": ef_clip,
+            "emb_fuse_embed": ef_embed,
+            "emb_fuse_raw": ef_raw,
+            "logits_cls": logits_cls,
+        }
 
 
 if __name__ == "__main__":

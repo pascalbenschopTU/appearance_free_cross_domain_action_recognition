@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import csv
+import random
 from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 import math
 import torch
@@ -129,6 +130,46 @@ def make_ckpt_payload(
     if logit_scale is not None:
         payload["logit_scale_state"] = logit_scale.state_dict()
     return payload
+
+
+def resolve_ckpt_path(path_or_dir: str) -> str:
+    if os.path.isdir(path_or_dir):
+        latest = find_latest_ckpt(path_or_dir)
+        if latest is None:
+            raise FileNotFoundError(f"No checkpoints found in directory: {path_or_dir}")
+        return latest
+    return path_or_dir
+
+
+def set_seed(seed: int) -> None:
+    random_seed = int(seed)
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+
+
+def force_bn_eval(module: nn.Module) -> None:
+    """Keep BatchNorm layers in eval mode to avoid running-stat drift."""
+    for submodule in module.modules():
+        if isinstance(submodule, nn.BatchNorm3d):
+            submodule.eval()
+
+
+def freeze_module(module: nn.Module) -> None:
+    for parameter in module.parameters():
+        parameter.requires_grad_(False)
+    module.eval()
+
+
+def unfreeze_named_submodules(root: nn.Module, name_substrings: Sequence[str]) -> None:
+    if not name_substrings:
+        return
+    for name, module in root.named_modules():
+        if any(fragment in name for fragment in name_substrings):
+            for parameter in module.parameters(recurse=True):
+                parameter.requires_grad_(True)
 
 
 # ----------------------------
@@ -1295,10 +1336,36 @@ def expand_manifest_args(manifest_args: Optional[Sequence[str]]) -> List[str]:
     return sorted({os.path.abspath(p) for p in out})
 
 
+def resolve_single_manifest(
+    manifest_arg: Optional[str],
+    *,
+    label: str = "Manifest",
+) -> Optional[str]:
+    if manifest_arg is None:
+        return None
+    value = str(manifest_arg).strip()
+    if not value:
+        return None
+    matches = expand_manifest_args([value])
+    if not matches:
+        raise FileNotFoundError(f"{label} not found / glob matched nothing: {manifest_arg}")
+    if len(matches) > 1:
+        print(f"[WARN] multiple matches for {label.lower()}; using first: {matches[0]}", flush=True)
+    return matches[0]
+
+
 def split_name_from_manifest(manifest_path: Optional[str]) -> str:
     if manifest_path is None:
         return "all"
     return os.path.splitext(os.path.basename(manifest_path))[0]
+
+
+def parse_list(value: str) -> List[str]:
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def parse_floats(value: str) -> List[float]:
+    return [float(item.strip()) for item in str(value).split(",") if item.strip()]
 
 
 # -----------------------------
@@ -1324,6 +1391,7 @@ class MotionCkptConfig:
     active_branch: str = "both"  # both | first | second
     compute_second_only: bool = False
     use_projection: bool = False
+    dual_projection_heads: bool = False
     use_nonlinear_projection: bool = False
 
     # Input sizing
@@ -1388,6 +1456,7 @@ def extract_motion_config_from_ckpt(
         active_branch = base.active_branch
 
     use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", base.use_projection)))
+    dual_projection_heads = bool(_get(ckpt_args, "dual_projection_heads", base.dual_projection_heads))
 
     cfg = MotionCkptConfig(
         model=str(_get(ckpt_args, "model", base.model)),
@@ -1400,6 +1469,7 @@ def extract_motion_config_from_ckpt(
         active_branch=active_branch,
         compute_second_only=(active_branch == "second"),
         use_projection=use_projection,
+        dual_projection_heads=dual_projection_heads,
         use_nonlinear_projection=use_projection,
 
         img_size=int(_get(ckpt_args, "img_size", base.img_size)),
@@ -1420,6 +1490,21 @@ def extract_motion_config_from_ckpt(
         fb_flags=int(_get(ckpt_args, "fb_flags", base.fb_flags)),
     )
     return cfg
+
+
+def build_fb_params(args: Any, ckpt_cfg: MotionCkptConfig) -> Dict[str, Any]:
+    def pick(value: Any, fallback: Any) -> Any:
+        return fallback if value is None else value
+
+    return {
+        "pyr_scale": float(pick(getattr(args, "fb_pyr_scale", None), ckpt_cfg.fb_pyr_scale)),
+        "levels": int(pick(getattr(args, "fb_levels", None), ckpt_cfg.fb_levels)),
+        "winsize": int(pick(getattr(args, "fb_winsize", None), ckpt_cfg.fb_winsize)),
+        "iterations": int(pick(getattr(args, "fb_iterations", None), ckpt_cfg.fb_iterations)),
+        "poly_n": int(pick(getattr(args, "fb_poly_n", None), ckpt_cfg.fb_poly_n)),
+        "poly_sigma": float(pick(getattr(args, "fb_poly_sigma", None), ckpt_cfg.fb_poly_sigma)),
+        "flags": int(pick(getattr(args, "fb_flags", None), ckpt_cfg.fb_flags)),
+    }
 
 def apply_per_class_subset(dataset, max_per_class: int, seed: int):
     from collections import defaultdict
