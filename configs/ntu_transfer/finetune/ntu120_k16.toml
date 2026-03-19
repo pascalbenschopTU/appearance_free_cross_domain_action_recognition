@@ -1,0 +1,17 @@
+[data]
+root_dir = "../../datasets/NTU/ntu_120_motion/"
+manifest = "tc-clip/datasets_splits/custom/ntu120_k16_train.txt"
+class_id_to_label_csv = "tc-clip/labels/custom/ntu120_labels.csv"
+val_root_dir = "../../datasets/NTU/nturgb+d_rgb"
+val_manifest = "tc-clip/datasets_splits/custom/ntu120_val.txt"
+val_class_id_to_label_csv = "tc-clip/labels/custom/ntu120_labels.csv"
+
+[pretrained]
+pretrained_ckpt = "out/checkpoint_epoch_027_loss0.6155.pt"
+
+[finetune]
+temporal_mixup_prob = 0.25
+mixup_prob = 0.1
+
+[runtime]
+out_dir = "out/ntu_transfer_cfg/ntu120_k16"

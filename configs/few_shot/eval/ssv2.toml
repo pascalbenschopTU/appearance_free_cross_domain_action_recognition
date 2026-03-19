@@ -1,0 +1,7 @@
+[data]
+root_dir = "../../datasets/20bn-something-something-v2/"
+manifests = ["tc-clip/datasets_splits/ssv2_splits/validation.txt"]
+class_id_to_label_csv = "tc-clip/labels/ssv2_labels.csv"
+
+[text]
+no_rgb = true

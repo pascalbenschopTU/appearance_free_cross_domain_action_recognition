@@ -53,6 +53,7 @@ from util import (
     load_checkpoint,
     extract_motion_config_from_ckpt,
     force_bn_eval,
+    apply_per_class_subset,
     freeze_module,
     resolve_ckpt_path,
     resolve_single_manifest,
@@ -103,6 +104,7 @@ def load_pretrained_weights(
     ckpt = torch.load(ckpt_path, map_location=device)
 
     state = ckpt.get("model_state", ckpt)
+    print(f"Ckpt path {ckpt_path}")
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"[PRETRAIN] loaded model weights from {ckpt_path}")
     if missing:
@@ -325,6 +327,10 @@ def main():
     # Resolve paths
     pretrained_path = resolve_ckpt_path(args.pretrained_ckpt) if args.pretrained_ckpt else None
     manifest_path = resolve_single_manifest(args.manifest, label="Train manifest")
+    if isinstance(args.val_root_dir, str) and not args.val_root_dir.strip():
+        args.val_root_dir = None
+    if isinstance(args.val_manifest, str) and not args.val_manifest.strip():
+        args.val_manifest = None
     val_manifest_path = (
         resolve_single_manifest(args.val_manifest, label="Validation manifest")
         if args.val_manifest
@@ -568,7 +574,24 @@ def main():
                 class_id_to_label_csv=val_class_id_to_label_csv,
             )
             val_collate_fn = collate_video_motion
-        val_subset = maybe_make_fixed_subset(val_dataset, subset_size=args.val_subset_size, seed=args.seed)
+        subset_stats = apply_per_class_subset(
+            val_dataset,
+            max_per_class=int(args.val_samples_per_class),
+            seed=int(args.val_subset_seed),
+        )
+        if subset_stats is not None:
+            print(
+                f"[VAL] per-class subset enabled: <= {subset_stats['max_per_class']} per class, "
+                f"selected={subset_stats['selected']} across {subset_stats['num_classes']} classes "
+                f"(shortage_classes={subset_stats['classes_with_shortage']})",
+                flush=True,
+            )
+
+        val_subset = maybe_make_fixed_subset(
+            val_dataset,
+            subset_size=args.val_subset_size,
+            seed=args.val_subset_seed,
+        )
 
         val_dataloader = DataLoader(
             val_subset,
@@ -778,6 +801,8 @@ def main():
     start_time = time.time()
     use_amp = (device.type == "cuda")
 
+    primary_eval_mode = "rgb_model" if str(args.val_modality).lower() == "rgb" else "motion_only"
+
     if val_dataloader is not None:
         zero_shot_metrics = eval_on_validation_split(
             args=args,
@@ -793,7 +818,7 @@ def main():
             root_dir=args.val_root_dir,
             manifest_path=val_manifest_path,
         )
-        zero_shot_top1 = float(zero_shot_metrics["motion_only"]["top1"])
+        zero_shot_top1 = float(zero_shot_metrics[primary_eval_mode]["top1"])
         append_eval_log(
             eval_log_path,
             {
@@ -1009,11 +1034,14 @@ def main():
             "val_manifest": val_manifest_path,
         }
 
+        epochs_completed = epoch + 1
         do_val = (
             val_dataloader is not None
-            and epoch >= args.val_skip_epochs
-            and (epoch - args.val_skip_epochs) % args.val_every == 0
+            and args.val_every > 0
+            and epochs_completed > args.val_skip_epochs
+            and (epochs_completed - args.val_skip_epochs) % args.val_every == 0
         )
+        checkpoint_mode = str(getattr(args, "checkpoint_mode", "best")).lower()
         if do_val:
             val_metrics = eval_on_validation_split(
                 args=args,
@@ -1029,7 +1057,7 @@ def main():
                 root_dir=args.val_root_dir,
                 manifest_path=val_manifest_path,
             )
-            top_1_acc = float(val_metrics["motion_only"]["top1"])
+            top_1_acc = float(val_metrics[primary_eval_mode]["top1"])
             append_eval_log(
                 eval_log_path,
                 {
@@ -1046,13 +1074,18 @@ def main():
                 f"[VAL] top1={top_1_acc:.6f} best={best_top1_acc if best_top1_acc > -1e8 else float('nan'):.6f} improved={improved}",
                 flush=True,
             )
-            if improved:
-                save_path = os.path.join(
-                    args.ckpt_dir,
-                    f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
-                )
+            should_save = checkpoint_mode == "latest" or improved
+            if should_save:
+                if checkpoint_mode == "latest":
+                    save_path = os.path.join(args.ckpt_dir, "checkpoint_latest.pt")
+                else:
+                    save_path = os.path.join(
+                        args.ckpt_dir,
+                        f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}_top1_{top_1_acc:.4f}.pt",
+                    )
                 torch.save(payload, save_path)
                 print(f"[CKPT] saved {save_path}", flush=True)
+            if improved:
                 best_top1_acc = top_1_acc
                 early_stop_bad_epochs = 0
             else:
@@ -1069,13 +1102,18 @@ def main():
             if val_dataloader is not None:
                 print(f"[EPOCH {epoch:03d}] validation skipped (schedule)", flush=True)
             else:
-                if current < best_loss:
-                    save_path = os.path.join(
-                        args.ckpt_dir,
-                        f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}.pt",
-                    )
+                should_save = checkpoint_mode == "latest" or current < best_loss
+                if should_save:
+                    if checkpoint_mode == "latest":
+                        save_path = os.path.join(args.ckpt_dir, "checkpoint_latest.pt")
+                    else:
+                        save_path = os.path.join(
+                            args.ckpt_dir,
+                            f"checkpoint_epoch_{epoch:03d}_step_{global_step:07d}_loss_{current:.4f}.pt",
+                        )
                     torch.save(payload, save_path)
                     print(f"[CKPT] saved {save_path}", flush=True)
+                if current < best_loss:
                     best_loss = current
 
         if stop_training:

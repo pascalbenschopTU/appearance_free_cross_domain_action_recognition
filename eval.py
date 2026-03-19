@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
 Evaluate a TwoStreamI3D_CLIP checkpoint on a folder dataset (root/class_name/*.{mp4,...})
-using CLIP TEXT embeddings, with THREE evaluation modes logged every run:
+using CLIP TEXT embeddings, with up to THREE evaluation modes logged every run:
 
-1) motion_only:          your motion encoder -> CLIP text bank
-2) clip_rgb_only:        pretrained CLIP vision encoder -> CLIP text bank
-3) motion_plus_rgb:      logit-level ensemble of (1) and (2)
+1) motion_only / rgb_model: your trained model branch -> CLIP text bank
+2) clip_rgb_only:           pretrained CLIP vision encoder -> CLIP text bank
+3) *_plus_clip_ensemble:    logit-level ensemble of (1) and (2)
 
 Notes:
 - No retraining required.
 - RGB features are extracted from sampled frames (default: 1 center frame).
 - Outputs saved with suffixes:
-    metrics_motion_only.json
+    metrics_<primary>.json
     metrics_clip_rgb_only.json
-    metrics_motion_plus_rgb.json
+    metrics_<primary>_plus_clip_ensemble.json
     confusion_*.csv/.npy
     per_class_*.csv
 
@@ -251,6 +251,7 @@ def compute_metrics_and_artifacts(
     top1_correct: int,
     top5_correct: int,
     extra_json: Dict,
+    summary_only: bool = False,
 ):
     num_classes = len(classnames)
     cm = confusion_matrix(y_true, y_pred, num_classes)
@@ -282,19 +283,20 @@ def compute_metrics_and_artifacts(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # JSON
-    with open(os.path.join(out_dir, f"metrics_{tag}.json"), "w") as f:
-        json.dump(out, f, indent=2)
+    if not summary_only:
+        # JSON
+        with open(os.path.join(out_dir, f"metrics_{tag}.json"), "w") as f:
+            json.dump(out, f, indent=2)
 
-    # CSVs
-    save_cm_csv(cm, classnames, os.path.join(out_dir, f"confusion_{tag}.csv"))
-    save_per_class_csv(
-        classnames, precision, recall, f1, support, top1_acc,
-        os.path.join(out_dir, f"per_class_{tag}.csv")
-    )
+        # CSVs
+        save_cm_csv(cm, classnames, os.path.join(out_dir, f"confusion_{tag}.csv"))
+        save_per_class_csv(
+            classnames, precision, recall, f1, support, top1_acc,
+            os.path.join(out_dir, f"per_class_{tag}.csv")
+        )
 
-    # PDF confusion matrix
-    save_cm_pdf(cm, classnames, os.path.join(out_dir, f"confusion_{tag}.pdf"), title=f"Confusion Matrix ({tag})")
+        # PDF confusion matrix
+        save_cm_pdf(cm, classnames, os.path.join(out_dir, f"confusion_{tag}.pdf"), title=f"Confusion Matrix ({tag})")
 
     return metrics
 
@@ -522,7 +524,9 @@ def evaluate_one_split(
                         raise ValueError(f"use_heads contains '{h}', but available are {list(logits_by_head.keys())}")
                     logits_motion_ens = logits_by_head[h] * w if logits_motion_ens is None else logits_motion_ens + logits_by_head[h] * w
 
-            if not args.no_rgb:
+            use_clip = not bool(getattr(args, "no_clip", getattr(args, "no_rgb", False)))
+
+            if use_clip:
                 v_rgb = clip_rgb_video_embedding(
                     clip_model=clip_model,
                     preprocess=clip_preprocess,
@@ -534,7 +538,7 @@ def evaluate_one_split(
                 if v_rgb.shape[-1] != text_bank.shape[-1]:
                     raise RuntimeError(
                         f"RGB/text embedding dim mismatch: rgb={v_rgb.shape[-1]} vs text_bank={text_bank.shape[-1]}. "
-                        "Use --no_rgb for this setup."
+                        "Use --no_clip for this setup."
                     )
                 logits_rgb = scale_clip * (v_rgb @ text_bank.t().float())
                 if class_to_desc_indices is not None:
@@ -547,7 +551,7 @@ def evaluate_one_split(
             top5_motion_ens += topk_correct(logits_motion_ens, y, min(5, num_classes))
             y_pred_motion_ens.append(torch.argmax(logits_motion_ens, dim=-1).detach().cpu().numpy())
 
-            if not args.no_rgb:
+            if use_clip:
                 top1_rgb += topk_correct(logits_rgb, y, 1)
                 top5_rgb += topk_correct(logits_rgb, y, min(5, num_classes))
                 y_pred_rgb_only.append(torch.argmax(logits_rgb, dim=-1).detach().cpu().numpy())
@@ -561,8 +565,8 @@ def evaluate_one_split(
                 print(
                     f"[{n}/{len(dataset)}] elapsed={dt:.1f}s | "
                     f"ens_motion_top1={top1_motion_ens/n:.4f} | "
-                    f"rgb_top1={(top1_rgb/n if not args.no_rgb else 0):.4f} | "
-                    f"ens_fused_top1={(top1_fused_ens/n if not args.no_rgb else 0):.4f}",
+                    f"clip_top1={(top1_rgb/n if use_clip else 0):.4f} | "
+                    f"ens_fused_top1={(top1_fused_ens/n if use_clip else 0):.4f}",
                     flush=True
                 )
 
@@ -577,8 +581,19 @@ def evaluate_one_split(
     # -----------------------------
     os.makedirs(out_dir, exist_ok=True)
 
+    summary_only = bool(getattr(args, "summary_only", False))
+
+    eval_input_modality = str(
+        getattr(
+            args,
+            "input_modality",
+            getattr(args, "val_modality", getattr(args, "train_modality", "motion")),
+        )
+    ).lower()
+    primary_mode = "rgb_model" if eval_input_modality == "rgb" else "motion_only"
+
     m_metrics = compute_metrics_and_artifacts(
-        tag="motion_only",
+        tag=primary_mode,
         out_dir=out_dir,
         classnames=classnames,
         y_true=y_true,
@@ -586,11 +601,12 @@ def evaluate_one_split(
         top1_correct=top1_motion_ens,
         top5_correct=top5_motion_ens,
         extra_json=base_json,
+        summary_only=summary_only,
     )
 
     r_metrics = None
     f_metrics = None
-    if not args.no_rgb:
+    if use_clip:
         y_pred_rgb_only = np.concatenate(y_pred_rgb_only, axis=0)
         y_pred_fused_ens = np.concatenate(y_pred_fused_ens, axis=0)
 
@@ -603,10 +619,11 @@ def evaluate_one_split(
             top1_correct=top1_rgb,
             top5_correct=top5_rgb,
             extra_json=base_json,
+            summary_only=summary_only,
         )
 
         f_metrics = compute_metrics_and_artifacts(
-            tag="motion_plus_rgb_ensemble",
+            tag=f"{primary_mode}_plus_clip_ensemble",
             out_dir=out_dir,
             classnames=classnames,
             y_true=y_true,
@@ -614,13 +631,14 @@ def evaluate_one_split(
             top1_correct=top1_fused_ens,
             top5_correct=top5_fused_ens,
             extra_json=base_json,
+            summary_only=summary_only,
         )
 
     return {
-        "motion_only": m_metrics,
-        **({} if args.no_rgb else {
+        primary_mode: m_metrics,
+        **({} if not use_clip else {
             "clip_rgb_only": r_metrics,
-            "motion_plus_rgb_ensemble": f_metrics,
+            f"{primary_mode}_plus_clip_ensemble": f_metrics,
         })
     }
 
@@ -633,18 +651,19 @@ def evaluate_one_split(
 def main():
     args = parse_eval_args(default_device="cuda" if torch.cuda.is_available() else "cpu")
     args.text_bank_backend = str(args.text_bank_backend).lower()
+    args.no_clip = bool(getattr(args, "no_clip", getattr(args, "no_rgb", False)))
     if args.text_bank_backend == "precomputed":
         if not args.precomputed_text_embeddings.strip() or not args.precomputed_text_index.strip():
             raise ValueError(
                 "--text_bank_backend precomputed requires --precomputed_text_embeddings and --precomputed_text_index."
             )
-        if not args.no_rgb:
+        if not args.no_clip:
             print(
                 "[WARN] --text_bank_backend precomputed is incompatible with CLIP RGB ensembling "
-                "(RGB embeddings are 512-D, precomputed bank may differ). Forcing --no_rgb.",
+                "(RGB embeddings are 512-D, precomputed bank may differ). Forcing --no_clip.",
                 flush=True,
             )
-            args.no_rgb = True
+            args.no_clip = True
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"args: {args}")
 

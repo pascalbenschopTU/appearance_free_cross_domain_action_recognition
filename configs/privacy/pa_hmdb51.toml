@@ -1,0 +1,56 @@
+# PA-HMDB51 privacy benchmark defaults.
+# CLI flags override these values.
+
+[data]
+input_modality = "rgb"
+attributes = "all"
+
+[motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "25"
+rgb_frames = 64
+rgb_sampling = "uniform"
+rgb_norm = "i3d"
+diff_threshold = 15.0
+flow_max_disp = 20.0
+flow_backend = "farneback"
+fb_pyr_scale = 0.5
+fb_levels = 3
+fb_winsize = 15
+fb_iterations = 3
+fb_poly_n = 5
+fb_poly_sigma = 1.2
+fb_flags = 0
+motion_img_resize = 224
+motion_flow_resize = 112
+motion_resize_mode = "square"
+motion_crop_mode = "none"
+
+[model]
+model_backbone = "resnet18"
+embed_dim = 512
+fuse = "avg_then_proj"
+dropout = 0.0
+head_dropout = 0.0
+active_branch = "first"
+class_weight_mode = "effective_sample_count"
+resnet_imagenet_pretrained = true
+resnet_temporal_samples = 32
+resnet_temporal_pool = "avg"
+
+[optimization]
+batch_size = 16
+epochs = 10
+lr = 0.0003
+min_lr = 0.00001
+weight_decay = 0.0001
+warmup_steps = 20
+
+[runtime]
+num_workers = 16
+print_every = 20
+device = "cuda"
+seed = 0

@@ -1,0 +1,59 @@
+# Shared finetune defaults for the two-class skin-tone shortcut probe.
+
+[data]
+root_dir = "../../datasets/skin_tone_actions/camera_far"
+train_modality = "motion"
+val_modality = "motion"
+motion_data_source = "video"
+val_root_dir = ""
+text_bank_backend = "clip"
+val_subset_size = 0
+val_samples_per_class = 0
+val_subset_seed = 0
+
+[pretrained]
+pretrained_ckpt = ""
+
+[motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "25"
+diff_threshold = 15.0
+flow_max_disp = 20.0
+flow_backend = "farneback"
+motion_img_resize = 256
+motion_flow_resize = 128
+motion_resize_mode = "short_side"
+motion_train_crop_mode = "random"
+motion_eval_crop_mode = "center"
+
+[model]
+active_branch = "both"
+
+[finetune]
+freeze_backbone = false
+freeze_bn_stats = false
+batch_size = 4
+epochs = 10
+lr = 0.0002
+weight_decay = 0.0001
+warmup_steps = 50
+min_lr = 0.000001
+label_smoothing = 0.0
+mixup_alpha = 0.0
+mixup_prob = 0.0
+temporal_mixup_prob = 0.0
+lambda_rep_mix = 0.0
+
+[runtime]
+num_workers = 8
+log_every = 10
+save_every = 50
+checkpoint_mode = "latest"
+val_skip_epochs = 999
+val_every = 0
+seed = 0
+device = "cuda"
+out_dir = "out/skin_tone_probe/default"

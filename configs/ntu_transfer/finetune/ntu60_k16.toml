@@ -1,0 +1,13 @@
+[data]
+root_dir = "../../datasets/NTU/ntu60_k16_motion_zst_256_128/"
+manifest = "tc-clip/datasets_splits/custom/ntu60_k16_train.txt"
+class_id_to_label_csv = "tc-clip/labels/custom/ntu60_labels.csv"
+val_root_dir = "../../datasets/NTU/nturgb+d_rgb"
+val_manifest = "tc-clip/datasets_splits/custom/ntu60_val.txt"
+val_class_id_to_label_csv = "tc-clip/labels/custom/ntu60_labels.csv"
+
+[pretrained]
+pretrained_ckpt = "out/checkpoint_epoch_027_loss0.6155.pt"
+
+[runtime]
+out_dir = "out/ntu_transfer_cfg/ntu60_k16"

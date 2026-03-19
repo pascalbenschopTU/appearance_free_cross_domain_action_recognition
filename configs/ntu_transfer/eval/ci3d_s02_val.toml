@@ -1,0 +1,7 @@
+[data]
+root_dir = "../../datasets/CI3D/s02_rgb_cropped"
+manifests = ["tc-clip/datasets_splits/custom/ci3d_s02_val.txt"]
+class_id_to_label_csv = "tc-clip/labels/custom/ci3d_s02_labels.csv"
+
+[runtime]
+out_dir = "eval_out/ci3d_s02_val"

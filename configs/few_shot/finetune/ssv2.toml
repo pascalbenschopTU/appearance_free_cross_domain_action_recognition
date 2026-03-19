@@ -1,0 +1,17 @@
+[data]
+root_dir = "../../datasets/ssv2_motion/"
+class_id_to_label_csv = "tc-clip/labels/ssv2_labels.csv"
+val_root_dir = "../../datasets/20bn-something-something-v2/"
+val_manifest = "tc-clip/datasets_splits/ssv2_splits/validation.txt"
+val_class_id_to_label_csv = "tc-clip/labels/ssv2_labels.csv"
+
+[pretrained]
+pretrained_ckpt = "out/checkpoint_epoch_027_loss0.6155.pt"
+
+[finetune]
+temporal_mixup_prob = 0.5
+temporal_mixup_y_min = 0.35
+temporal_mixup_y_max = 0.65
+mixup_alpha = 0.25
+mixup_prob = 0.3
+lambda_rep_mix = 0.05

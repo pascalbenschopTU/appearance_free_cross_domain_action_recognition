@@ -1,0 +1,38 @@
+# Shared NTU transfer evaluation defaults.
+
+[data]
+input_modality = "motion"
+
+[motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "15"
+diff_threshold = 25.0
+flow_max_disp = 20.0
+flow_backend = "farneback"
+fb_pyr_scale = 0.5
+fb_levels = 5
+fb_winsize = 21
+fb_iterations = 5
+fb_poly_n = 7
+fb_poly_sigma = 1.5
+fb_flags = 0
+motion_img_resize = 256
+motion_flow_resize = 128
+motion_resize_mode = "short_side"
+motion_eval_crop_mode = "center"
+
+[text]
+text_bank_backend = "clip"
+use_heads = "fuse"
+head_weights = "1.0"
+rgb_frames = 1
+rgb_sampling = "center"
+rgb_weight = 0.5
+
+[runtime]
+batch_size = 8
+num_workers = 16
+device = "cuda"

@@ -1,0 +1,7 @@
+[data]
+root_dir = "../../datasets/NTU/nturgb+d_rgb"
+manifests = ["tc-clip/datasets_splits/custom/ntu120_val.txt"]
+class_id_to_label_csv = "tc-clip/labels/custom/ntu120_labels.csv"
+
+[runtime]
+out_dir = "eval_out/ntu120_val"

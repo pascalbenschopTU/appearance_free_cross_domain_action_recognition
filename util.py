@@ -44,6 +44,13 @@ KINETICS_CLASS_KEY_ALIASES = {
     "swimming breast stroke": "swimming breaststroke",
 }
 
+HASHED_VIDEO_SUFFIX_RE = re.compile(r"^(?P<base>.+)_[0-9a-f]{8,}$", re.IGNORECASE)
+
+
+def _strip_hashed_video_suffix(stem: str) -> str:
+    match = HASHED_VIDEO_SUFFIX_RE.match(stem)
+    return match.group("base") if match else stem
+
 # ----------------------------
 # Checkpoint loading
 # ----------------------------
@@ -1060,16 +1067,24 @@ def list_videos(
         all_vids = _scan_videos_under_root(root)
 
         rel_map: Dict[str, str] = {}                 # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
-        stem_map: Dict[str, List[str]] = {}          # "c" (lower) -> ["/abs/.../c.zst", ...]
+        stem_map: Dict[str, List[str]] = {}          # "c" (lower) -> ["/abs/.../a/b/c.zst", ...]
         dir_stem_map: Dict[Tuple[str, str], List[str]] = {}  # ("a/b", "c") -> ["/abs/.../a/b/c.zst", ...]
+        stripped_stem_map: Dict[str, List[str]] = {}         # "c" -> ["/abs/.../a/b/c_<hash>.avi", ...]
+        dir_stripped_stem_map: Dict[Tuple[str, str], List[str]] = {}  # ("a/b", "c") -> ["/abs/.../a/b/c_<hash>.avi", ...]
 
         for p in all_vids:
             rel = p.relative_to(root).as_posix()
             rel_map[rel] = str(p)
-            stem_map.setdefault(p.stem.lower(), []).append(str(p))
             parent = p.parent.relative_to(root).as_posix().lower()
-            key = ("" if parent == "." else parent, p.stem.lower())
+            stem = p.stem.lower()
+            key = ("" if parent == "." else parent, stem)
+            stem_map.setdefault(stem, []).append(str(p))
             dir_stem_map.setdefault(key, []).append(str(p))
+            stripped_stem = _strip_hashed_video_suffix(stem)
+            if stripped_stem != stem:
+                stripped_stem_map.setdefault(stripped_stem, []).append(str(p))
+                stripped_key = (key[0], stripped_stem)
+                dir_stripped_stem_map.setdefault(stripped_key, []).append(str(p))
 
         paths: List[str] = []
         labels: List[int] = []
@@ -1120,6 +1135,17 @@ def list_videos(
                     f"found {len(dir_hits)} files under {root_dir}."
                 )
 
+            stripped_dir_hits = dir_stripped_stem_map.get(key, [])
+            if len(stripped_dir_hits) == 1:
+                paths.append(stripped_dir_hits[0])
+                labels.append(int(y))
+                continue
+            if len(stripped_dir_hits) > 1:
+                raise ValueError(
+                    f"Ambiguous dir+stem hashed match for {fname!r} (dir={key[0]!r}, stem={stem!r}): "
+                    f"found {len(stripped_dir_hits)} files under {root_dir}."
+                )
+
             # 4) Stem-only match (basename without extension), case-insensitive
             hits = stem_map.get(stem, [])
             if len(hits) == 1:
@@ -1129,6 +1155,17 @@ def list_videos(
             if len(hits) > 1:
                 raise ValueError(
                     f"Ambiguous stem match for {fname!r} (stem={stem!r}): found {len(hits)} files under {root_dir}. "
+                    f"Use relative paths in the txt to disambiguate."
+                )
+
+            stripped_hits = stripped_stem_map.get(stem, [])
+            if len(stripped_hits) == 1:
+                paths.append(stripped_hits[0])
+                labels.append(int(y))
+                continue
+            if len(stripped_hits) > 1:
+                raise ValueError(
+                    f"Ambiguous hashed stem match for {fname!r} (stem={stem!r}): found {len(stripped_hits)} files under {root_dir}. "
                     f"Use relative paths in the txt to disambiguate."
                 )
 

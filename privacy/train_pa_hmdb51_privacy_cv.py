@@ -16,7 +16,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Sampler
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
 
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -26,6 +31,7 @@ WORKSPACE_ROOT = MODEL_DIR.parent.parent
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
+from config import parse_privacy_pa_hmdb51_args
 from privacy.pa_hmdb51 import (
     ATTRIBUTES,
     PrivacyFold,
@@ -47,6 +53,243 @@ class FoldArtifacts:
     label_csv: Path
 
 
+class RepeatedVideoTemporalSampler(Sampler[int]):
+    def __init__(self, base_len: int, repeats: int, seed: int):
+        self.base_len = int(base_len)
+        self.repeats = max(1, int(repeats))
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + 1000003 * self.epoch)
+        for repeat_idx in range(self.repeats):
+            offset = repeat_idx * self.base_len
+            for video_idx in torch.randperm(self.base_len, generator=generator).tolist():
+                yield offset + video_idx
+
+    def __len__(self) -> int:
+        return self.base_len * self.repeats
+
+
+class TemporalSliceDataset(Dataset):
+    def __init__(self, base_dataset, *, input_modality: str, repeats: int, seed: int):
+        self.base_dataset = base_dataset
+        self.input_modality = str(input_modality).lower()
+        self.repeats = max(1, int(repeats))
+        self.seed = int(seed)
+        self.epoch = 0
+        self.paths = list(getattr(base_dataset, 'paths', []))
+        self.classnames = list(getattr(base_dataset, 'classnames', []))
+        base_labels = list(getattr(base_dataset, 'labels', []))
+        self.labels = base_labels * self.repeats
+        if self.input_modality == 'rgb' and hasattr(base_dataset, 'rgb_frames'):
+            self.rgb_frames = 1
+
+    def __len__(self) -> int:
+        return len(self.base_dataset) * self.repeats
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        if hasattr(self.base_dataset, 'set_epoch'):
+            self.base_dataset.set_epoch(epoch)
+
+    def build_sampler(self, seed: int) -> RepeatedVideoTemporalSampler:
+        return RepeatedVideoTemporalSampler(len(self.base_dataset), self.repeats, seed)
+
+    def _frame_index(self, total_frames: int, repeat_idx: int, video_idx: int) -> int:
+        total_frames = int(total_frames)
+        if total_frames <= 1:
+            return 0
+        if self.repeats == 1:
+            anchors = np.array([(total_frames - 1) / 2.0], dtype=np.float32)
+        else:
+            anchors = np.linspace(0, total_frames - 1, num=self.repeats, dtype=np.float32)
+        anchor = float(anchors[min(repeat_idx, self.repeats - 1)])
+        step = max(1.0, float(total_frames - 1) / float(max(1, self.repeats - 1))) if self.repeats > 1 else float(total_frames)
+        jitter_scale = 0.45 * step if total_frames > self.repeats else 0.0
+        rng = np.random.default_rng(self.seed + 1000003 * self.epoch + 7919 * repeat_idx + video_idx)
+        jitter = float(rng.uniform(-jitter_scale, jitter_scale)) if jitter_scale > 0 else 0.0
+        return int(np.clip(np.rint(anchor + jitter), 0, total_frames - 1))
+
+    @staticmethod
+    def _slice_time(x: torch.Tensor, frame_idx: int) -> torch.Tensor:
+        if x.ndim != 4 or x.shape[1] <= 0:
+            return x
+        frame_idx = int(np.clip(frame_idx, 0, int(x.shape[1]) - 1))
+        return x[:, frame_idx:frame_idx + 1].contiguous()
+
+    def __getitem__(self, idx: int):
+        base_len = len(self.base_dataset)
+        repeat_idx = int(idx // base_len)
+        video_idx = int(idx % base_len)
+        primary, secondary, label, path = self.base_dataset[video_idx]
+
+        if self.input_modality == 'rgb':
+            rgb_idx = self._frame_index(primary.shape[1], repeat_idx, video_idx)
+            primary = self._slice_time(primary, rgb_idx)
+            return primary, secondary, label, path
+
+        if self.input_modality == 'mhi':
+            mhi_total = int(primary.shape[1]) if primary.ndim == 4 else 1
+            mhi_idx = self._frame_index(mhi_total, repeat_idx, video_idx)
+            primary = self._slice_time(primary, mhi_idx)
+            if secondary.ndim == 4 and secondary.shape[1] > 0:
+                flow_idx = int(round(mhi_idx * max(0, int(secondary.shape[1]) - 1) / max(1, mhi_total - 1)))
+                secondary = self._slice_time(secondary, flow_idx)
+            return primary, secondary, label, path
+
+        if self.input_modality == 'flow':
+            flow_total = int(secondary.shape[1]) if secondary.ndim == 4 else 1
+            flow_idx = self._frame_index(flow_total, repeat_idx, video_idx)
+            secondary = self._slice_time(secondary, flow_idx)
+            if primary.ndim == 4 and primary.shape[1] > 0:
+                mhi_idx = int(round(flow_idx * max(0, int(primary.shape[1]) - 1) / max(1, flow_total - 1)))
+                primary = self._slice_time(primary, mhi_idx)
+            return primary, secondary, label, path
+
+        return primary, secondary, label, path
+
+
+class ResNetImageEncoder(nn.Module):
+    def __init__(
+        self,
+        backbone_name: str,
+        embed_dim: int,
+        *,
+        input_modality: str,
+        imagenet_pretrained: bool = True,
+        temporal_samples: int = 4,
+        temporal_pool: str = "avg",
+        input_rgb_norm: str = "i3d",
+    ):
+        super().__init__()
+        try:
+            from torchvision import models as tv_models
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "torchvision is required for model_backbone=resnet18/resnet50. Install torchvision in the active environment."
+            ) from exc
+
+        backbone_name = str(backbone_name).lower()
+        if backbone_name == "resnet18":
+            weights = tv_models.ResNet18_Weights.IMAGENET1K_V1 if imagenet_pretrained else None
+            backbone = tv_models.resnet18(weights=weights)
+        elif backbone_name == "resnet50":
+            weights = tv_models.ResNet50_Weights.IMAGENET1K_V2 if imagenet_pretrained else None
+            backbone = tv_models.resnet50(weights=weights)
+        else:
+            raise ValueError(f"Unsupported ResNet backbone: {backbone_name}")
+
+        feature_dim = int(backbone.fc.in_features)
+        backbone.fc = nn.Identity()
+
+        self.backbone = backbone
+        self.input_modality = str(input_modality).lower()
+        self.temporal_samples = max(1, int(temporal_samples))
+        self.temporal_pool = str(temporal_pool).lower()
+        self.input_rgb_norm = str(input_rgb_norm).lower()
+        if self.temporal_pool not in ("avg", "max"):
+            raise ValueError(f"Unsupported temporal_pool for ResNetImageEncoder: {temporal_pool}")
+        if self.input_modality not in ("rgb", "mhi", "flow"):
+            raise ValueError(f"Unsupported input_modality for ResNetImageEncoder: {input_modality}")
+
+        self.proj = nn.Identity() if feature_dim == int(embed_dim) else nn.Linear(feature_dim, int(embed_dim))
+        self.register_buffer("imagenet_mean", torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("clip_mean", torch.tensor([0.48145466, 0.4578275, 0.40821073], dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("clip_std", torch.tensor([0.26862954, 0.26130258, 0.27577711], dtype=torch.float32).view(1, 3, 1, 1))
+
+    def _normalize_for_imagenet(self, frames: torch.Tensor) -> torch.Tensor:
+        return (frames - self.imagenet_mean.to(device=frames.device, dtype=frames.dtype)) / self.imagenet_std.to(
+            device=frames.device,
+            dtype=frames.dtype,
+        )
+
+    def _prepare_rgb_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        if self.input_rgb_norm == "i3d":
+            frames = (frames + 1.0) * 0.5
+        elif self.input_rgb_norm == "clip":
+            frames = frames * self.clip_std.to(device=frames.device, dtype=frames.dtype) + self.clip_mean.to(
+                device=frames.device,
+                dtype=frames.dtype,
+            )
+        elif self.input_rgb_norm == "none":
+            pass
+        else:
+            raise ValueError(f"Unsupported input_rgb_norm for ResNetImageEncoder: {self.input_rgb_norm}")
+        return self._normalize_for_imagenet(frames)
+
+    def _prepare_mhi_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        channels = int(frames.shape[1])
+        if channels == 1:
+            frames = frames.repeat(1, 3, 1, 1)
+        elif channels == 2:
+            frames = torch.cat([frames, frames.mean(dim=1, keepdim=True)], dim=1)
+        elif channels >= 3:
+            frames = frames[:, :3]
+        else:
+            raise ValueError(f"Expected MHI frames with at least 1 channel, got {channels}")
+        frames = frames.to(torch.float32).clamp_(0.0, 1.0)
+        return self._normalize_for_imagenet(frames)
+
+    def _prepare_flow_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        if int(frames.shape[1]) < 2:
+            raise ValueError(f"Expected optical flow with at least 2 channels, got {tuple(frames.shape)}")
+        flow_uv = frames[:, :2].to(torch.float32).clamp_(-1.0, 1.0)
+        magnitude = torch.sqrt((flow_uv * flow_uv).sum(dim=1, keepdim=True)).clamp_(0.0, math.sqrt(2.0))
+        magnitude = magnitude / math.sqrt(2.0)
+        frames = torch.cat([flow_uv, magnitude], dim=1)
+        frames = (frames + 1.0) * 0.5
+        frames[:, 2:3] = magnitude
+        frames = frames.clamp_(0.0, 1.0)
+        return self._normalize_for_imagenet(frames)
+
+    def _prepare_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        if self.input_modality == "rgb":
+            return self._prepare_rgb_frames(frames)
+        if self.input_modality == "mhi":
+            return self._prepare_mhi_frames(frames)
+        return self._prepare_flow_frames(frames)
+
+    def _select_frame_indices(self, total_frames: int, device: torch.device) -> torch.Tensor:
+        sample_count = min(int(total_frames), int(self.temporal_samples))
+        if sample_count <= 0:
+            raise ValueError(f"Expected at least one temporal slice, got total_frames={total_frames}")
+        if self.training and total_frames > sample_count:
+            return torch.sort(torch.randperm(total_frames, device=device)[:sample_count]).values
+        return torch.linspace(
+            0,
+            max(0, total_frames - 1),
+            steps=sample_count,
+            device=device,
+        ).round().long()
+
+    def forward(self, inputs: torch.Tensor, _: torch.Tensor | None = None) -> Dict[str, torch.Tensor]:
+        if inputs.ndim != 5:
+            raise ValueError(f"Expected sequence tensor shaped [B,C,T,H,W], got {tuple(inputs.shape)}")
+
+        batch_size, channels, total_frames, height, width = inputs.shape
+        frame_indices = self._select_frame_indices(total_frames, inputs.device)
+        sample_count = int(frame_indices.numel())
+        sampled = inputs.index_select(2, frame_indices)
+        sampled = sampled.permute(0, 2, 1, 3, 4).contiguous().view(batch_size * sample_count, channels, height, width)
+        sampled = self._prepare_frames(sampled)
+        frame_embeddings = self.backbone(sampled).view(batch_size, sample_count, -1)
+        frame_embeddings = self.proj(frame_embeddings)
+        if self.temporal_pool == "max":
+            pooled = frame_embeddings.max(dim=1).values
+        else:
+            pooled = frame_embeddings.mean(dim=1)
+        return {
+            "emb_fuse_raw": pooled,
+            "emb_frames_raw": frame_embeddings,
+        }
+
+
 class PrivacyAttackModel(nn.Module):
     def __init__(self, encoder: nn.Module, embed_dim: int, num_classes: int, head_dropout: float = 0.0):
         super().__init__()
@@ -59,84 +302,17 @@ class PrivacyAttackModel(nn.Module):
     def forward(self, mhi: torch.Tensor, flow: torch.Tensor | None) -> Dict[str, torch.Tensor]:
         outputs = self.encoder(mhi, flow)
         outputs["logits"] = self.head(outputs["emb_fuse_raw"])
+        frame_embeddings = outputs.get("emb_frames_raw", None)
+        if frame_embeddings is not None:
+            outputs["logits_frames"] = self.head(frame_embeddings)
         return outputs
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root_dir", type=str, default=str(WORKSPACE_ROOT / "datasets" / "hmdb51"))
-    parser.add_argument("--input_modality", type=str, default="motion", choices=["motion", "rgb"])
-    parser.add_argument(
-        "--privacy_attr_dir",
-        type=str,
-        default=str(THIS_DIR / "data" / "pa_hmdb51" / "PrivacyAttributes"),
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return parse_privacy_pa_hmdb51_args(
+        argv,
+        default_device="cuda" if torch.cuda.is_available() else "cpu",
     )
-    parser.add_argument(
-        "--hmdb_val_manifest_dir",
-        type=str,
-        default=str(MODEL_DIR / "tc-clip" / "datasets_splits" / "hmdb_splits"),
-    )
-    parser.add_argument(
-        "--hmdb_label_csv",
-        type=str,
-        default=str(MODEL_DIR / "tc-clip" / "labels" / "hmdb_51_labels.csv"),
-    )
-    parser.add_argument("--out_dir", type=str, default=str(THIS_DIR / "out" / "pa_hmdb51_privacy_cv"))
-    parser.add_argument(
-        "--attributes",
-        type=str,
-        default="all",
-        help="Comma-separated list from: gender,skin_color,face,nudity,relationship or 'all'.",
-    )
-    parser.add_argument("--prepare_only", action="store_true")
-    parser.add_argument("--pretrained_ckpt", type=str, default="")
-    parser.add_argument("--resume", type=str, default="")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--seed", type=int, default=0)
-
-    parser.add_argument("--img_size", type=int, default=224)
-    parser.add_argument("--mhi_frames", type=int, default=32)
-    parser.add_argument("--flow_frames", type=int, default=128)
-    parser.add_argument("--flow_hw", type=int, default=112)
-    parser.add_argument("--mhi_windows", type=str, default="25")
-    parser.add_argument("--rgb_frames", type=int, default=64)
-    parser.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
-    parser.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
-    parser.add_argument("--diff_threshold", type=float, default=15.0)
-    parser.add_argument("--flow_max_disp", type=float, default=20.0)
-    parser.add_argument("--flow_normalize", action="store_true")
-    parser.add_argument("--no_flow_normalize", dest="flow_normalize", action="store_false")
-    parser.set_defaults(flow_normalize=True)
-    parser.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
-    parser.add_argument("--fb_pyr_scale", type=float, default=0.5)
-    parser.add_argument("--fb_levels", type=int, default=3)
-    parser.add_argument("--fb_winsize", type=int, default=15)
-    parser.add_argument("--fb_iterations", type=int, default=3)
-    parser.add_argument("--fb_poly_n", type=int, default=5)
-    parser.add_argument("--fb_poly_sigma", type=float, default=1.2)
-    parser.add_argument("--fb_flags", type=int, default=0)
-    parser.add_argument("--motion_img_resize", type=int, default=224)
-    parser.add_argument("--motion_flow_resize", type=int, default=112)
-    parser.add_argument("--motion_resize_mode", type=str, default="square", choices=["square", "short_side"])
-    parser.add_argument("--motion_crop_mode", type=str, default="none", choices=["none", "random", "center"])
-
-    parser.add_argument("--embed_dim", type=int, default=512)
-    parser.add_argument("--fuse", type=str, default="avg_then_proj", choices=["avg_then_proj", "concat"])
-    parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--head_dropout", type=float, default=0.0)
-    parser.add_argument("--use_stems", action="store_true")
-    parser.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
-    parser.add_argument("--class_weight_mode", type=str, default="inverse_freq", choices=["none", "inverse_freq"])
-
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--min_lr", type=float, default=1e-5)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--warmup_steps", type=int, default=20)
-    parser.add_argument("--num_workers", type=int, default=16)
-    parser.add_argument("--print_every", type=int, default=20)
-    return parser.parse_args()
 
 
 def set_seed(seed: int) -> None:
@@ -222,6 +398,21 @@ def parse_attributes(spec: str) -> List[str]:
 
 def resolve_input_modality(args: argparse.Namespace) -> str:
     modality = str(args.input_modality).lower()
+    backbone = str(args.model_backbone).lower()
+    if backbone in ("resnet18", "resnet50"):
+        if modality not in ("rgb", "mhi", "flow"):
+            raise ValueError(f"model_backbone={backbone} only supports input_modality in rgb,mhi,flow (got {modality}).")
+        if args.active_branch != "first":
+            print(
+                f"[WARN] model_backbone={backbone} uses a single image-like stream; "
+                f"overriding active_branch '{args.active_branch}' -> 'first'.",
+                flush=True,
+            )
+            args.active_branch = "first"
+        return modality
+
+    if modality in ("mhi", "flow"):
+        raise ValueError(f"input_modality={modality} requires model_backbone=resnet18 or resnet50.")
     if modality == "rgb" and args.active_branch != "first":
         print(f"[WARN] input_modality=rgb requires active_branch=first; overriding '{args.active_branch}' -> 'first'.", flush=True)
         args.active_branch = "first"
@@ -231,6 +422,17 @@ def resolve_input_modality(args: argparse.Namespace) -> str:
 
 
 def build_encoder(args: argparse.Namespace, num_mhi_channels: int, num_second_channels: int) -> nn.Module:
+    if args.model_backbone in ("resnet18", "resnet50"):
+        return ResNetImageEncoder(
+            backbone_name=args.model_backbone,
+            embed_dim=args.embed_dim,
+            input_modality=args.input_modality,
+            imagenet_pretrained=bool(args.resnet_imagenet_pretrained),
+            temporal_samples=args.resnet_temporal_samples,
+            temporal_pool=args.resnet_temporal_pool,
+            input_rgb_norm=args.rgb_norm,
+        )
+
     from model import TwoStreamI3D_CLIP
 
     return TwoStreamI3D_CLIP(
@@ -247,6 +449,13 @@ def build_encoder(args: argparse.Namespace, num_mhi_channels: int, num_second_ch
 
 
 def infer_encoder_channels(args: argparse.Namespace) -> tuple[int, int]:
+    if args.model_backbone in ("resnet18", "resnet50"):
+        if args.input_modality == "rgb":
+            return 3, 0
+        if args.input_modality == "mhi":
+            mhi_windows = [int(part.strip()) for part in args.mhi_windows.split(",") if part.strip()]
+            return len(mhi_windows), 0
+        return 2, 0
     if args.input_modality == "rgb":
         return 3, 2
     mhi_windows = [int(part.strip()) for part in args.mhi_windows.split(",") if part.strip()]
@@ -375,10 +584,12 @@ def make_dataloader(
     generator = torch.Generator()
     generator.manual_seed(seed)
     collate_fn = collate_rgb_clip if hasattr(dataset, "rgb_frames") else collate_video_motion
+    sampler = dataset.build_sampler(seed) if shuffle and hasattr(dataset, 'build_sampler') else None
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         collate_fn=collate_fn,
@@ -393,7 +604,20 @@ def compute_class_weights(labels: Sequence[int], num_classes: int, mode: str) ->
         return None
     counts = np.bincount(np.asarray(labels, dtype=np.int64), minlength=num_classes).astype(np.float64)
     counts[counts == 0.0] = 1.0
-    weights = counts.sum() / (len(counts) * counts)
+
+    if mode == "inverse_freq":
+        weights = 1.0 / counts
+    elif mode == "sqrt_inverse_freq":
+        weights = 1.0 / np.sqrt(counts)
+    elif mode in {"effective_sample_count", "effective_num"}:
+        beta = 0.999
+        effective_sample_count = 1.0 - np.power(beta, counts)
+        effective_sample_count[effective_sample_count <= 0.0] = 1.0
+        weights = (1.0 - beta) / effective_sample_count
+    else:
+        raise ValueError(f"Unsupported class weight mode: {mode}")
+
+    weights = weights / weights.mean()
     return torch.tensor(weights, dtype=torch.float32)
 
 
@@ -606,7 +830,29 @@ def forward_privacy_model(
 ) -> Dict[str, torch.Tensor]:
     if input_modality == "rgb":
         return model(inputs, None)
+    if input_modality == "mhi":
+        return model(inputs, None)
+    if input_modality == "flow":
+        return model(second, None)
     return model(inputs, second)
+
+
+def aggregate_probabilities(outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    frame_logits = outputs.get("logits_frames", None)
+    if frame_logits is not None:
+        return frame_logits.softmax(dim=2).mean(dim=1)
+    return outputs["logits"].softmax(dim=1)
+
+
+def training_loss_inputs(
+    outputs: Dict[str, torch.Tensor],
+    labels: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    frame_logits = outputs.get("logits_frames", None)
+    if frame_logits is None:
+        return outputs["logits"], labels
+    repeated_labels = labels.unsqueeze(1).expand(-1, frame_logits.shape[1]).reshape(-1)
+    return frame_logits.reshape(-1, frame_logits.shape[-1]), repeated_labels
 
 
 def train_one_epoch(
@@ -629,13 +875,20 @@ def train_one_epoch(
     correct = 0
     start_time = time.time()
 
+    if hasattr(dataloader.dataset, 'set_epoch'):
+        dataloader.dataset.set_epoch(epoch_idx)
+    if hasattr(dataloader.sampler, 'set_epoch'):
+        dataloader.sampler.set_epoch(epoch_idx)
+
     for step_idx, (inputs, second, labels, _) in enumerate(dataloader, start=1):
         inputs, second, labels = prepare_batch(inputs, second, labels, device)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
             outputs = forward_privacy_model(model, inputs, second, input_modality)
-            loss = F.cross_entropy(outputs["logits"], labels, weight=loss_weight)
+            loss_logits, loss_labels = training_loss_inputs(outputs, labels)
+            loss = F.cross_entropy(loss_logits, loss_labels, weight=loss_weight)
+            probabilities = aggregate_probabilities(outputs)
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -645,7 +898,7 @@ def train_one_epoch(
         batch_size = labels.shape[0]
         running_loss += float(loss.detach().item()) * batch_size
         seen += batch_size
-        correct += int((outputs["logits"].argmax(dim=1) == labels).sum().item())
+        correct += int((probabilities.argmax(dim=1) == labels).sum().item())
 
         if print_every > 0 and step_idx % print_every == 0:
             elapsed = time.time() - start_time
@@ -685,7 +938,7 @@ def evaluate(
             inputs, second, labels = prepare_batch(inputs, second, labels, device)
             with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
                 outputs = forward_privacy_model(model, inputs, second, input_modality)
-                probabilities = outputs["logits"].softmax(dim=1)
+                probabilities = aggregate_probabilities(outputs)
                 pred = probabilities.argmax(dim=1)
 
             all_true.extend(labels.cpu().tolist())
@@ -799,6 +1052,13 @@ def train_attribute_fold(
 ) -> Dict[str, object]:
     class_names = attribute_class_names(attribute)
     train_dataset = make_dataset(args, artifacts.train_manifest, artifacts.label_csv)
+    if args.model_backbone in ("resnet18", "resnet50") and args.input_modality in ("rgb", "mhi", "flow"):
+        train_dataset = TemporalSliceDataset(
+            train_dataset,
+            input_modality=args.input_modality,
+            repeats=max(1, int(args.resnet_temporal_samples)),
+            seed=int(args.seed),
+        )
     test_dataset = make_dataset(args, artifacts.test_manifest, artifacts.label_csv)
 
     train_loader = make_dataloader(

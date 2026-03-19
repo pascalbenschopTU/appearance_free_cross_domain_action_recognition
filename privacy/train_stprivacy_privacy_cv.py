@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--head_dropout", type=float, default=0.0)
     parser.add_argument("--use_stems", action="store_true")
     parser.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
-    parser.add_argument("--class_weight_mode", type=str, default="inverse_freq", choices=["none", "inverse_freq"])
+    parser.add_argument("--class_weight_mode", type=str, default="effective_sample_count", choices=["none", "inverse_freq", "sqrt_inverse_freq", "effective_sample_count", "effective_num"])
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=10)
@@ -781,7 +781,20 @@ def compute_class_weights(labels: Sequence[int], num_classes: int, mode: str) ->
         return None
     counts = np.bincount(np.asarray(labels, dtype=np.int64), minlength=num_classes).astype(np.float64)
     counts[counts == 0.0] = 1.0
-    weights = counts.sum() / (len(counts) * counts)
+
+    if mode == "inverse_freq":
+        weights = 1.0 / counts
+    elif mode == "sqrt_inverse_freq":
+        weights = 1.0 / np.sqrt(counts)
+    elif mode in {"effective_sample_count", "effective_num"}:
+        beta = 0.999
+        effective_sample_count = 1.0 - np.power(beta, counts)
+        effective_sample_count[effective_sample_count <= 0.0] = 1.0
+        weights = (1.0 - beta) / effective_sample_count
+    else:
+        raise ValueError(f"Unsupported class weight mode: {mode}")
+
+    weights = weights / weights.mean()
     return torch.tensor(weights, dtype=torch.float32)
 
 
