@@ -35,7 +35,6 @@ from dataset import (
 )
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from svt import TwoStreamSVT_CLIP
 from augment import (
     temporal_splice_mixup,
     mixup_batch,
@@ -45,19 +44,25 @@ from augment import (
 
 from util import (
     # training utilities
+    apply_text_adapter,
     build_clip_text_bank_and_logit_scale,
+    build_text_adapter,
+    count_matching_class_texts,
     load_precomputed_text_bank_and_logit_scale,
+    load_class_texts,
     build_warmup_cosine_scheduler,
     build_fb_params,
     make_ckpt_payload,
-    load_checkpoint,
     extract_motion_config_from_ckpt,
     force_bn_eval,
+    get_checkpoint_arg,
     apply_per_class_subset,
     freeze_module,
+    load_state_dict_with_shape_filter,
     resolve_ckpt_path,
     resolve_single_manifest,
     set_seed,
+    text_adapter_regularization_loss,
     unfreeze_named_submodules,
 )
 
@@ -72,18 +77,12 @@ def get_trainable_params(model: nn.Module, extra_modules: Optional[List[nn.Modul
     return params
 
 
-def _norm_label_name(name: str) -> str:
-    return str(name).strip().lower().replace("_", " ").replace("-", " ")
-
-
-def _load_class_text_file(class_text_file: str) -> Dict[str, List[Any]]:
-    with open(class_text_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, dict) and "groups" in data and isinstance(data["groups"], dict):
-        data = data["groups"]
-    if not isinstance(data, dict):
-        raise ValueError(f"Class-text file must be a dict (or have dict at 'groups'): {class_text_file}")
-    return data
+def _enable_module_training(module: Optional[nn.Module]) -> None:
+    if module is None:
+        return
+    for parameter in module.parameters():
+        parameter.requires_grad_(True)
+    module.train()
 
 
 # -----------------------------
@@ -96,6 +95,7 @@ def load_pretrained_weights(
     device: torch.device,
     model: nn.Module,
     logit_scale: Optional[nn.Module] = None,
+    text_adapter: Optional[nn.Module] = None,
 ) -> Dict[str, Any]:
     """
     Load pretrained model_state (+ optional logit_scale_state).
@@ -105,12 +105,14 @@ def load_pretrained_weights(
 
     state = ckpt.get("model_state", ckpt)
     print(f"Ckpt path {ckpt_path}")
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    missing, unexpected, skipped_shape = load_state_dict_with_shape_filter(model, state)
     print(f"[PRETRAIN] loaded model weights from {ckpt_path}")
     if missing:
         print("[PRETRAIN] missing keys:", missing)
     if unexpected:
         print("[PRETRAIN] unexpected keys:", unexpected)
+    if skipped_shape:
+        print("[PRETRAIN] skipped incompatible keys:", skipped_shape)
 
     if logit_scale is not None and "logit_scale_state" in ckpt:
         try:
@@ -118,6 +120,12 @@ def load_pretrained_weights(
             print("[PRETRAIN] loaded logit_scale_state")
         except Exception as e:
             print(f"[PRETRAIN] failed to load logit_scale_state: {e}")
+    if text_adapter is not None and "text_adapter_state" in ckpt:
+        try:
+            text_adapter.load_state_dict(ckpt["text_adapter_state"], strict=True)
+            print("[PRETRAIN] loaded text_adapter_state")
+        except Exception as e:
+            print(f"[PRETRAIN] failed to load text_adapter_state: {e}")
 
     return ckpt
 
@@ -143,6 +151,7 @@ def eval_on_validation_split(
     device,
     logit_scale_value,
     clip_text_bank,
+    text_adapter=None,
     eval_class_texts=None,
     use_amp=True,
     split_tag: str = "validation",
@@ -169,6 +178,8 @@ def eval_on_validation_split(
                 init_temp=0.07,
                 dtype=clip_text_bank.dtype if clip_text_bank is not None else torch.float16,
             )
+            if text_adapter is not None:
+                clip_text_bank = apply_text_adapter(clip_text_bank, text_adapter).detach()
         else:
             if eval_class_texts is not None:
                 clip_text_bank, _ = build_clip_text_bank_and_logit_scale(
@@ -177,7 +188,16 @@ def eval_on_validation_split(
                     init_temp=0.07,
                     dtype=clip_text_bank.dtype if clip_text_bank is not None else torch.float16,
                     class_texts=eval_class_texts,
+                    apply_templates_to_class_texts=bool(getattr(args, "apply_templates_to_class_texts", True)),
+                    class_text_label_weight=float(getattr(args, "class_text_label_weight", 0.5)),
+                    apply_templates_to_class_descriptions=bool(
+                        getattr(args, "apply_templates_to_class_descriptions", False)
+                    ),
+                    out_dir=getattr(args, "out_dir", None),
+                    clip_cache_dir=(getattr(args, "clip_cache_dir", "") or None),
                 )
+                if text_adapter is not None:
+                    clip_text_bank = apply_text_adapter(clip_text_bank, text_adapter).detach()
             elif clip_text_bank is not None and clip_text_bank.shape[0] != len(eval_dataset.classnames):
                 print(
                     f"[WARN] clip_text_bank classes ({clip_text_bank.shape[0]}) "
@@ -189,7 +209,16 @@ def eval_on_validation_split(
                     device=device,
                     init_temp=0.07,
                     dtype=clip_text_bank.dtype,
+                    apply_templates_to_class_texts=bool(getattr(args, "apply_templates_to_class_texts", True)),
+                    class_text_label_weight=float(getattr(args, "class_text_label_weight", 0.5)),
+                    apply_templates_to_class_descriptions=bool(
+                        getattr(args, "apply_templates_to_class_descriptions", False)
+                    ),
+                    out_dir=getattr(args, "out_dir", None),
+                    clip_cache_dir=(getattr(args, "clip_cache_dir", "") or None),
                 )
+                if text_adapter is not None:
+                    clip_text_bank = apply_text_adapter(clip_text_bank, text_adapter).detach()
 
         if torch.is_tensor(logit_scale_value):
             logit_scale_scalar = float(logit_scale_value.detach().item())
@@ -256,34 +285,6 @@ def append_eval_log(eval_log_path: str, entry: Dict[str, Any]) -> None:
     with open(eval_log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(_json_safe(entry)) + "\n")
 
-
-def _build_eval_class_texts_from_groups(
-    class_text_groups: Dict[str, List[Any]],
-    eval_classnames: List[str],
-    primary_classnames: List[str],
-) -> Dict[str, List[str]]:
-    groups_lower = {str(k).strip().lower(): v for k, v in class_text_groups.items()}
-    out: Dict[str, List[str]] = {}
-    for i, cname in enumerate(eval_classnames):
-        values = class_text_groups.get(cname, None)
-        if values is None:
-            values = class_text_groups.get(str(i), None)
-        if values is None:
-            values = groups_lower.get(str(cname).strip().lower(), None)
-        if values is None:
-            continue
-        prompts: List[str] = []
-        for v in values:
-            if isinstance(v, int):
-                if 0 <= v < len(primary_classnames):
-                    prompts.append(str(primary_classnames[v]))
-            elif isinstance(v, str):
-                t = v.strip()
-                if t:
-                    prompts.append(t)
-        if prompts:
-            out[cname] = prompts
-    return out
 
 # -----------------------------
 # Main
@@ -383,17 +384,39 @@ def main():
     args.motion_resize_mode = str(motion_resize_mode).lower()
     args.motion_train_crop_mode = str(motion_train_crop_mode).lower()
     args.motion_eval_crop_mode = str(motion_eval_crop_mode).lower()
+    args.img_size = img_size
+    args.mhi_frames = mhi_frames
+    args.flow_frames = flow_frames
+    args.flow_hw = flow_hw
+    args.mhi_windows = mhi_windows_str
+    args.diff_threshold = diff_threshold
+    args.flow_max_disp = flow_max_disp
+    args.fb_pyr_scale = fb_params["pyr_scale"]
+    args.fb_levels = fb_params["levels"]
+    args.fb_winsize = fb_params["winsize"]
+    args.fb_iterations = fb_params["iterations"]
+    args.fb_poly_n = fb_params["poly_n"]
+    args.fb_poly_sigma = fb_params["poly_sigma"]
+    args.fb_flags = fb_params["flags"]
 
     selected_model = str(args.model if args.model is not None else ckpt_cfg.model).lower()
-    if selected_model not in ("i3d", "x3d", "svt"):
-        print(f"[WARN] Unsupported model '{selected_model}' from args/checkpoint; falling back to 'i3d'.", flush=True)
-        selected_model = "i3d"
+    if selected_model not in ("i3d", "x3d"):
+        raise ValueError(
+            f"Unsupported model '{selected_model}' from args/checkpoint. Supported models are: i3d, x3d."
+        )
     args.model = selected_model
 
     embed_dim = args.embed_dim if args.embed_dim is not None else ckpt_cfg.embed_dim
     fuse = args.fuse if args.fuse is not None else ckpt_cfg.fuse
     if args.fuse is None: args.fuse = fuse
     dropout = args.dropout if args.dropout is not None else ckpt_cfg.dropout
+    args.embed_dim = embed_dim
+    args.dropout = dropout
+    args.second_type = ckpt_cfg.second_type
+    args.use_stems = ckpt_cfg.use_stems
+    args.use_projection = ckpt_cfg.use_projection
+    args.dual_projection_heads = ckpt_cfg.dual_projection_heads
+    args.use_nonlinear_projection = ckpt_cfg.use_projection
     train_modality = str(args.train_modality).lower()
     val_modality = str(args.val_modality).lower()
     active_branch = args.active_branch if args.active_branch is not None else ckpt_cfg.active_branch
@@ -410,6 +433,41 @@ def main():
         active_branch = "first"
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
+    head_mode = str(getattr(args, "finetune_head_mode", "legacy")).lower()
+    if head_mode not in {"legacy", "language", "class", "both"}:
+        raise ValueError(f"Unsupported --finetune_head_mode: {head_mode}")
+    args.finetune_head_mode = head_mode
+    ckpt_text_adapter = str(get_checkpoint_arg(pretrained_ckpt_raw, "text_adapter", "none")).lower()
+    if str(getattr(args, "text_adapter", "none")).lower() == "none" and ckpt_text_adapter != "none":
+        args.text_adapter = ckpt_text_adapter
+    resolved_text_adapter_type = str(getattr(args, "text_adapter", "none")).lower()
+    if head_mode != "legacy":
+        if pretrained_path is None:
+            raise ValueError("--finetune_head_mode requires --pretrained_ckpt.")
+        if head_mode in {"class", "both"} and not ckpt_cfg.use_projection:
+            raise ValueError(
+                "--finetune_head_mode class/both requires a checkpoint trained with projection heads (--use_projection)."
+            )
+        args.freeze_backbone = True
+        args.unfreeze_modules = ""
+        args.lambda_align = 0.0
+        args.lambda_rep_mix = 0.0
+        args.lambda_cls = 0.0
+        if head_mode == "language":
+            args.lambda_clip_ce = 1.0
+            args.lambda_ce = 0.0
+        elif head_mode == "class":
+            args.lambda_clip_ce = 0.0
+            args.lambda_ce = 1.0
+        else:
+            args.lambda_clip_ce = 1.0
+            args.lambda_ce = 1.0
+        print(
+            f"[HEAD-MODE] mode={head_mode} freeze_backbone=1 "
+            f"lambda_clip_ce={args.lambda_clip_ce:.3f} lambda_ce={args.lambda_ce:.3f} "
+            f"text_adapter={resolved_text_adapter_type}",
+            flush=True,
+        )
     if pretrained_path is None and args.freeze_backbone:
         print("[WARN] --pretrained_ckpt not provided; overriding to --no_freeze_backbone for scratch training.")
         args.freeze_backbone = False
@@ -434,19 +492,10 @@ def main():
         f"motion_img_resize={args.motion_img_resize} motion_flow_resize={args.motion_flow_resize} "
         f"motion_resize_mode={args.motion_resize_mode} "
         f"motion_train_crop_mode={args.motion_train_crop_mode} motion_eval_crop_mode={args.motion_eval_crop_mode} "
+        f"head_mode={head_mode} lambda_clip_ce={getattr(args, 'lambda_clip_ce', 0.0)} "
+        f"lambda_ce={getattr(args, 'lambda_ce', 0.0)} text_adapter={resolved_text_adapter_type} "
         f"manifest={manifest_path}"
     )
-    if selected_model == "svt":
-        print(
-            "[SVT] "
-            f"patch={args.svt_patch_size} depth={args.svt_depth} heads={args.svt_num_heads} "
-            f"svt_embed_dim=600 semantic_dim={embed_dim} "
-            f"mlp_ratio={args.svt_mlp_ratio} max_frames={args.svt_max_frames if args.svt_max_frames is not None else max(mhi_frames, flow_frames)} "
-            f"mask={args.svt_motion_mask_enabled} keep_ratio={args.svt_motion_keep_ratio} "
-            f"score_mode={args.svt_motion_score_mode} mhi_weight={args.svt_motion_mhi_weight}",
-            flush=True,
-        )
-
     # Dataset (uses dataset_split_txt directly)
     if train_modality == "rgb":
         if args.p_affine > 0:
@@ -604,14 +653,9 @@ def main():
         )
         val_class_texts = None
         if args.val_class_text_json:
-            class_text_groups = _load_class_text_file(args.val_class_text_json)
-            val_class_texts = _build_eval_class_texts_from_groups(
-                class_text_groups,
-                val_dataset.classnames,
-                dataset.classnames,
-            )
+            val_class_texts = load_class_texts(args.val_class_text_json)
             print(
-                f"[VAL] custom prompts available for {len(val_class_texts)}/"
+                f"[VAL] custom prompts available for {count_matching_class_texts(val_class_texts, val_dataset.classnames)}/"
                 f"{len(val_dataset.classnames)} classes from {args.val_class_text_json}",
                 flush=True,
             )
@@ -622,15 +666,16 @@ def main():
 
     train_class_texts = None
     if args.train_class_text_json:
-        train_class_texts = _load_class_text_file(args.train_class_text_json)
+        train_class_texts = load_class_texts(args.train_class_text_json)
         print(
-            f"[TRAIN] custom prompts available for {len(train_class_texts)} entries from {args.train_class_text_json}",
+            f"[TRAIN] custom prompts available for {count_matching_class_texts(train_class_texts, dataset.classnames)}/"
+            f"{len(dataset.classnames)} classes from {args.train_class_text_json}",
             flush=True,
         )
 
     # Text bank for training classes
     if args.text_bank_backend == "precomputed":
-        clip_text_bank, logit_scale = load_precomputed_text_bank_and_logit_scale(
+        clip_text_bank_raw, logit_scale = load_precomputed_text_bank_and_logit_scale(
             dataset_classnames=dataset.classnames,
             device=device,
             embeddings_npy=args.precomputed_text_embeddings,
@@ -641,18 +686,40 @@ def main():
             dtype=data_dtype,
         )
     else:
-        clip_text_bank, logit_scale = build_clip_text_bank_and_logit_scale(
+        clip_text_bank_raw, logit_scale = build_clip_text_bank_and_logit_scale(
             dataset_classnames=dataset.classnames,
             device=device,
             init_temp=0.07,
             dtype=data_dtype,
             class_texts=train_class_texts,
+            apply_templates_to_class_texts=bool(args.apply_templates_to_class_texts),
+            class_text_label_weight=float(args.class_text_label_weight),
+            apply_templates_to_class_descriptions=bool(args.apply_templates_to_class_descriptions),
+            out_dir=args.out_dir,
+            clip_cache_dir=(args.clip_cache_dir or None),
         )
+    clip_text_bank_raw = clip_text_bank_raw.detach()
+    text_adapter = build_text_adapter(resolved_text_adapter_type, embed_dim=embed_dim)
+    if text_adapter is not None:
+        text_adapter = text_adapter.to(device)
+        print(f"[TEXT-ADAPTER] enabled: type={resolved_text_adapter_type}", flush=True)
+
+    def adapt_clip_text_bank() -> torch.Tensor:
+        if text_adapter is None:
+            return clip_text_bank_raw
+        return apply_text_adapter(clip_text_bank_raw, text_adapter)
+
+    clip_text_bank = adapt_clip_text_bank().detach()
     class_text_sim = None
     if args.rep_mix_semantic:
         t_norm = F.normalize(clip_text_bank, dim=-1).float()
         class_text_sim = (t_norm @ t_norm.t()).detach()
     num_classes = len(dataset.classnames)
+    needs_cls_head = bool(
+        head_mode in {"class", "both"}
+        or float(getattr(args, "lambda_cls", 0.0)) > 0.0
+        or float(getattr(args, "lambda_ce", 0.0)) > 0.0
+    )
 
     # Model
     model_first_channels = 3 if train_modality == "rgb" else len(mhi_windows)
@@ -667,6 +734,7 @@ def main():
             use_stems=ckpt_cfg.use_stems,
             use_projection=ckpt_cfg.use_projection,
             dual_projection_heads=ckpt_cfg.dual_projection_heads,
+            num_classes=(num_classes if needs_cls_head else 0),
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "x3d":
@@ -682,40 +750,12 @@ def main():
             dropout=dropout,
             use_projection=ckpt_cfg.use_projection,
             dual_projection_heads=ckpt_cfg.dual_projection_heads,
-            active_branch=active_branch,
-        ).to(device)
-    elif selected_model == "svt":
-        model = TwoStreamSVT_CLIP(
-            mhi_channels=model_first_channels,
-            flow_channels=ckpt_cfg.second_channels,
-            mhi_frames=args.rgb_frames if train_modality == "rgb" else mhi_frames,
-            flow_frames=flow_frames,
-            img_size=img_size,
-            embed_dim=embed_dim,
-            semantic_dim=embed_dim,
-            patch_size=args.svt_patch_size,
-            depth=args.svt_depth,
-            num_heads=args.svt_num_heads,
-            mlp_ratio=args.svt_mlp_ratio,
-            attn_drop=args.svt_attn_drop,
-            proj_drop=args.svt_proj_drop,
-            max_frames=args.svt_max_frames,
-            motion_mask_enabled=args.svt_motion_mask_enabled,
-            motion_keep_ratio=args.svt_motion_keep_ratio,
-            motion_score_mode=args.svt_motion_score_mode,
-            motion_mhi_weight=args.svt_motion_mhi_weight,
-            motion_eps=args.svt_motion_eps,
-            use_projection=ckpt_cfg.use_projection,
-            dual_projection_heads=ckpt_cfg.dual_projection_heads,
-            num_classes=num_classes,
+            num_classes=(num_classes if needs_cls_head else 0),
             active_branch=active_branch,
         ).to(device)
     else:
         raise ValueError(f"Unsupported model: {selected_model}")
 
-    if selected_model == "svt" and args.lambda_align > 0:
-        print("[WARN] lambda_align is ignored for svt fuse-only outputs. Setting lambda_align=0.", flush=True)
-        args.lambda_align = 0.0
     if args.lambda_align > 0 and not (getattr(model, "has_top", True) and getattr(model, "has_bot", True)):
         print("[WARN] lambda_align > 0 but active_branch is single-stream. Setting lambda_align=0.")
         args.lambda_align = 0.0
@@ -732,41 +772,73 @@ def main():
             device=device,
             model=model,
             logit_scale=logit_scale,
+            text_adapter=text_adapter,
         )
     else:
         print("[PRETRAIN] no checkpoint provided; model initialized from scratch.")
+
+    clip_text_bank = adapt_clip_text_bank().detach()
+    if args.rep_mix_semantic:
+        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+        class_text_sim = (t_norm @ t_norm.t()).detach()
 
     has_explicit_backbone_modules = (
         getattr(model, "top", None) is not None
         or getattr(model, "bot", None) is not None
     )
 
-    # Freeze trunks
-    if args.freeze_backbone:
-        if has_explicit_backbone_modules:
-            if getattr(model, "top", None) is not None:
-                freeze_module(model.top)
-            if getattr(model, "bot", None) is not None:
-                freeze_module(model.bot)
-        else:
-            freeze_module(model)
+    # Freeze / trainable modules
+    if head_mode == "legacy":
+        if args.freeze_backbone:
+            if has_explicit_backbone_modules:
+                if getattr(model, "top", None) is not None:
+                    freeze_module(model.top)
+                if getattr(model, "bot", None) is not None:
+                    freeze_module(model.bot)
+            else:
+                freeze_module(model)
 
-    # Optional unfreeze
-    unfreeze_list = [s.strip() for s in args.unfreeze_modules.split(",") if s.strip()]
-    if unfreeze_list:
-        if has_explicit_backbone_modules:
-            if getattr(model, "top", None) is not None:
-                unfreeze_named_submodules(model.top, unfreeze_list)
-            if getattr(model, "bot", None) is not None:
-                unfreeze_named_submodules(model.bot, unfreeze_list)
+        unfreeze_list = [s.strip() for s in args.unfreeze_modules.split(",") if s.strip()]
+        if unfreeze_list:
+            if has_explicit_backbone_modules:
+                if getattr(model, "top", None) is not None:
+                    unfreeze_named_submodules(model.top, unfreeze_list)
+                if getattr(model, "bot", None) is not None:
+                    unfreeze_named_submodules(model.bot, unfreeze_list)
+            else:
+                unfreeze_named_submodules(model, unfreeze_list)
+    else:
+        freeze_module(model)
+        if head_mode in {"language", "both"}:
+            if getattr(model, "clip_head", None) is None:
+                raise RuntimeError(
+                    f"--finetune_head_mode {head_mode} requires a checkpoint/model with clip_head."
+                )
+            _enable_module_training(getattr(model, "clip_head", None))
+            if text_adapter is not None:
+                _enable_module_training(text_adapter)
+            for parameter in logit_scale.parameters():
+                parameter.requires_grad_(True)
         else:
-            unfreeze_named_submodules(model, unfreeze_list)
+            for parameter in logit_scale.parameters():
+                parameter.requires_grad_(False)
+        if head_mode in {"class", "both"}:
+            if getattr(model, "cls_head", None) is None:
+                raise RuntimeError(
+                    f"--finetune_head_mode {head_mode} requires a checkpoint/model with cls_head."
+                )
+            _enable_module_training(getattr(model, "cls_head", None))
 
     if args.freeze_bn_stats:
         force_bn_eval(model)
 
     # Optimizer
-    trainable_params = get_trainable_params(model, extra_modules=[logit_scale])
+    extra_train_modules: List[nn.Module] = []
+    if any(p.requires_grad for p in logit_scale.parameters()):
+        extra_train_modules.append(logit_scale)
+    if text_adapter is not None:
+        extra_train_modules.append(text_adapter)
+    trainable_params = get_trainable_params(model, extra_modules=extra_train_modules)
     if not trainable_params:
         raise RuntimeError("No trainable parameters found (did you freeze everything?)")
 
@@ -801,7 +873,11 @@ def main():
     start_time = time.time()
     use_amp = (device.type == "cuda")
 
-    primary_eval_mode = "rgb_model" if str(args.val_modality).lower() == "rgb" else "motion_only"
+    primary_eval_mode = (
+        "class_head"
+        if head_mode == "class"
+        else ("rgb_model" if str(args.val_modality).lower() == "rgb" else "motion_only")
+    )
 
     if val_dataloader is not None:
         zero_shot_metrics = eval_on_validation_split(
@@ -812,6 +888,7 @@ def main():
             device=device,
             logit_scale_value=logit_scale().exp(),
             clip_text_bank=clip_text_bank,
+            text_adapter=text_adapter,
             eval_class_texts=val_class_texts,
             use_amp=use_amp,
             split_tag="validation",
@@ -837,21 +914,27 @@ def main():
             dataset.set_epoch(epoch)
 
         model.train()
+        if text_adapter is not None:
+            text_adapter.train(any(parameter.requires_grad for parameter in text_adapter.parameters()))
         if args.freeze_backbone:
             if has_explicit_backbone_modules:
                 if getattr(model, "top", None) is not None:
                     model.top.eval()
                 if getattr(model, "bot", None) is not None:
                     model.bot.eval()
-            else:
+            elif head_mode == "legacy":
                 model.eval()
+            elif getattr(model, "backbone", None) is not None:
+                model.backbone.eval()
         if args.freeze_bn_stats:
             force_bn_eval(model)
 
+        run_total = 0.0
         run_clip = 0.0
         run_cls = 0.0
         run_align = 0.0
         run_rep_mix = 0.0
+        run_text_adapter_reg = 0.0
         n_logs = 0
 
         step_in_epoch = -1
@@ -893,18 +976,28 @@ def main():
                         label_smoothing=args.label_smoothing,
                     )
 
+                clip_text_bank = adapt_clip_text_bank()
                 out = model(mhi_top, flow_bot)
-                video = F.normalize(out["emb_fuse"], dim=-1)
-                logits = logit_scale().exp() * (video @ clip_text_bank.t())
-
-                if labels_soft is not None:
-                    clip_loss = soft_target_cross_entropy(logits, labels_soft)
+                clip_emb = out.get("emb_fuse_clip", out["emb_fuse"]) if isinstance(out, dict) else out["emb_fuse"]
+                effective_lambda_clip = 1.0 if head_mode == "legacy" else float(getattr(args, "lambda_clip_ce", 0.0))
+                effective_lambda_cls = float(args.lambda_cls) if head_mode == "legacy" else float(getattr(args, "lambda_ce", 0.0))
+                if effective_lambda_clip > 0:
+                    video = F.normalize(clip_emb, dim=-1)
+                    logits = logit_scale().exp() * (video @ clip_text_bank.t())
+                    if labels_soft is not None:
+                        clip_loss = soft_target_cross_entropy(logits, labels_soft)
+                    else:
+                        clip_loss = F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
                 else:
-                    clip_loss = F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
+                    clip_loss = torch.zeros((), device=clip_emb.device, dtype=clip_emb.dtype)
 
                 if args.lambda_rep_mix > 0:
+                    class_text_sim_step = class_text_sim
+                    if args.rep_mix_semantic and text_adapter is not None:
+                        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+                        class_text_sim_step = (t_norm @ t_norm.t()).detach()
                     loss_rep_mix = representation_mix_consistency_loss(
-                        out["emb_fuse"],
+                        clip_emb,
                         labels,
                         clip_text_bank,
                         alpha=args.rep_mix_alpha,
@@ -912,13 +1005,15 @@ def main():
                         semantic_topk=args.rep_mix_semantic_topk,
                         semantic_min_sim=args.rep_mix_semantic_min_sim,
                         labels_soft=labels_soft,
-                        class_text_sim=class_text_sim,
+                        class_text_sim=class_text_sim_step,
                     ).to(dtype=clip_loss.dtype)
                 else:
                     loss_rep_mix = torch.zeros((), device=clip_loss.device, dtype=clip_loss.dtype)
 
                 logits_cls = out.get("logits_cls", None) if isinstance(out, dict) else None
-                if args.lambda_cls > 0 and logits_cls is not None:
+                if effective_lambda_cls > 0:
+                    if logits_cls is None:
+                        raise RuntimeError("Selected finetune head mode requires logits_cls, but the model returned none.")
                     if labels_soft is not None:
                         cls_loss = soft_target_cross_entropy(logits_cls, labels_soft)
                     else:
@@ -935,9 +1030,15 @@ def main():
                 else:
                     align_loss = None
 
-                loss = clip_loss + args.lambda_rep_mix * loss_rep_mix + args.lambda_cls * cls_loss
+                if text_adapter is not None and any(parameter.requires_grad for parameter in text_adapter.parameters()):
+                    loss_text_adapter_reg = 0.01 * text_adapter_regularization_loss(clip_text_bank, clip_text_bank_raw)
+                else:
+                    loss_text_adapter_reg = torch.zeros((), device=clip_emb.device, dtype=clip_emb.dtype)
+
+                loss = effective_lambda_clip * clip_loss + args.lambda_rep_mix * loss_rep_mix + effective_lambda_cls * cls_loss
                 if align_loss is not None:
                     loss = loss + args.lambda_align * align_loss
+                loss = loss + loss_text_adapter_reg
 
             if use_amp:
                 scaler.scale(loss).backward()
@@ -959,14 +1060,17 @@ def main():
                 writer.add_scalar("loss/clip", float(clip_loss.item()), global_step)
                 writer.add_scalar("loss/cls", float(cls_loss.item()), global_step)
                 writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
+                writer.add_scalar("loss/text_adapter_reg", float(loss_text_adapter_reg.item()), global_step)
                 writer.add_scalar("lr", opt.param_groups[0]["lr"], global_step)
                 if align_loss is not None:
                     writer.add_scalar("loss/align", float(align_loss.item()), global_step)
 
+                run_total += float(loss.item())
                 run_clip += float(clip_loss.item())
                 run_cls += float(cls_loss.item())
                 run_align += float(align_loss.item()) if align_loss is not None else 0.0
                 run_rep_mix += float(loss_rep_mix.item())
+                run_text_adapter_reg += float(loss_text_adapter_reg.item())
                 n_logs += 1
 
                 if (global_step % args.log_every) == 0:
@@ -974,6 +1078,7 @@ def main():
                     msg = (
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:07d}] "
                         f"lr={opt.param_groups[0]['lr']:.6f} "
+                        f"total_loss={run_total/n_logs:.4f} "
                         f"clip_loss={run_clip/n_logs:.4f} "
                         f"cls_loss={run_cls/n_logs:.4f} "
                         f"time={elapsed/60:.1f}m"
@@ -982,21 +1087,25 @@ def main():
                         msg += f" align_loss={run_align/n_logs:.4f}"
                     if args.lambda_rep_mix > 0:
                         msg += f" rep_mix={run_rep_mix/n_logs:.4f}"
+                    if text_adapter is not None and any(parameter.requires_grad for parameter in text_adapter.parameters()):
+                        msg += f" text_adapter_reg={run_text_adapter_reg/n_logs:.4f}"
                     print(msg, flush=True)
 
         if stop_training:
             print(f"[STOP] reached max_updates={args.max_updates}", flush=True)
 
         if n_logs > 0:
-            msg = f"[EPOCH {epoch:03d}] clip_loss={run_clip/n_logs:.4f} cls_loss={run_cls/n_logs:.4f}"
+            msg = f"[EPOCH {epoch:03d}] total_loss={run_total/n_logs:.4f} clip_loss={run_clip/n_logs:.4f} cls_loss={run_cls/n_logs:.4f}"
             if args.lambda_align > 0:
                 msg += f" align_loss={run_align/n_logs:.4f}"
             if args.lambda_rep_mix > 0:
                 msg += f" rep_mix={run_rep_mix/n_logs:.4f}"
+            if text_adapter is not None and any(parameter.requires_grad for parameter in text_adapter.parameters()):
+                msg += f" text_adapter_reg={run_text_adapter_reg/n_logs:.4f}"
             print(msg, flush=True)
 
         # Save best (simple)
-        current = run_clip / max(1, n_logs)
+        current = run_total / max(1, n_logs)
         payload = make_ckpt_payload(
             epoch=epoch,
             step_in_epoch=step_in_epoch,
@@ -1008,6 +1117,7 @@ def main():
             args=args,
             best_loss=best_loss,
             logit_scale=logit_scale,
+            text_adapter=text_adapter,
         )
         payload["pretrained"] = {
             "path": pretrained_path,
@@ -1051,6 +1161,7 @@ def main():
                 device=device,
                 logit_scale_value=logit_scale().exp(),
                 clip_text_bank=clip_text_bank,
+                text_adapter=text_adapter,
                 eval_class_texts=val_class_texts,
                 use_amp=use_amp,
                 split_tag="validation",

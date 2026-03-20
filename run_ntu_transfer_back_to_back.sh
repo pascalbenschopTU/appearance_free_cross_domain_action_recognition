@@ -8,7 +8,10 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 TRAIN_RUNS_INPUT="${TRAIN_RUNS:-ntu60_k16}"
 INCLUDE_NTU_VAL="${INCLUDE_NTU_VAL:-0}"
 INCLUDE_CI3D="${INCLUDE_CI3D:-0}"
+HEAD_MODES_RAW="${NTU_HEAD_MODES:-legacy}"
+PRETRAINED_CKPT_OVERRIDE="${NTU_PRETRAINED_CKPT:-}"
 read -r -a TRAIN_RUNS <<< "$TRAIN_RUNS_INPUT"
+IFS=',' read -r -a HEAD_MODES <<< "$HEAD_MODES_RAW"
 
 latest_ckpt() {
   local ckpt_dir="$1/checkpoints"
@@ -43,42 +46,58 @@ train_args_for_run() {
   esac
 }
 
-for run_name in "${TRAIN_RUNS[@]}"; do
-  train_cfg="configs/ntu_transfer/finetune/${run_name}.toml"
-  mapfile -t train_args < <(train_args_for_run "$run_name")
-  eval_cfgs=("configs/ntu_transfer/eval/rwf2000_val.toml")
-  if [[ "$INCLUDE_NTU_VAL" == "1" ]]; then
-    eval_cfgs+=("$(ntu_eval_config "$run_name")")
-  fi
-  if [[ "$INCLUDE_CI3D" == "1" ]]; then
-    eval_cfgs+=("configs/ntu_transfer/eval/ci3d_s02_val.toml")
-  fi
+for head_mode in "${HEAD_MODES[@]}"; do
+  [[ -z "$head_mode" ]] && continue
+  for run_name in "${TRAIN_RUNS[@]}"; do
+    train_cfg="configs/ntu_transfer/finetune/${run_name}.toml"
+    mapfile -t train_args < <(train_args_for_run "$run_name")
+    eval_cfgs=("configs/ntu_transfer/eval/rwf2000_val.toml")
+    if [[ "$INCLUDE_NTU_VAL" == "1" ]]; then
+      eval_cfgs+=("$(ntu_eval_config "$run_name")")
+    fi
+    if [[ "$INCLUDE_CI3D" == "1" ]]; then
+      eval_cfgs+=("configs/ntu_transfer/eval/ci3d_s02_val.toml")
+    fi
 
-  echo
-  echo "=================================================================="
-  echo "Training ${run_name}"
-  echo "=================================================================="
-  "$PYTHON_BIN" finetune.py \
-    --config configs/ntu_transfer/finetune/common.toml \
-    --config "$train_cfg" \
-    "${train_args[@]}"
+    base_out_dir="$("$PYTHON_BIN" -c "from config import parse_finetune_args; args=parse_finetune_args(['--config','configs/ntu_transfer/finetune/common.toml','--config','${train_cfg}'], default_device='cpu'); print(args.out_dir)")"
+    out_dir="$base_out_dir"
+    if [[ "$head_mode" != "legacy" ]]; then
+      out_dir="${base_out_dir}_${head_mode}"
+    fi
 
-  out_dir="$("$PYTHON_BIN" -c "from config import parse_finetune_args; args=parse_finetune_args(['--config','configs/ntu_transfer/finetune/common.toml','--config','${train_cfg}'], default_device='cpu'); print(args.out_dir)")"
-  ckpt="$(latest_ckpt "$out_dir")"
-  if [[ -z "${ckpt:-}" ]]; then
-    echo "No checkpoint found in $out_dir/checkpoints" >&2
-    exit 1
-  fi
-
-  for eval_cfg in "${eval_cfgs[@]}"; do
-    eval_name="$(basename "$eval_cfg" .toml)"
+    FINETUNE_ARGS=(
+      --config configs/ntu_transfer/finetune/common.toml
+      --config "$train_cfg"
+      --out_dir "$out_dir"
+      --finetune_head_mode "$head_mode"
+      "${train_args[@]}"
+    )
+    if [[ -n "$PRETRAINED_CKPT_OVERRIDE" ]]; then
+      FINETUNE_ARGS+=(--pretrained_ckpt "$PRETRAINED_CKPT_OVERRIDE")
+    fi
 
     echo
-    echo "Evaluating ${run_name} on ${eval_name}"
-    "$PYTHON_BIN" eval.py \
-      --config configs/ntu_transfer/eval/common.toml \
-      --config "$eval_cfg" \
-      --ckpt "$ckpt" \
-      --out_dir "$out_dir/eval_${eval_name}"
+    echo "=================================================================="
+    echo "Training ${run_name} | head_mode=${head_mode}"
+    echo "=================================================================="
+    "$PYTHON_BIN" finetune.py "${FINETUNE_ARGS[@]}"
+
+    ckpt="$(latest_ckpt "$out_dir")"
+    if [[ -z "${ckpt:-}" ]]; then
+      echo "No checkpoint found in $out_dir/checkpoints" >&2
+      exit 1
+    fi
+
+    for eval_cfg in "${eval_cfgs[@]}"; do
+      eval_name="$(basename "$eval_cfg" .toml)"
+
+      echo
+      echo "Evaluating ${run_name} on ${eval_name} | head_mode=${head_mode}"
+      "$PYTHON_BIN" eval.py \
+        --config configs/ntu_transfer/eval/common.toml \
+        --config "$eval_cfg" \
+        --ckpt "$ckpt" \
+        --out_dir "$out_dir/eval_${eval_name}"
+    done
   done
 done

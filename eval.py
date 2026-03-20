@@ -45,17 +45,21 @@ from util import (
     build_class_multi_positive_text_bank,
     build_text_adapter,
     build_text_bank,
+    count_matching_class_texts,
     expand_manifest_args,
+    get_checkpoint_arg,
     LogitScale,
     load_clip_text_encoder,
+    load_class_texts,
     load_precomputed_text_bank_and_logit_scale,
+    load_state_dict_with_shape_filter,
     parse_floats,
     parse_list,
+    resolve_clip_download_root,
     split_name_from_manifest,
 )
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from svt import TwoStreamSVT_CLIP
 from dataset import (
     RGBVideoClipDataset,
     MotionTwoStreamZstdDataset,
@@ -65,6 +69,8 @@ from dataset import (
     collate_video_motion,
     VideoMHIFramesDataset,
     build_raft_large,
+    decode_clip_rgb,
+    normalize_rgb_clip,
     raft_flow_from_paired_frames_batched,
 )
 
@@ -300,31 +306,6 @@ def compute_metrics_and_artifacts(
     return metrics
 
 
-# -----------------------------
-# CLIP RGB helpers
-# -----------------------------
-
-def sample_rgb_indices(num_frames: int, n: int, mode: str) -> List[int]:
-    if num_frames <= 0:
-        return [0] * max(1, n)
-    if n <= 1:
-        if mode == "random":
-            return [int(np.random.randint(0, num_frames))]
-        return [int(num_frames // 2)]  # center
-    if mode == "uniform":
-        idx = np.linspace(0, num_frames - 1, num=n)
-        return [int(round(x)) for x in idx]
-    if mode == "random":
-        return [int(x) for x in np.random.randint(0, num_frames, size=n)]
-    # center (for n>1): pick n around center uniformly in a small window
-    center = num_frames // 2
-    half = max(1, n // 2)
-    lo = max(0, center - half)
-    hi = min(num_frames - 1, center + half)
-    idx = np.linspace(lo, hi, num=n)
-    return [int(round(x)) for x in idx]
-
-
 @torch.no_grad()
 def clip_rgb_video_embedding(clip_model, preprocess, paths: List[str], device, rgb_frames: int, rgb_sampling: str, batch_images: int = 256):
     B = len(paths)
@@ -342,31 +323,21 @@ def clip_rgb_video_embedding(clip_model, preprocess, paths: List[str], device, r
         imgs.clear(); vids.clear()
 
     for b, p in enumerate(paths):
-        cap = cv2.VideoCapture(p)
-        if not cap.isOpened(): continue
-        T = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        idxs = sorted(set(sample_rgb_indices(T, rgb_frames, rgb_sampling)))
-        if not idxs:
-            cap.release(); continue
-
-        if len(idxs) == 1:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idxs[0])
-            ok, fr = cap.read()
-            if ok:
-                fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-                imgs.append(preprocess(Image.fromarray(fr))); vids.append(b)
-        else:
-            want = set(idxs); i = 0
-            while True:
-                ok, fr = cap.read()
-                if not ok: break
-                if i in want:
-                    fr = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-                    imgs.append(preprocess(Image.fromarray(fr))); vids.append(b)
-                    if len(imgs) >= batch_images: flush()
-                i += 1
-
-        cap.release()
+        try:
+            rgb = decode_clip_rgb(
+                p,
+                img_size=224,
+                rgb_frames=rgb_frames,
+                rgb_sampling=rgb_sampling,
+            )
+        except Exception:
+            continue
+        rgb = normalize_rgb_clip(rgb, "clip").permute(1, 0, 2, 3).contiguous()
+        for frame in rgb:
+            imgs.append(frame)
+            vids.append(b)
+            if len(imgs) >= batch_images:
+                flush()
 
     flush()
     out = torch.zeros(B, 512, device=device)
@@ -406,10 +377,13 @@ def evaluate_one_split(
     y_true_all = []
 
     y_pred_motion_ens = []
+    y_pred_class_head = []
     y_pred_rgb_only = []
     y_pred_fused_ens = []
     top1_motion_ens = 0
     top5_motion_ens = 0
+    top1_class_head = 0
+    top5_class_head = 0
     top1_rgb = 0
     top5_rgb = 0
     top1_fused_ens = 0
@@ -490,6 +464,7 @@ def evaluate_one_split(
                 emb_fuse = out.get("emb_fuse", None) if isinstance(out, dict) else None
                 emb_fuse_clip = out.get("emb_fuse_clip", emb_fuse) if isinstance(out, dict) else None
                 emb_fuse_embed = out.get("emb_fuse_embed", emb_fuse_clip) if isinstance(out, dict) else None
+                logits_cls_model = out.get("logits_cls", None) if isinstance(out, dict) else None
                 if emb_top is not None:
                     v = F.normalize(emb_top.float(), dim=-1)
                     logits_by_head["top"] = scale_motion * (v @ text_bank.t().float())
@@ -514,6 +489,8 @@ def evaluate_one_split(
                 if num_views > 1:
                     for head_name, head_logits in list(logits_by_head.items()):
                         logits_by_head[head_name] = head_logits.view(b, num_views, -1).mean(dim=1)
+                    if logits_cls_model is not None:
+                        logits_cls_model = logits_cls_model.view(b, num_views, -1).mean(dim=1)
                 if aggregation_indices is not None:
                     for head_name, head_logits in list(logits_by_head.items()):
                         logits_by_head[head_name] = aggregate_text_logits_to_classes(
@@ -554,6 +531,10 @@ def evaluate_one_split(
             top1_motion_ens += topk_correct(logits_motion_ens, y, 1)
             top5_motion_ens += topk_correct(logits_motion_ens, y, min(5, num_classes))
             y_pred_motion_ens.append(torch.argmax(logits_motion_ens, dim=-1).detach().cpu().numpy())
+            if logits_cls_model is not None:
+                top1_class_head += topk_correct(logits_cls_model, y, 1)
+                top5_class_head += topk_correct(logits_cls_model, y, min(5, num_classes))
+                y_pred_class_head.append(torch.argmax(logits_cls_model, dim=-1).detach().cpu().numpy())
 
             if use_clip:
                 top1_rgb += topk_correct(logits_rgb, y, 1)
@@ -579,6 +560,8 @@ def evaluate_one_split(
     # -----------------------------
     y_true = np.concatenate(y_true_all, axis=0)
     y_pred_motion_ens = np.concatenate(y_pred_motion_ens, axis=0)
+    class_head_metrics = None
+    has_class_head = len(y_pred_class_head) > 0
 
     # -----------------------------
     # Save metrics/artifacts
@@ -594,7 +577,13 @@ def evaluate_one_split(
             getattr(args, "val_modality", getattr(args, "train_modality", "motion")),
         )
     ).lower()
-    primary_mode = "rgb_model" if eval_input_modality == "rgb" else "motion_only"
+    primary_mode = str(
+        getattr(
+            args,
+            "primary_mode",
+            "rgb_model" if eval_input_modality == "rgb" else "motion_only",
+        )
+    )
 
     m_metrics = compute_metrics_and_artifacts(
         tag=primary_mode,
@@ -607,6 +596,19 @@ def evaluate_one_split(
         extra_json=base_json,
         summary_only=summary_only,
     )
+    if has_class_head:
+        y_pred_class_head = np.concatenate(y_pred_class_head, axis=0)
+        class_head_metrics = compute_metrics_and_artifacts(
+            tag="class_head",
+            out_dir=out_dir,
+            classnames=classnames,
+            y_true=y_true,
+            y_pred=y_pred_class_head,
+            top1_correct=top1_class_head,
+            top5_correct=top5_class_head,
+            extra_json=base_json,
+            summary_only=summary_only,
+        )
 
     r_metrics = None
     f_metrics = None
@@ -640,6 +642,7 @@ def evaluate_one_split(
 
     return {
         primary_mode: m_metrics,
+        **({} if not has_class_head else {"class_head": class_head_metrics}),
         **({} if not use_clip else {
             "clip_rgb_only": r_metrics,
             f"{primary_mode}_plus_clip_ensemble": f_metrics,
@@ -669,6 +672,7 @@ def main():
             )
             args.no_clip = True
     os.makedirs(args.out_dir, exist_ok=True)
+    args.clip_cache_dir = resolve_clip_download_root(args.out_dir, getattr(args, "clip_cache_dir", ""))
     print(f"args: {args}")
 
     manifest_paths = expand_manifest_args(args.manifests)
@@ -686,19 +690,22 @@ def main():
     ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
     ckpt_model_state = ckpt.get("model_state", {}) if isinstance(ckpt, dict) else {}
     print(f"Ckpt args: {ckpt_args}", flush=True)
-    
-    def _get(ckpt_args: dict, key: str, fallback):
-        v = ckpt_args.get(key, None)
-        return fallback if v is None else v
 
     # Model params
-    embed_dim = int(_get(ckpt_args, "embed_dim", 512))
-    fuse = str(_get(ckpt_args, "fuse", "avg_then_proj"))
-    dropout = float(_get(ckpt_args, "dropout", 0.0))
-    second_type = str(_get(ckpt_args, "second_type", "flow"))
-    use_stems = bool(_get(ckpt_args, "use_stems", False))
-    ckpt_compute_second_only = bool(_get(ckpt_args, "compute_second_only", False))
-    active_branch = str(_get(ckpt_args, "active_branch", "second" if ckpt_compute_second_only else "both"))
+    def _has_state_prefix(prefix: str) -> bool:
+        return isinstance(ckpt_model_state, dict) and any(str(key).startswith(prefix) for key in ckpt_model_state.keys())
+
+    inferred_use_projection = _has_state_prefix("clip_head.")
+    inferred_dual_projection_heads = _has_state_prefix("embed_head.")
+    inferred_use_stems = _has_state_prefix("top.stem.") or _has_state_prefix("bot.stem.")
+
+    embed_dim = int(get_checkpoint_arg(ckpt_args, "embed_dim", 512))
+    fuse = str(get_checkpoint_arg(ckpt_args, "fuse", "avg_then_proj"))
+    dropout = float(get_checkpoint_arg(ckpt_args, "dropout", 0.0))
+    second_type = str(get_checkpoint_arg(ckpt_args, "second_type", "flow"))
+    use_stems = bool(get_checkpoint_arg(ckpt_args, "use_stems", inferred_use_stems))
+    ckpt_compute_second_only = bool(get_checkpoint_arg(ckpt_args, "compute_second_only", False))
+    active_branch = str(get_checkpoint_arg(ckpt_args, "active_branch", "second" if ckpt_compute_second_only else "both"))
     if active_branch not in ("both", "first", "second"):
         active_branch = "both"
     if args.active_branch is not None:
@@ -716,15 +723,33 @@ def main():
         active_branch = "first"
     args.active_branch = active_branch
     args.compute_second_only = (active_branch == "second")
-    use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", False)))
-    dual_projection_heads = bool(_get(ckpt_args, "dual_projection_heads", False))
-    text_supervision_mode = str(_get(ckpt_args, "text_supervision_mode", "class_proto"))
-    text_adapter_type = str(_get(ckpt_args, "text_adapter", "none"))
-    class_text_label_weight = float(_get(ckpt_args, "class_text_label_weight", 0.5))
-    apply_templates_to_class_texts = bool(_get(ckpt_args, "apply_templates_to_class_texts", True))
-    apply_templates_to_class_descriptions = bool(_get(ckpt_args, "apply_templates_to_class_descriptions", False))
+    use_projection = bool(
+        get_checkpoint_arg(
+            ckpt_args,
+            "use_projection",
+            get_checkpoint_arg(ckpt_args, "use_nonlinear_projection", inferred_use_projection),
+        )
+    )
+    dual_projection_heads = bool(get_checkpoint_arg(ckpt_args, "dual_projection_heads", inferred_dual_projection_heads))
+    if "use_projection" not in ckpt_args and "use_nonlinear_projection" not in ckpt_args and inferred_use_projection:
+        print("[EVAL] inferred use_projection=True from checkpoint weights.", flush=True)
+    if "dual_projection_heads" not in ckpt_args and inferred_dual_projection_heads:
+        print("[EVAL] inferred dual_projection_heads=True from checkpoint weights.", flush=True)
+    if "use_stems" not in ckpt_args and inferred_use_stems:
+        print("[EVAL] inferred use_stems=True from checkpoint weights.", flush=True)
+    finetune_head_mode = str(get_checkpoint_arg(ckpt_args, "finetune_head_mode", "legacy")).lower()
+    text_supervision_mode = str(get_checkpoint_arg(ckpt_args, "text_supervision_mode", "class_proto"))
+    text_adapter_type = str(get_checkpoint_arg(ckpt_args, "text_adapter", "none"))
+    class_text_label_weight = float(get_checkpoint_arg(ckpt_args, "class_text_label_weight", 0.5))
+    apply_templates_to_class_texts = bool(get_checkpoint_arg(ckpt_args, "apply_templates_to_class_texts", True))
+    apply_templates_to_class_descriptions = bool(
+        get_checkpoint_arg(ckpt_args, "apply_templates_to_class_descriptions", False)
+    )
     second_channels = 1 if second_type in ("dphase", "phase") else 2
-    selected_model = str(_get(ckpt_args, "model", "i3d"))
+    selected_model = str(get_checkpoint_arg(ckpt_args, "model", "i3d"))
+    args.primary_mode = "class_head" if finetune_head_mode == "class" else (
+        "rgb_model" if args.input_modality == "rgb" else "motion_only"
+    )
     cls_head_weight = ckpt_model_state.get("cls_head.1.weight") if isinstance(ckpt_model_state, dict) else None
     eval_num_classes = (
         int(cls_head_weight.shape[0])
@@ -733,23 +758,24 @@ def main():
     )
 
     # input size, frames
-    img_size     = int(_get(ckpt_args, "img_size", args.img_size))
-    mhi_frames   = int(_get(ckpt_args, "mhi_frames", args.mhi_frames))
-    flow_frames  = int(_get(ckpt_args, "flow_frames", args.flow_frames))
-    flow_hw      = int(_get(ckpt_args, "flow_hw", args.flow_hw))
+    img_size     = int(get_checkpoint_arg(ckpt_args, "img_size", args.img_size))
+    mhi_frames   = int(get_checkpoint_arg(ckpt_args, "mhi_frames", args.mhi_frames))
+    flow_frames  = int(get_checkpoint_arg(ckpt_args, "flow_frames", args.flow_frames))
+    flow_hw      = int(get_checkpoint_arg(ckpt_args, "flow_hw", args.flow_hw))
 
-    # mhi_windows in train is stored as a string like "15" (good)
-    mhi_windows_str = str(_get(ckpt_args, "mhi_windows", args.mhi_windows))
+    # mhi_windows in train is stored as a string like "15"
+    mhi_windows_str = str(get_checkpoint_arg(ckpt_args, "mhi_windows", args.mhi_windows))
     mhi_windows = [int(x) for x in mhi_windows_str.split(",") if x.strip()]
 
-    # diff_threshold = float(_get(ckpt_args, "diff_threshold", args.diff_threshold))
-    diff_threshold = float(args.diff_threshold)
-    flow_max_disp  = float(_get(ckpt_args, "flow_max_disp", args.flow_max_disp))
-    motion_img_resize = _get(ckpt_args, "motion_img_resize", args.motion_img_resize)
-    motion_flow_resize = _get(ckpt_args, "motion_flow_resize", args.motion_flow_resize)
-    motion_resize_mode = str(_get(ckpt_args, "motion_resize_mode", args.motion_resize_mode or "square")).lower()
+    diff_threshold = float(get_checkpoint_arg(ckpt_args, "diff_threshold", args.diff_threshold))
+    flow_max_disp  = float(get_checkpoint_arg(ckpt_args, "flow_max_disp", args.flow_max_disp))
+    motion_img_resize = get_checkpoint_arg(ckpt_args, "motion_img_resize", args.motion_img_resize)
+    motion_flow_resize = get_checkpoint_arg(ckpt_args, "motion_flow_resize", args.motion_flow_resize)
+    motion_resize_mode = str(
+        get_checkpoint_arg(ckpt_args, "motion_resize_mode", args.motion_resize_mode or "square")
+    ).lower()
     motion_eval_crop_mode = str(
-        _get(ckpt_args, "motion_eval_crop_mode", args.motion_eval_crop_mode or "none")
+        get_checkpoint_arg(ckpt_args, "motion_eval_crop_mode", args.motion_eval_crop_mode or "none")
     ).lower()
     motion_eval_num_views = max(1, int(getattr(args, "motion_eval_num_views", 1)))
     if motion_eval_num_views > 1 and motion_eval_crop_mode == "none":
@@ -795,13 +821,13 @@ def main():
 
     # ---- farneback params ----
     fb_params = dict(
-        pyr_scale=float(_get(ckpt_args, "fb_pyr_scale", args.fb_pyr_scale)),
-        levels=int(_get(ckpt_args, "fb_levels", args.fb_levels)),
-        winsize=int(_get(ckpt_args, "fb_winsize", args.fb_winsize)),
-        iterations=int(_get(ckpt_args, "fb_iterations", args.fb_iterations)),
-        poly_n=int(_get(ckpt_args, "fb_poly_n", args.fb_poly_n)),
-        poly_sigma=float(_get(ckpt_args, "fb_poly_sigma", args.fb_poly_sigma)),
-        flags=int(_get(ckpt_args, "fb_flags", args.fb_flags)),
+        pyr_scale=float(get_checkpoint_arg(ckpt_args, "fb_pyr_scale", args.fb_pyr_scale)),
+        levels=int(get_checkpoint_arg(ckpt_args, "fb_levels", args.fb_levels)),
+        winsize=int(get_checkpoint_arg(ckpt_args, "fb_winsize", args.fb_winsize)),
+        iterations=int(get_checkpoint_arg(ckpt_args, "fb_iterations", args.fb_iterations)),
+        poly_n=int(get_checkpoint_arg(ckpt_args, "fb_poly_n", args.fb_poly_n)),
+        poly_sigma=float(get_checkpoint_arg(ckpt_args, "fb_poly_sigma", args.fb_poly_sigma)),
+        flags=int(get_checkpoint_arg(ckpt_args, "fb_flags", args.fb_flags)),
     )
     # -----------------------------
     # CLIP
@@ -812,14 +838,23 @@ def main():
     text_clip_model = None
     text_tokenize_fn = None
     if use_clip:
-        clip_model, clip_preprocess = clip.load("ViT-B/32", device=device, jit=False)
+        clip_model, clip_preprocess = clip.load(
+            "ViT-B/32",
+            device=device,
+            jit=False,
+            download_root=args.clip_cache_dir,
+        )
         clip_model.eval()
         for p in clip_model.parameters():
             p.requires_grad_(False)
         text_clip_model = clip_model
         text_tokenize_fn = clip.tokenize
     else:
-        text_clip_model, text_tokenize_fn = load_clip_text_encoder(device)
+        text_clip_model, text_tokenize_fn = load_clip_text_encoder(
+            device,
+            out_dir=args.out_dir,
+            clip_cache_dir=args.clip_cache_dir,
+        )
     templates = CLIP_TEMPLATES
     raft_model = (
         build_raft_large(str(device))
@@ -828,9 +863,16 @@ def main():
     )
 
     class_texts = None
-    if args.text_bank_backend == "clip" and args.class_text_json.strip():
-        with open(args.class_text_json, "r") as f:
-            class_texts = json.load(f)
+    class_text_json = str(getattr(args, "class_text_json", "") or "").strip()
+    if not class_text_json:
+        class_text_json = str(get_checkpoint_arg(ckpt_args, "val_class_text_json", "") or "").strip()
+    if not class_text_json:
+        class_text_json = str(get_checkpoint_arg(ckpt_args, "train_class_text_json", "") or "").strip()
+    if not class_text_json:
+        class_text_json = str(get_checkpoint_arg(ckpt_args, "class_text_json", "") or "").strip()
+    if args.text_bank_backend == "clip" and class_text_json:
+        class_texts = load_class_texts(class_text_json)
+        print(f"[EVAL] using class_text_json={class_text_json}", flush=True)
 
     reference_classnames = None
 
@@ -868,53 +910,17 @@ def main():
             num_classes=eval_num_classes,
             active_branch=active_branch,
         ).to(device)
-    elif selected_model == "svt":
-        print("selected svt model", flush=True)
-        svt_num_heads = int(_get(ckpt_args, "svt_num_heads", 12))
-        svt_max_frames_raw = _get(
-            ckpt_args,
-            "svt_max_frames",
-            max(args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames, flow_frames),
-        )
-        svt_max_frames = (
-            max(args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames, flow_frames)
-            if svt_max_frames_raw is None
-            else int(svt_max_frames_raw)
-        )
-        model = TwoStreamSVT_CLIP(
-            mhi_channels=model_first_channels,
-            flow_channels=second_channels,
-            mhi_frames=args.model_rgb_frames if args.input_modality == "rgb" else mhi_frames,
-            flow_frames=flow_frames,
-            img_size=img_size,
-            embed_dim=embed_dim,
-            semantic_dim=int(_get(ckpt_args, "semantic_dim", embed_dim)),
-            patch_size=int(_get(ckpt_args, "svt_patch_size", 16)),
-            depth=int(_get(ckpt_args, "svt_depth", 12)),
-            num_heads=svt_num_heads,
-            mlp_ratio=float(_get(ckpt_args, "svt_mlp_ratio", 4.0)),
-            attn_drop=float(_get(ckpt_args, "svt_attn_drop", 0.0)),
-            proj_drop=float(_get(ckpt_args, "svt_proj_drop", 0.0)),
-            max_frames=svt_max_frames,
-            motion_mask_enabled=bool(_get(ckpt_args, "svt_motion_mask_enabled", False)),
-            motion_keep_ratio=float(_get(ckpt_args, "svt_motion_keep_ratio", 0.5)),
-            motion_score_mode=str(_get(ckpt_args, "svt_motion_score_mode", "mhi_flow")),
-            motion_mhi_weight=float(_get(ckpt_args, "svt_motion_mhi_weight", 1.0)),
-            motion_eps=float(_get(ckpt_args, "svt_motion_eps", 1e-6)),
-            use_projection=use_projection,
-            dual_projection_heads=dual_projection_heads,
-            num_classes=eval_num_classes,
-            active_branch=active_branch,
-        ).to(device)
     else:
         raise ValueError(f"Unsupported model in checkpoint args: {selected_model}")
     model.eval()
 
-    missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+    missing, unexpected, skipped_shape = load_state_dict_with_shape_filter(model, ckpt["model_state"])
     if missing:
         print("[WARN] Missing keys:", missing)
     if unexpected:
         print("[WARN] Unexpected keys:", unexpected)
+    if skipped_shape:
+        print("[WARN] Skipped incompatible checkpoint keys:", skipped_shape)
     text_adapter = build_text_adapter(text_adapter_type, embed_dim=embed_dim)
     if text_adapter is not None:
         text_adapter = text_adapter.to(device)
@@ -1059,6 +1065,12 @@ def main():
         num_classes = len(classnames)
         class_to_text_indices = None
         class_to_text_weights = None
+        if class_texts is not None:
+            print(
+                f"[EVAL] custom prompts available for {count_matching_class_texts(class_texts, classnames)}/"
+                f"{len(classnames)} classes",
+                flush=True,
+            )
 
         # Enforce consistent classnames across splits (recommended)
         if reference_classnames is None:

@@ -2,3 +2,6 @@
 root_dir = "../../datasets/UCF101/"
 manifests = ["tc-clip/datasets_splits/ucf_splits/val1.txt", "tc-clip/datasets_splits/ucf_splits/val2.txt", "tc-clip/datasets_splits/ucf_splits/val3.txt"]
 class_id_to_label_csv = "tc-clip/labels/ucf_101_labels.csv"
+
+[text]
+class_text_json = "tc-clip/labels/custom/ucf101_motion_texts.json"

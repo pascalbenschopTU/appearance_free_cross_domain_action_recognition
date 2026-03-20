@@ -451,7 +451,7 @@ def _sample_rgb_indices(
     return np.rint(idx).astype(np.int64)
 
 
-def _normalize_rgb_clip(clip_cthw: torch.Tensor, rgb_norm: str) -> torch.Tensor:
+def normalize_rgb_clip(clip_cthw: torch.Tensor, rgb_norm: str) -> torch.Tensor:
     x = clip_cthw.to(torch.float32).div_(255.0)
     norm = str(rgb_norm).lower()
     if norm == "i3d":
@@ -461,6 +461,43 @@ def _normalize_rgb_clip(clip_cthw: torch.Tensor, rgb_norm: str) -> torch.Tensor:
     if norm == "none":
         return x
     raise ValueError(f"Unsupported rgb_norm: {rgb_norm}")
+
+
+def decode_clip_rgb(
+    path: str,
+    idxs: Optional[np.ndarray] = None,
+    img_size: int = 224,
+    *,
+    rgb_frames: Optional[int] = None,
+    rgb_sampling: str = "uniform",
+) -> torch.Tensor:
+    vr = VideoReader(
+        path,
+        ctx=cpu(0),
+        width=int(img_size),
+        height=int(img_size),
+        num_threads=1,
+    )
+    num_frames = int(len(vr))
+    if num_frames <= 0:
+        raise RuntimeError(f"Video has 0 frames: {path}")
+
+    if idxs is None:
+        if rgb_frames is None:
+            raise ValueError("decode_clip_rgb requires either idxs or rgb_frames.")
+        idxs = _sample_rgb_indices(
+            num_frames=num_frames,
+            target_frames=int(rgb_frames),
+            mode=str(rgb_sampling).lower(),
+        )
+
+    safe_idxs = np.clip(np.asarray(idxs), 0, num_frames - 1).astype(np.int64)
+    batch = vr.get_batch(safe_idxs.tolist()).asnumpy()  # (T,H,W,3), RGB, uint8
+    clip_tchw = torch.from_numpy(batch).permute(0, 3, 1, 2).contiguous()
+    return clip_tchw.permute(1, 0, 2, 3).contiguous()
+
+
+_normalize_rgb_clip = normalize_rgb_clip
 
 
 class RGBVideoClipDataset(Dataset):
@@ -501,20 +538,7 @@ class RGBVideoClipDataset(Dataset):
         self.epoch = int(epoch)
 
     def _decode_clip_rgb(self, path: str, idxs: np.ndarray) -> torch.Tensor:
-        vr = VideoReader(
-            path,
-            ctx=cpu(0),
-            width=self.img_size,
-            height=self.img_size,
-            num_threads=1,
-        )
-        if len(vr) <= 0:
-            raise RuntimeError(f"Video has 0 frames: {path}")
-
-        safe_idxs = np.clip(idxs, 0, len(vr) - 1).astype(np.int64)
-        batch = vr.get_batch(safe_idxs.tolist()).asnumpy()  # (T,H,W,3), RGB, uint8
-        clip_tchw = torch.from_numpy(batch).permute(0, 3, 1, 2).contiguous()
-        return clip_tchw.permute(1, 0, 2, 3).contiguous()
+        return decode_clip_rgb(path, idxs, self.img_size)
 
     def __getitem__(self, idx: int):
         path = self.paths[idx]

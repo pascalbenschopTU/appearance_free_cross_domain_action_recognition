@@ -272,26 +272,6 @@ def parse_args_with_config(
     return parser.parse_args(argv)
 
 
-def _add_svt_args(group: argparse._ArgumentGroup) -> None:
-    group.add_argument("--svt_patch_size", type=int, default=16)
-    group.add_argument("--svt_depth", type=int, default=12)
-    group.add_argument("--svt_num_heads", type=int, default=12)
-    group.add_argument("--svt_mlp_ratio", type=float, default=4.0)
-    group.add_argument("--svt_attn_drop", type=float, default=0.0)
-    group.add_argument("--svt_proj_drop", type=float, default=0.0)
-    group.add_argument("--svt_max_frames", type=int, default=None)
-    group.add_argument("--svt_motion_mask_enabled", action="store_true")
-    group.add_argument("--svt_motion_keep_ratio", type=float, default=0.5)
-    group.add_argument(
-        "--svt_motion_score_mode",
-        type=str,
-        default="mhi_flow",
-        choices=["mhi_flow", "l1_mean"],
-    )
-    group.add_argument("--svt_motion_mhi_weight", type=float, default=1.0)
-    group.add_argument("--svt_motion_eps", type=float, default=1e-6)
-
-
 def build_train_parser(default_device: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     _add_config_args(parser)
@@ -360,9 +340,8 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
     model = parser.add_argument_group("Model")
     model.add_argument("--embed_dim", type=int, default=512)
     model.add_argument("--fuse", type=str, default="avg_then_proj", choices=["avg_then_proj", "concat"])
-    model.add_argument("--model", type=str, default="i3d", choices=["i3d", "x3d", "svt"])
+    model.add_argument("--model", type=str, default="i3d", choices=["i3d", "x3d"])
     model.add_argument("--dropout", type=float, default=0.0)
-    _add_svt_args(model)
     model.add_argument("--use_stems", action="store_true")
     model.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
     model.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)
@@ -571,7 +550,7 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
         "--clip_cache_dir",
         type=str,
         default="",
-        help="Directory for CLIP model downloads. Defaults to <out_dir>/clip_cache.",
+        help="Directory for CLIP model downloads. Defaults to out/clip shared across runs.",
     )
     runtime.add_argument("--tb_dir", type=str, default="runs")
     runtime.add_argument("--ckpt_dir", type=str, default="checkpoints")
@@ -744,7 +723,7 @@ def build_eval_parser(default_device: str) -> argparse.ArgumentParser:
         "--clip_cache_dir",
         type=str,
         default="",
-        help="Directory for CLIP model downloads. Defaults to <out_dir>/clip_cache.",
+        help="Directory for CLIP model downloads. Defaults to out/clip shared across runs.",
     )
 
     motion = parser.add_argument_group("Motion")
@@ -927,6 +906,53 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         help="Seed for deterministic validation subset selection.",
     )
 
+    text = parser.add_argument_group("Text")
+    text.add_argument(
+        "--apply_templates_to_class_texts",
+        dest="apply_templates_to_class_texts",
+        action="store_true",
+        help="Apply CLIP templates to class labels/custom class texts.",
+    )
+    text.add_argument(
+        "--no_apply_templates_to_class_texts",
+        dest="apply_templates_to_class_texts",
+        action="store_false",
+        help="Disable templates for class labels/custom class texts.",
+    )
+    text.add_argument(
+        "--apply_templates_to_class_descriptions",
+        action="store_true",
+        help="Also apply CLIP templates to long-form descriptions (default: disabled).",
+    )
+    text.add_argument(
+        "--class_text_label_weight",
+        type=float,
+        default=0.5,
+        help=(
+            "Label-anchor weight when class labels and descriptions are combined."
+        ),
+    )
+    text.add_argument(
+        "--text_adapter",
+        type=str,
+        default="none",
+        choices=["none", "linear", "mlp"],
+        help="Optional residual adapter applied to frozen text embeddings before loss/eval.",
+    )
+    text.add_argument(
+        "--lambda_clip_ce",
+        type=float,
+        default=1.0,
+        help="Weight for CLIP-style CE over text bank similarities.",
+    )
+    text.add_argument(
+        "--lambda_ce",
+        type=float,
+        default=0.0,
+        help="Weight for auxiliary CE loss using a linear head on fused embeddings.",
+    )
+    parser.set_defaults(apply_templates_to_class_texts=True)
+
     pretrained = parser.add_argument_group("Pretrained")
     pretrained.add_argument(
         "-p",
@@ -1005,7 +1031,7 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         "--model",
         type=str,
         default=None,
-        choices=["i3d", "x3d", "svt"],
+        choices=["i3d", "x3d"],
         help="None -> inherit from pretrained checkpoint",
     )
     model.add_argument("--embed_dim", type=int, default=None)
@@ -1019,7 +1045,6 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         help="None -> inherit from pretrained checkpoint",
     )
     model.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)
-    _add_svt_args(model)
     model.add_argument("--lambda_align", type=float, default=0.0)
     model.add_argument(
         "--lambda_cls",
@@ -1032,6 +1057,16 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
     finetune.add_argument("--freeze_backbone", action="store_true", default=True)
     finetune.add_argument("--no_freeze_backbone", action="store_false", dest="freeze_backbone")
     finetune.add_argument("--unfreeze_modules", type=str, default="", help="e.g. 'mixed_5b,mixed_5c'")
+    finetune.add_argument(
+        "--finetune_head_mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "language", "class", "both"],
+        help=(
+            "legacy keeps the original finetune behavior. "
+            "language/class/both run a head-only ablation that updates only the selected prediction head(s)."
+        ),
+    )
     finetune.add_argument(
         "--freeze_bn_stats",
         action="store_true",
@@ -1080,7 +1115,7 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         "--clip_cache_dir",
         type=str,
         default="",
-        help="Directory for CLIP model downloads. Defaults to <out_dir>/clip_cache.",
+        help="Directory for CLIP model downloads. Defaults to out/clip shared across runs.",
     )
     runtime.add_argument("--tb_dir", type=str, default="runs")
     runtime.add_argument("--ckpt_dir", type=str, default="checkpoints")

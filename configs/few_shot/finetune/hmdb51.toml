@@ -1,15 +1,8 @@
 [data]
 root_dir = "../../datasets/hmdb51_motion/"
 class_id_to_label_csv = "tc-clip/labels/hmdb_51_labels.csv"
+train_class_text_json = "tc-clip/labels/custom/hmdb51_class_texts.json"
 val_root_dir = "../../datasets/hmdb51/"
 val_manifest = "tc-clip/datasets_splits/hmdb_splits/val1.txt"
 val_class_id_to_label_csv = "tc-clip/labels/hmdb_51_labels.csv"
-
-[pretrained]
-pretrained_ckpt = "out/checkpoint_epoch_026_loss0.6188.pt"
-
-[finetune]
-temporal_mixup_prob = 0.5
-temporal_mixup_y_min = 0.35
-temporal_mixup_y_max = 0.65
-lambda_rep_mix = 0.1
+val_class_text_json = "tc-clip/labels/custom/hmdb51_class_texts.json"

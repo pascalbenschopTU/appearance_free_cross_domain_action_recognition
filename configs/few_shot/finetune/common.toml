@@ -11,6 +11,21 @@ val_samples_per_class = 5
 val_subset_seed = 0
 
 [motion]
+img_size = 224
+mhi_frames = 32
+flow_frames = 128
+flow_hw = 112
+mhi_windows = "25"
+diff_threshold = 15.0
+flow_max_disp = 20.0
+flow_backend = "farneback"
+fb_pyr_scale = 0.5
+fb_levels = 3
+fb_winsize = 15
+fb_iterations = 3
+fb_poly_n = 5
+fb_poly_sigma = 1.2
+fb_flags = 0
 motion_img_resize = 256
 motion_flow_resize = 128
 motion_resize_mode = "short_side"
@@ -18,23 +33,25 @@ motion_train_crop_mode = "random"
 motion_eval_crop_mode = "center"
 
 [finetune]
-freeze_backbone = false
-freeze_bn_stats = false
+freeze_backbone = true
+freeze_bn_stats = true
 batch_size = 16
 epochs = 50
-lr = 0.0002
-weight_decay = 0.0001
+lr = 2e-4
+weight_decay = 0.001
 warmup_steps = 100
-min_lr = 0.000001
+min_lr = 2e-6
 mixup_prob = 0.25
 mixup_alpha = 0.2
-temporal_mixup_prob = 0.25
+label_smoothing = 0.1
+temporal_mixup_prob = 0.0
 temporal_mixup_y_min = 0.35
 temporal_mixup_y_max = 0.65
 lambda_rep_mix = 0.1
 rep_mix_alpha = 0.4
 rep_mix_semantic = true
 rep_mix_semantic_topk = 3
+unfreeze_modules = "mixed_4b,mixed_4c,mixed_4d,mixed_4e,mixed_4f,mixed_5b,mixed_5c"
 
 [runtime]
 num_workers = 16
@@ -44,3 +61,4 @@ val_skip_epochs = 0
 val_every = 5
 seed = 0
 device = "cuda"
+checkpoint_mode = "latest"

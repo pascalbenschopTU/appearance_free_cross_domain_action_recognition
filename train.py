@@ -1,4 +1,3 @@
-import json
 import sys
 from config import parse_train_args
 from dataset import (
@@ -12,7 +11,6 @@ from dataset import (
 )
 from model import TwoStreamI3D_CLIP
 from e2s_x3d import TwoStreamE2S_X3D_CLIP
-from svt import TwoStreamSVT_CLIP
 from augment import (
     temporal_splice_mixup,
     soft_target_cross_entropy,
@@ -23,6 +21,7 @@ from util import (
     apply_text_adapter,
     build_warmup_cosine_scheduler,
     build_class_multi_positive_text_bank,
+    count_matching_class_texts,
     find_latest_ckpt,
     load_checkpoint,
     make_ckpt_payload,
@@ -34,6 +33,7 @@ from util import (
     build_text_adapter,
     apply_per_class_subset,
     load_clip_text_encoder,
+    load_class_texts,
     LogitScale,
     resolve_clip_download_root,
     resolve_single_manifest,
@@ -176,8 +176,12 @@ def main():
 
     class_texts = None
     if args.text_bank_backend == "clip" and args.class_text_json.strip():
-        with open(args.class_text_json, "r") as f:
-            class_texts = json.load(f)
+        class_texts = load_class_texts(args.class_text_json)
+        print(
+            f"[TRAIN] custom prompts available for {count_matching_class_texts(class_texts, dataset.classnames)}/"
+            f"{len(dataset.classnames)} classes from {args.class_text_json}",
+            flush=True,
+        )
 
     val_dataset = None
     val_loader = None
@@ -282,8 +286,12 @@ def main():
 
             val_class_texts = None
             if args.text_bank_backend == "clip" and args.val_class_text_json.strip():
-                with open(args.val_class_text_json, "r") as f:
-                    val_class_texts = json.load(f)
+                val_class_texts = load_class_texts(args.val_class_text_json)
+                print(
+                    f"[VAL] custom prompts available for {count_matching_class_texts(val_class_texts, val_dataset.classnames)}/"
+                    f"{len(val_dataset.classnames)} classes from {args.val_class_text_json}",
+                    flush=True,
+                )
             elif args.text_bank_backend == "clip":
                 val_class_texts = class_texts
 
@@ -663,41 +671,6 @@ def main():
             dual_projection_heads=args.dual_projection_heads,
             num_classes=num_classes if args.lambda_ce > 0 else 0,
         ).to(device)
-    elif args.model == "svt":
-        svt_max_frames = (
-            max(args.rgb_frames if args.input_modality == "rgb" else args.mhi_frames, args.flow_frames)
-            if args.svt_max_frames is None
-            else int(args.svt_max_frames)
-        )
-        model = TwoStreamSVT_CLIP(
-            mhi_channels=in_ch_mhi,
-            flow_channels=in_ch_second,
-            mhi_frames=args.rgb_frames if args.input_modality == "rgb" else args.mhi_frames,
-            flow_frames=args.flow_frames,
-            img_size=args.img_size,
-            embed_dim=args.embed_dim,
-            semantic_dim=args.embed_dim,
-            patch_size=args.svt_patch_size,
-            depth=args.svt_depth,
-            num_heads=args.svt_num_heads,
-            mlp_ratio=args.svt_mlp_ratio,
-            attn_drop=args.svt_attn_drop,
-            proj_drop=args.svt_proj_drop,
-            max_frames=svt_max_frames,
-            motion_mask_enabled=args.svt_motion_mask_enabled,
-            motion_keep_ratio=args.svt_motion_keep_ratio,
-            motion_score_mode=args.svt_motion_score_mode,
-            motion_mhi_weight=args.svt_motion_mhi_weight,
-            motion_eps=args.svt_motion_eps,
-            use_projection=args.use_projection,
-            dual_projection_heads=args.dual_projection_heads,
-            num_classes=num_classes if args.lambda_ce > 0 else 0,
-            active_branch=args.active_branch,
-        ).to(device)
-        print(
-            f"[SVT] semantic_dim={args.embed_dim} svt_embed_dim=600 heads={args.svt_num_heads}",
-            flush=True,
-        )
     else:
         raise ValueError(f"Unsupported model: {args.model}")
 

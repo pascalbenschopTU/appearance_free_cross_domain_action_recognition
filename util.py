@@ -1,20 +1,22 @@
-# utils.py
-import os
+"""Shared utility helpers for training, finetuning, and evaluation."""
+
+import csv
 import glob
 import json
+import math
 import os
+from pathlib import Path
+import random
 import re
 import sys
-import csv
-import random
-from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
-import math
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from pathlib import Path
-from dataclasses import dataclass
 
 
 try:
@@ -61,6 +63,47 @@ def find_latest_ckpt(ckpt_dir: str, pattern: str = "*epoch_*.pt") -> Optional[st
     return ckpts[-1] if ckpts else None
 
 
+def get_checkpoint_arg(checkpoint_or_args: Any, key: str, default: Any) -> Any:
+    """Return a checkpoint arg value, accepting either a full checkpoint or ckpt['args']."""
+    if not isinstance(checkpoint_or_args, dict):
+        return default
+    if isinstance(checkpoint_or_args.get("args"), dict):
+        source = checkpoint_or_args["args"]
+    else:
+        source = checkpoint_or_args
+    value = source.get(key, None)
+    return default if value is None else value
+
+
+def load_state_dict_with_shape_filter(
+    module: nn.Module,
+    state_dict: Dict[str, Any],
+) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Load only keys that exist in ``module`` and have matching tensor shapes.
+
+    Returns:
+      missing_keys, unexpected_keys, skipped_shape_keys
+    """
+    module_state = module.state_dict()
+    compatible_state: Dict[str, Any] = {}
+    skipped_shape_keys: List[str] = []
+
+    for key, value in state_dict.items():
+        target_value = module_state.get(key)
+        if target_value is None:
+            continue
+        if target_value.shape != value.shape:
+            skipped_shape_keys.append(
+                f"{key}: ckpt{tuple(value.shape)} != model{tuple(target_value.shape)}"
+            )
+            continue
+        compatible_state[key] = value
+
+    missing_keys, unexpected_keys = module.load_state_dict(compatible_state, strict=False)
+    return list(missing_keys), list(unexpected_keys), skipped_shape_keys
+
+
 def load_checkpoint(
     ckpt_path: str,
     *,
@@ -74,11 +117,21 @@ def load_checkpoint(
     strict: bool = False,
 ) -> Dict[str, Any]:
     ckpt = torch.load(ckpt_path, map_location=device)
+    model_state = ckpt.get("model_state", ckpt)
 
-    missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=strict)
-    print(f"[CKPT] loaded {ckpt_path}")
-    if missing: print("Missing keys:", missing)
-    if unexpected: print("Unexpected keys:", unexpected)
+    if strict:
+        missing, unexpected = model.load_state_dict(model_state, strict=True)
+        skipped_shape = []
+    else:
+        missing, unexpected, skipped_shape = load_state_dict_with_shape_filter(model, model_state)
+
+    print(f"[CKPT] resumed from {ckpt_path}")
+    if missing:
+        print("[CKPT] missing model keys:", missing)
+    if unexpected:
+        print("[CKPT] unexpected model keys:", unexpected)
+    if skipped_shape:
+        print("[CKPT] skipped incompatible model keys:", skipped_shape)
 
     loaded_opt = False
     if optimizer is not None and "optimizer_state" in ckpt:
@@ -249,17 +302,6 @@ def _norm(s: str) -> str:
     return re.sub(r"[\s_]+", " ", s.strip().lower())
 
 
-def _norm_video_stem(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", Path(s).stem.strip().lower()).strip()
-
-
-def _tail_token_key(s: str, num_tokens: int = 7) -> str:
-    tokens = [tok for tok in Path(s).stem.strip().lower().split("_") if tok]
-    if not tokens:
-        return ""
-    return "_".join(tokens[-num_tokens:])
-
-
 def _append_unique(dst: List[str], value: Any) -> None:
     s = str(value).strip()
     if s and s not in dst:
@@ -318,6 +360,27 @@ def _parse_entry(value: Any, *, allow_colon_split: bool) -> Dict[str, List[str]]
             _append_unique(descriptions, desc)
 
     return {"labels": labels, "descriptions": descriptions}
+
+
+def load_class_texts(class_text_source: Optional[Union[str, Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    if class_text_source is None:
+        return None
+    if isinstance(class_text_source, dict):
+        data = class_text_source
+    else:
+        source = str(class_text_source).strip()
+        if not source:
+            return None
+        if source.startswith("{"):
+            data = json.loads(source)
+        else:
+            with open(source, "r", encoding="utf-8") as f:
+                data = json.load(f)
+    if isinstance(data, dict) and "groups" in data and isinstance(data["groups"], dict):
+        data = data["groups"]
+    if not isinstance(data, dict):
+        raise ValueError("class_texts must resolve to a dict (or have a dict at 'groups').")
+    return data
 
 
 def adapt_class_texts(
@@ -386,6 +449,26 @@ def adapt_class_texts(
     return out
 
 
+def count_matching_class_texts(
+    class_texts: Optional[Union[str, Dict[str, Any]]],
+    classnames: Sequence[str],
+) -> int:
+    loaded = load_class_texts(class_texts)
+    if loaded is None:
+        return 0
+    return len(adapt_class_texts(loaded, list(classnames)))
+
+
+def _adapted_class_text_entries(
+    classnames: Sequence[str],
+    class_texts: Optional[Union[str, Dict[str, Any]]],
+) -> Dict[str, Dict[str, List[str]]]:
+    loaded_class_texts = load_class_texts(class_texts)
+    if loaded_class_texts is None:
+        return {}
+    return adapt_class_texts(loaded_class_texts, list(classnames))
+
+
 def resolve_clip_download_root(
     out_dir: Optional[str] = None,
     clip_cache_dir: Optional[str] = None,
@@ -396,14 +479,15 @@ def resolve_clip_download_root(
     Priority:
       1. Explicit clip_cache_dir argument
       2. CLIP_DOWNLOAD_ROOT environment variable
-      3. <out_dir>/clip_cache when out_dir is provided
+      3. <module_dir>/out/clip
       4. None -> CLIP falls back to ~/.cache/clip
     """
     candidate = (clip_cache_dir or "").strip()
     if not candidate:
         candidate = os.environ.get("CLIP_DOWNLOAD_ROOT", "").strip()
-    if not candidate and out_dir:
-        candidate = os.path.join(out_dir, "clip_cache")
+    if not candidate:
+        module_dir = Path(__file__).resolve().parent
+        candidate = str(module_dir / "out" / "clip")
     if not candidate:
         return None
     os.makedirs(candidate, exist_ok=True)
@@ -432,21 +516,70 @@ def load_clip_text_encoder(
     return clip_model, clip.tokenize
 
 def split_camelcase(s: str) -> str:
-    # "ApplyEyeMakeup" -> "Apply Eye Makeup"
-    out = []
-    prev_lower = False
-    for ch in s:
-        if ch.isupper() and prev_lower:
-            out.append(" ")
-        out.append(ch)
-        prev_lower = ch.islower()
-    return "".join(out)
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)
 
 def normalize_classname_ucf(c: str) -> str:
     c = c.replace("_", " ").strip()
     c = split_camelcase(c)
     c = " ".join(c.split())
     return c.lower()
+
+
+@torch.no_grad()
+def _encode_texts(
+    clip_model,
+    tokenize_fn,
+    texts: Sequence[str],
+    device: torch.device,
+    templates: Sequence[str],
+    *,
+    apply_templates: bool,
+    l2_normalize: bool,
+) -> Optional[torch.Tensor]:
+    prompts: List[str] = []
+    for text in texts:
+        clean_text = str(text).strip()
+        if not clean_text:
+            continue
+        if apply_templates:
+            prompts.extend(template.format(clean_text) for template in templates)
+        else:
+            prompts.append(clean_text)
+    if not prompts:
+        return None
+
+    tokens = tokenize_fn(prompts).to(device)
+    features = clip_model.encode_text(tokens)
+    if l2_normalize:
+        features = F.normalize(features, dim=-1)
+
+    text_embedding = features.mean(dim=0)
+    if l2_normalize:
+        text_embedding = F.normalize(text_embedding, dim=-1)
+    return text_embedding
+
+
+def _collect_class_text_lists(
+    raw_classname: str,
+    class_text_entries: Dict[str, Dict[str, List[str]]],
+) -> Tuple[List[str], List[str]]:
+    canonical_label = normalize_classname_ucf(raw_classname)
+    entry = class_text_entries.get(raw_classname, {"labels": [], "descriptions": []})
+
+    label_texts: List[str] = [canonical_label]
+    for label_text in entry.get("labels", []):
+        clean_label = str(label_text).strip()
+        if not clean_label:
+            continue
+        if _norm(clean_label) == _norm(raw_classname):
+            clean_label = canonical_label
+        _append_unique(label_texts, clean_label)
+
+    description_texts: List[str] = []
+    for description_text in entry.get("descriptions", []):
+        _append_unique(description_texts, description_text)
+
+    return label_texts, description_texts
 
 @torch.no_grad()
 def build_text_bank(
@@ -470,65 +603,50 @@ def build_text_bank(
     where alpha=class_text_label_weight.
     """
     alpha = float(max(0.0, min(1.0, class_text_label_weight)))
-    class_text_entries = adapt_class_texts(class_texts, classnames) if class_texts is not None else {}
-
-    def prompts_from_texts(texts: List[str], apply_templates: bool) -> List[str]:
-        prompts: List[str] = []
-        for text in texts:
-            t = str(text).strip()
-            if not t:
-                continue
-            if apply_templates:
-                for template in templates:
-                    prompts.append(template.format(t))
-            else:
-                prompts.append(t)
-        return prompts
-
-    def encode_prompt_set(prompts: List[str]) -> Optional[torch.Tensor]:
-        if not prompts:
-            return None
-        tok = tokenize_fn(prompts).to(device)
-        feats = clip_model.encode_text(tok)
-        if l2_normalize:
-            feats = F.normalize(feats, dim=-1)
-        emb = feats.mean(dim=0)
-        if l2_normalize:
-            emb = F.normalize(emb, dim=-1)
-        return emb
+    class_text_entries = _adapted_class_text_entries(classnames, class_texts)
 
     all_class_embs: List[torch.Tensor] = []
     for raw in classnames:
-        canonical_label = normalize_classname_ucf(raw)
-        entry = class_text_entries.get(raw, {"labels": [], "descriptions": []})
+        label_texts, description_texts = _collect_class_text_lists(raw, class_text_entries)
 
-        label_texts: List[str] = [canonical_label]
-        for s in entry.get("labels", []):
-            t = str(s).strip()
-            if not t:
-                continue
-            if _norm(t) == _norm(raw):
-                t = canonical_label
-            _append_unique(label_texts, t)
-
-        desc_texts: List[str] = []
-        for s in entry.get("descriptions", []):
-            _append_unique(desc_texts, s)
-
-        label_emb = encode_prompt_set(prompts_from_texts(label_texts, apply_templates_to_class_texts))
+        label_emb = _encode_texts(
+            clip_model,
+            tokenize_fn,
+            label_texts,
+            device,
+            templates,
+            apply_templates=apply_templates_to_class_texts,
+            l2_normalize=l2_normalize,
+        )
         if label_emb is None:
-            label_emb = encode_prompt_set(prompts_from_texts([canonical_label], True))
+            label_emb = _encode_texts(
+                clip_model,
+                tokenize_fn,
+                [normalize_classname_ucf(raw)],
+                device,
+                templates,
+                apply_templates=True,
+                l2_normalize=l2_normalize,
+            )
         if label_emb is None:
             raise RuntimeError(f"Could not build label embedding for class: {raw}")
 
-        cls_emb = label_emb
-        if desc_texts:
-            desc_emb = encode_prompt_set(prompts_from_texts(desc_texts, apply_templates_to_class_descriptions))
-            if desc_emb is not None:
-                cls_emb = alpha * label_emb + (1.0 - alpha) * desc_emb
+        class_embedding = label_emb
+        if description_texts:
+            description_emb = _encode_texts(
+                clip_model,
+                tokenize_fn,
+                description_texts,
+                device,
+                templates,
+                apply_templates=apply_templates_to_class_descriptions,
+                l2_normalize=l2_normalize,
+            )
+            if description_emb is not None:
+                class_embedding = alpha * label_emb + (1.0 - alpha) * description_emb
                 if l2_normalize:
-                    cls_emb = F.normalize(cls_emb, dim=-1)
-        all_class_embs.append(cls_emb)
+                    class_embedding = F.normalize(class_embedding, dim=-1)
+        all_class_embs.append(class_embedding)
 
     return torch.stack(all_class_embs, dim=0)  # (C,512)
 
@@ -708,6 +826,7 @@ class DescriptionMatchResolver:
         return targets, matched_desc_indices
 
 
+@torch.no_grad()
 def build_description_text_bank(
     clip_model,
     tokenize_fn,
@@ -719,32 +838,7 @@ def build_description_text_bank(
     l2_normalize: bool = True,
     apply_templates_to_class_descriptions: bool = False,
 ) -> DescriptionTextBank:
-    class_text_entries = adapt_class_texts(class_texts, classnames) if class_texts is not None else {}
-
-    def prompts_from_texts(texts: List[str], apply_templates: bool) -> List[str]:
-        prompts: List[str] = []
-        for text in texts:
-            t = str(text).strip()
-            if not t:
-                continue
-            if apply_templates:
-                for template in templates:
-                    prompts.append(template.format(t))
-            else:
-                prompts.append(t)
-        return prompts
-
-    def encode_prompt_set(prompts: List[str]) -> Optional[torch.Tensor]:
-        if not prompts:
-            return None
-        tok = tokenize_fn(prompts).to(device)
-        feats = clip_model.encode_text(tok)
-        if l2_normalize:
-            feats = F.normalize(feats, dim=-1)
-        emb = feats.mean(dim=0)
-        if l2_normalize:
-            emb = F.normalize(emb, dim=-1)
-        return emb
+    class_text_entries = _adapted_class_text_entries(classnames, class_texts)
 
     all_desc_embs: List[torch.Tensor] = []
     class_to_desc: List[List[int]] = []
@@ -753,32 +847,35 @@ def build_description_text_bank(
     descriptions_per_class: Optional[int] = None
 
     for class_idx, raw in enumerate(classnames):
-        entry = class_text_entries.get(raw, {"labels": [], "descriptions": []})
-        desc_texts: List[str] = []
-        for s in entry.get("descriptions", []):
-            _append_unique(desc_texts, s)
-        if not desc_texts:
+        _, description_texts_for_class = _collect_class_text_lists(raw, class_text_entries)
+        if not description_texts_for_class:
             raise ValueError(f"Class '{raw}' does not contain any descriptions for description-level supervision.")
 
         if descriptions_per_class is None:
-            descriptions_per_class = len(desc_texts)
-        elif len(desc_texts) != descriptions_per_class:
+            descriptions_per_class = len(description_texts_for_class)
+        elif len(description_texts_for_class) != descriptions_per_class:
             raise ValueError(
                 f"Description bank requires a fixed descriptions-per-class count. "
-                f"Expected {descriptions_per_class} for '{raw}', got {len(desc_texts)}."
+                f"Expected {descriptions_per_class} for '{raw}', got {len(description_texts_for_class)}."
             )
 
         desc_indices: List[int] = []
-        for desc_text in desc_texts:
-            desc_emb = encode_prompt_set(
-                prompts_from_texts([desc_text], apply_templates_to_class_descriptions)
+        for description_text in description_texts_for_class:
+            description_emb = _encode_texts(
+                clip_model,
+                tokenize_fn,
+                [description_text],
+                device,
+                templates,
+                apply_templates=apply_templates_to_class_descriptions,
+                l2_normalize=l2_normalize,
             )
-            if desc_emb is None:
-                raise RuntimeError(f"Could not build description embedding for class '{raw}': {desc_text!r}")
+            if description_emb is None:
+                raise RuntimeError(f"Could not build description embedding for class '{raw}': {description_text!r}")
             desc_indices.append(len(all_desc_embs))
-            all_desc_embs.append(desc_emb)
+            all_desc_embs.append(description_emb)
             desc_to_class.append(class_idx)
-            description_texts.append(str(desc_text).strip())
+            description_texts.append(str(description_text).strip())
         class_to_desc.append(desc_indices)
 
     if not all_desc_embs:
@@ -806,79 +903,54 @@ def build_class_multi_positive_text_bank(
     apply_templates_to_class_texts: bool = True,
     apply_templates_to_class_descriptions: bool = False,
 ) -> ClassMultiPositiveTextBank:
-    class_text_entries = adapt_class_texts(class_texts, classnames) if class_texts is not None else {}
-
-    def prompts_from_texts(texts: List[str], apply_templates: bool) -> List[str]:
-        prompts: List[str] = []
-        for text in texts:
-            t = str(text).strip()
-            if not t:
-                continue
-            if apply_templates:
-                for template in templates:
-                    prompts.append(template.format(t))
-            else:
-                prompts.append(t)
-        return prompts
-
-    def encode_prompt_set(prompts: List[str]) -> Optional[torch.Tensor]:
-        if not prompts:
-            return None
-        tok = tokenize_fn(prompts).to(device)
-        feats = clip_model.encode_text(tok)
-        if l2_normalize:
-            feats = F.normalize(feats, dim=-1)
-        emb = feats.mean(dim=0)
-        if l2_normalize:
-            emb = F.normalize(emb, dim=-1)
-        return emb
+    class_text_entries = _adapted_class_text_entries(classnames, class_texts)
 
     all_text_embs: List[torch.Tensor] = []
     class_to_text: List[List[int]] = []
     descs_per_class: Optional[int] = None
 
     for raw in classnames:
-        canonical_label = normalize_classname_ucf(raw)
-        entry = class_text_entries.get(raw, {"labels": [], "descriptions": []})
-
-        label_texts: List[str] = [canonical_label]
-        for s in entry.get("labels", []):
-            t = str(s).strip()
-            if not t:
-                continue
-            if _norm(t) == _norm(raw):
-                t = canonical_label
-            _append_unique(label_texts, t)
-
-        desc_texts: List[str] = []
-        for s in entry.get("descriptions", []):
-            _append_unique(desc_texts, s)
-        if not desc_texts:
+        label_texts, description_texts_for_class = _collect_class_text_lists(raw, class_text_entries)
+        if not description_texts_for_class:
             raise ValueError(f"Class '{raw}' does not contain any descriptions for class_multi_positive supervision.")
 
         if descs_per_class is None:
-            descs_per_class = len(desc_texts)
-        elif len(desc_texts) != descs_per_class:
+            descs_per_class = len(description_texts_for_class)
+        elif len(description_texts_for_class) != descs_per_class:
             raise ValueError(
                 f"class_multi_positive supervision requires a fixed descriptions-per-class count. "
-                f"Expected {descs_per_class} for '{raw}', got {len(desc_texts)}."
+                f"Expected {descs_per_class} for '{raw}', got {len(description_texts_for_class)}."
             )
 
         class_indices: List[int] = []
-        label_emb = encode_prompt_set(prompts_from_texts(label_texts, apply_templates_to_class_texts))
+        label_emb = _encode_texts(
+            clip_model,
+            tokenize_fn,
+            label_texts,
+            device,
+            templates,
+            apply_templates=apply_templates_to_class_texts,
+            l2_normalize=l2_normalize,
+        )
         if label_emb is None:
             raise RuntimeError(f"Could not build label embedding for class: {raw}")
         class_indices.append(len(all_text_embs))
         all_text_embs.append(label_emb)
 
-        for desc_text in desc_texts:
-            desc_emb = encode_prompt_set(
-                prompts_from_texts([desc_text], apply_templates_to_class_descriptions)
+        for description_text in description_texts_for_class:
+            description_emb = _encode_texts(
+                clip_model,
+                tokenize_fn,
+                [description_text],
+                device,
+                templates,
+                apply_templates=apply_templates_to_class_descriptions,
+                l2_normalize=l2_normalize,
             )
-            if desc_emb is None:
-                raise RuntimeError(f"Could not build description embedding for class '{raw}': {desc_text!r}")
+            if description_emb is None:
+                raise RuntimeError(f"Could not build description embedding for class '{raw}': {description_text!r}")
             class_indices.append(len(all_text_embs))
-            all_text_embs.append(desc_emb)
+            all_text_embs.append(description_emb)
         class_to_text.append(class_indices)
 
     if not all_text_embs:
@@ -1267,6 +1339,17 @@ def sync_scheduler_to_global_step(scheduler, global_step: int):
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".zst"}
 
+
+def _dedupe_keep_order(values: Sequence[str]) -> List[str]:
+    seen: Set[str] = set()
+    ordered_values: List[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered_values.append(value)
+    return ordered_values
+
 def _scan_videos_under_root(root: Path) -> List[Path]:
     """
     Faster than Path.rglob for large trees.
@@ -1322,6 +1405,112 @@ def _parse_dataset_split_txt(txt_path: str) -> List[Tuple[str, int]]:
         raise ValueError(f"No entries found in dataset_split_txt: {txt_path}")
     return items
 
+def _build_video_lookup_tables(root: Path) -> Dict[str, Dict[Any, Any]]:
+    relative_path_map: Dict[str, str] = {}
+    stem_map: Dict[str, List[str]] = defaultdict(list)
+    dir_stem_map: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    stripped_stem_map: Dict[str, List[str]] = defaultdict(list)
+    dir_stripped_stem_map: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+
+    for video_path in _scan_videos_under_root(root):
+        absolute_path = str(video_path)
+        relative_path = video_path.relative_to(root).as_posix()
+        relative_path_map[relative_path] = absolute_path
+
+        relative_parent = video_path.parent.relative_to(root).as_posix().lower()
+        parent = "" if relative_parent == "." else relative_parent
+        stem = video_path.stem.lower()
+        stem_map[stem].append(absolute_path)
+        dir_stem_map[(parent, stem)].append(absolute_path)
+
+        stripped_stem = _strip_hashed_video_suffix(stem)
+        if stripped_stem != stem:
+            stripped_stem_map[stripped_stem].append(absolute_path)
+            dir_stripped_stem_map[(parent, stripped_stem)].append(absolute_path)
+
+    return {
+        "relative_path": relative_path_map,
+        "stem": stem_map,
+        "dir_stem": dir_stem_map,
+        "stripped_stem": stripped_stem_map,
+        "dir_stripped_stem": dir_stripped_stem_map,
+    }
+
+
+def _pick_unique_video_match(
+    candidates: Sequence[str],
+    *,
+    match_type: str,
+    source_name: str,
+    root_dir: str,
+) -> Optional[str]:
+    unique_candidates = _dedupe_keep_order(candidates)
+    if not unique_candidates:
+        return None
+    if len(unique_candidates) == 1:
+        return unique_candidates[0]
+    raise ValueError(
+        f"Ambiguous {match_type} match for {source_name!r}: "
+        f"found {len(unique_candidates)} files under {root_dir}."
+    )
+
+
+def _resolve_manifest_video_path(
+    root: Path,
+    entry_name: str,
+    *,
+    root_dir: str,
+    video_lookup: Dict[str, Dict[Any, Any]],
+) -> Optional[str]:
+    absolute_candidate: Optional[Path] = None
+    entry_path = Path(entry_name)
+
+    if entry_path.is_absolute():
+        absolute_candidate = entry_path.resolve()
+        try:
+            absolute_candidate.relative_to(root)
+            if absolute_candidate.exists() and absolute_candidate.is_file():
+                return str(absolute_candidate)
+        except ValueError:
+            pass
+    else:
+        joined_candidate = (root / entry_path).resolve()
+        if joined_candidate.exists() and joined_candidate.is_file():
+            return str(joined_candidate)
+
+    normalized_entry = entry_name.replace("\\", "/").lstrip("./")
+    direct_relative_match = video_lookup["relative_path"].get(normalized_entry)
+    if direct_relative_match is not None:
+        return direct_relative_match
+
+    normalized_path = Path(normalized_entry)
+    parent = normalized_path.parent.as_posix().lower()
+    if parent == ".":
+        parent = ""
+    stem = normalized_path.stem.lower()
+    stripped_stem = _strip_hashed_video_suffix(stem)
+    candidate_specs: List[Tuple[str, Any, Dict[Any, List[str]]]] = [
+        ("dir+stem", (parent, stem), video_lookup["dir_stem"]),
+        ("stem", stem, video_lookup["stem"]),
+    ]
+    if stripped_stem != stem:
+        candidate_specs.insert(1, ("dir+stem-without-hash", (parent, stripped_stem), video_lookup["dir_stripped_stem"]))
+        candidate_specs.append(("stem-without-hash", stripped_stem, video_lookup["stripped_stem"]))
+
+    for match_type, lookup_key, lookup_table in candidate_specs:
+        match = _pick_unique_video_match(
+            lookup_table.get(lookup_key, []),
+            match_type=match_type,
+            source_name=entry_name,
+            root_dir=root_dir,
+        )
+        if match is not None:
+            return match
+
+    if absolute_candidate is not None and absolute_candidate.exists() and absolute_candidate.is_file():
+        return str(absolute_candidate)
+    return None
+
 def list_videos(
     root_dir: str,
     dataset_split_txt: Optional[str] = None,
@@ -1339,8 +1528,6 @@ def list_videos(
     # ---- Mode A: dataset_split_txt (tc_clip style) ----
     if dataset_split_txt:
         txt_items = _parse_dataset_split_txt(dataset_split_txt)
-        if len(txt_items) == 0:
-            print(f"No items found int dataset_split_text: {dataset_split_txt}",file=sys.stderr)
 
         # Fast path: manifests generated by our probe scripts already contain exact
         # relative paths under root, so we can avoid scanning the whole tree.
@@ -1359,200 +1546,81 @@ def list_videos(
             direct_paths.append(str(candidate))
             direct_labels.append(int(y))
         if direct_ok:
-            unique_labels = sorted(set(direct_labels))
-            classnames = [str(label) for label in unique_labels]
+            max_label = max(int(label) for label in direct_labels)
+            classnames = [str(label) for label in range(max_label + 1)]
             return direct_paths, direct_labels, classnames
 
-        # Scan all videos once so we can resolve entries even if dataset uses class folders
-        all_vids = _scan_videos_under_root(root)
-
-        rel_map: Dict[str, str] = {}                 # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
-        stem_map: Dict[str, List[str]] = {}          # "c" (lower) -> ["/abs/.../c.zst", ...]
-        norm_stem_map: Dict[str, List[str]] = {}     # normalized stem -> ["/abs/.../c.zst", ...]
-        tail7_map: Dict[str, List[str]] = {}         # last 7 underscore tokens -> ["/abs/.../c.zst", ...]
-        dir_stem_map: Dict[Tuple[str, str], List[str]] = {}  # ("a/b", "c") -> ["/abs/.../a/b/c.zst", ...]
-        stripped_stem_map: Dict[str, List[str]] = {}         # "c" -> ["/abs/.../a/b/c_<hash>.avi", ...]
-        dir_stripped_stem_map: Dict[Tuple[str, str], List[str]] = {}  # ("a/b", "c") -> ["/abs/.../a/b/c_<hash>.avi", ...]
-
-        for p in all_vids:
-            rel = p.relative_to(root).as_posix()
-            rel_map[rel] = str(p)
-            stem_map.setdefault(p.stem.lower(), []).append(str(p))
-            norm_stem_map.setdefault(_norm_video_stem(p.stem), []).append(str(p))
-            tail7_map.setdefault(_tail_token_key(p.stem), []).append(str(p))
-            parent = p.parent.relative_to(root).as_posix().lower()
-            stem = p.stem.lower()
-            key = ("" if parent == "." else parent, stem)
-            stem_map.setdefault(stem, []).append(str(p))
-            dir_stem_map.setdefault(key, []).append(str(p))
-            stripped_stem = _strip_hashed_video_suffix(stem)
-            if stripped_stem != stem:
-                stripped_stem_map.setdefault(stripped_stem, []).append(str(p))
-                stripped_key = (key[0], stripped_stem)
-                dir_stripped_stem_map.setdefault(stripped_key, []).append(str(p))
-
+        video_lookup = _build_video_lookup_tables(root)
         paths: List[str] = []
         labels: List[int] = []
-        for fname, y in txt_items:
-            abs_candidate = None
-            fname_path = Path(fname)
-            if fname_path.is_absolute():
-                abs_candidate = fname_path.resolve()
-                # Only short-circuit absolute entries when they already point under root.
-                # Otherwise prefer resolving to files inside root (e.g., motion features with same stems).
-                try:
-                    abs_candidate.relative_to(root)
-                    if abs_candidate.exists() and abs_candidate.is_file():
-                        paths.append(str(abs_candidate))
-                        labels.append(int(y))
-                        continue
-                except ValueError:
-                    pass
-            else:
-                # 1) Direct join root/fname (works if fname includes subdirs, or if stored at root)
-                candidate = (root / fname).resolve()
-                if candidate.exists() and candidate.is_file():
-                    paths.append(str(candidate))
-                    labels.append(int(y))
-                    continue
-
-            # Normalize to forward-slash relpath for matching
-            fname_norm = fname.replace("\\", "/").lstrip("./")
-
-            # 2) Exact relative path match anywhere under root
-            if fname_norm in rel_map:
-                paths.append(rel_map[fname_norm])
-                labels.append(int(y))
+        missing_entries: List[str] = []
+        for fname, label in txt_items:
+            resolved_path = _resolve_manifest_video_path(
+                root,
+                fname,
+                root_dir=root_dir,
+                video_lookup=video_lookup,
+            )
+            if resolved_path is None:
+                missing_entries.append(fname)
                 continue
+            paths.append(resolved_path)
+            labels.append(int(label))
 
-            # 3) Same relative directory + same stem (ignoring extension)
-            stem = Path(fname_norm).stem.lower()
-            parent = Path(fname_norm).parent.as_posix().lower()
-            key = ("" if parent == "." else parent, stem)
-            dir_hits = dir_stem_map.get(key, [])
-            if len(dir_hits) == 1:
-                paths.append(dir_hits[0])
-                labels.append(int(y))
-                continue
-            if len(dir_hits) > 1:
-                raise ValueError(
-                    f"Ambiguous dir+stem match for {fname!r} (dir={key[0]!r}, stem={stem!r}): "
-                    f"found {len(dir_hits)} files under {root_dir}."
-                )
-
-            stripped_dir_hits = dir_stripped_stem_map.get(key, [])
-            if len(stripped_dir_hits) == 1:
-                paths.append(stripped_dir_hits[0])
-                labels.append(int(y))
-                continue
-            if len(stripped_dir_hits) > 1:
-                raise ValueError(
-                    f"Ambiguous dir+stem hashed match for {fname!r} (dir={key[0]!r}, stem={stem!r}): "
-                    f"found {len(stripped_dir_hits)} files under {root_dir}."
-                )
-
-            # 4) Stem-only match (basename without extension), case-insensitive
-            hits = stem_map.get(stem, [])
-            if len(hits) == 1:
-                paths.append(hits[0])
-                labels.append(int(y))
-                continue
-            if len(hits) > 1:
-                raise ValueError(
-                    f"Ambiguous stem match for {fname!r} (stem={stem!r}): found {len(hits)} files under {root_dir}. "
-                    f"Use relative paths in the txt to disambiguate."
-                )
-
-            stripped_hits = stripped_stem_map.get(stem, [])
-            if len(stripped_hits) == 1:
-                paths.append(stripped_hits[0])
-                labels.append(int(y))
-                continue
-            if len(stripped_hits) > 1:
-                raise ValueError(
-                    f"Ambiguous hashed stem match for {fname!r} (stem={stem!r}): found {len(stripped_hits)} files under {root_dir}. "
-                    f"Use relative paths in the txt to disambiguate."
-                )
-
-            # 5) Normalized stem-only match for datasets with sanitized filenames
-            # (e.g. HMDB local copies dropping '#', '[', ']', '&', etc.).
-            norm_stem = _norm_video_stem(fname_norm)
-            norm_hits = norm_stem_map.get(norm_stem, [])
-            if len(norm_hits) == 1:
-                paths.append(norm_hits[0])
-                labels.append(int(y))
-                continue
-            if len(norm_hits) > 1:
-                norm_hits = sorted(norm_hits, key=lambda path: (len(Path(path).stem), path))
-                if len(norm_hits) == 1 or len(Path(norm_hits[0]).stem) < len(Path(norm_hits[1]).stem):
-                    paths.append(norm_hits[0])
-                    labels.append(int(y))
-                    continue
-                raise ValueError(
-                    f"Ambiguous normalized stem match for {fname!r} (norm_stem={norm_stem!r}): "
-                    f"found {len(norm_hits)} files under {root_dir}."
-                )
-
-            # 6) HMDB-style tail-token match when clip title prefixes differ but the action/camera suffix matches.
-            tail7 = _tail_token_key(fname_norm)
-            tail_hits = tail7_map.get(tail7, [])
-            if len(tail_hits) == 1:
-                paths.append(tail_hits[0])
-                labels.append(int(y))
-                continue
-            if len(tail_hits) > 1:
-                tail_hits = sorted(tail_hits, key=lambda path: (len(Path(path).stem), path))
-                if len(tail_hits) == 1 or len(Path(tail_hits[0]).stem) < len(Path(tail_hits[1]).stem):
-                    paths.append(tail_hits[0])
-                    labels.append(int(y))
-                    continue
-                raise ValueError(
-                    f"Ambiguous tail-token match for {fname!r} (tail7={tail7!r}): "
-                    f"found {len(tail_hits)} files under {root_dir}."
-                )
-
-            # 7) Fallback to absolute entry when nothing under root could be matched.
-            if abs_candidate is not None and abs_candidate.exists() and abs_candidate.is_file():
-                paths.append(str(abs_candidate))
-                labels.append(int(y))
-                continue
-
+        if missing_entries:
+            preview = ", ".join(repr(entry) for entry in missing_entries[:5])
+            remainder = len(missing_entries) - min(len(missing_entries), 5)
+            if remainder > 0:
+                preview = f"{preview}, and {remainder} more"
             print(
-                f"[WARN] Missing file in split '{dataset_split_txt}': could not resolve {fname!r} under root_dir={root_dir!r}. "
-                f"Skipping.",
+                f"[WARN] Skipped {len(missing_entries)} entries from split {dataset_split_txt!r} "
+                f"because they could not be resolved under root_dir={root_dir!r}: {preview}",
                 file=sys.stderr,
                 flush=True,
             )
-            continue
 
         # Build classnames (best-effort)
         uniq = sorted(set(labels))
+        if not uniq:
+            raise ValueError(
+                f"No usable videos were resolved from split {dataset_split_txt!r} under root_dir={root_dir!r}."
+            )
         # Keep it simple/robust: label ids as strings in index order
         # (If you want, you can later replace with real names from json, etc.)
         max_id = max(uniq)
         classnames = [str(i) for i in range(max_id + 1)]
         return paths, labels, classnames
 
-    # ---- Mode B: folder-per-class (your original behavior) ----
-    classnames = sorted([p.name for p in root.iterdir() if p.is_dir()])
-    if not classnames:
-        raise ValueError(f"No class subdirectories found in: {root_dir}")
+    # ---- Mode B: no split txt; support either flat-root files or class folders ----
+    root_files = sorted([
+        p for p in root.iterdir()
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+    ])
+    class_dirs = sorted([p for p in root.iterdir() if p.is_dir()])
 
-    paths, labels = [], []
-    for ci, cname in enumerate(classnames):
-        cdir = root / cname
-        for p in cdir.rglob("*"):
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
-                paths.append(str(p))
-                labels.append(ci)
+    if root_files:
+        paths = [str(p) for p in root_files]
+        labels = [0 for _ in paths]
+        classnames = [root.name]
+        return paths, labels, classnames
 
-    if not paths:
-        raise ValueError(f"No videos found under: {root_dir} (extensions: {sorted(VIDEO_EXTS)})")
+    if class_dirs:
+        classnames = [p.name for p in class_dirs]
+        paths: List[str] = []
+        labels: List[int] = []
+        for ci, cdir in enumerate(class_dirs):
+            for p in sorted(cdir.rglob("*")):
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+                    paths.append(str(p))
+                    labels.append(ci)
+        if paths:
+            return paths, labels, classnames
 
-    return paths, labels, classnames
-
-
-from typing import List, Dict
+    raise ValueError(
+        f"No videos found under: {root_dir}. "
+        f"Expected either files directly under root or class subdirectories containing video files "
+        f"(extensions: {sorted(VIDEO_EXTS)})."
+    )
 
 def classnames_from_id_csv(
     csv_path: str,
@@ -1574,34 +1642,16 @@ def classnames_from_id_csv(
       classnames: list where classnames[i] is the classname for id i
                  for i in [0..max(class_ids)].
     """
-    id2name: Dict[int, str] = {}
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames or "id" not in reader.fieldnames or "name" not in reader.fieldnames:
-            raise ValueError(f"CSV must have header with columns: id,name. Got: {reader.fieldnames}")
-        for row in reader:
-            if row is None:
-                continue
-            sid = str(row.get("id", "")).strip()
-            name = str(row.get("name", "")).strip()
-            if sid == "":
-                continue
-            try:
-                cid = int(sid)
-            except ValueError as e:
-                raise ValueError(f"Non-integer id in CSV: {sid!r}") from e
-            if name == "":
-                name = unknown_fmt.format(id=cid)
-            id2name[cid] = name
-
+    id_to_name = _read_id_name_csv(csv_path)
     if not class_ids:
         return []
 
     max_id = int(max(class_ids))
     classnames = [unknown_fmt.format(id=i) for i in range(max_id + 1)]
     for i in range(max_id + 1):
-        if i in id2name:
-            classnames[i] = id2name[i]
+        name = id_to_name.get(i, "").strip()
+        if name:
+            classnames[i] = name
     return classnames
 
 
@@ -1751,10 +1801,6 @@ def parse_floats(value: str) -> List[float]:
 # Checkpoint arg extraction
 # -----------------------------
 
-def _get(ckpt_args: Dict[str, Any], key: str, fallback: Any) -> Any:
-    v = ckpt_args.get(key, None)
-    return fallback if v is None else v
-
 
 @dataclass
 class MotionCkptConfig:
@@ -1823,71 +1869,78 @@ def extract_motion_config_from_ckpt(
     Mirror eval.py’s checkpoint argument extraction into a reusable function.
     """
     base = fallback or MotionCkptConfig()
-    ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
 
     # mhi_windows stored as string like "15" or "5,25"
-    mhi_windows_str = str(_get(ckpt_args, "mhi_windows", ",".join(map(str, base.mhi_windows))))
+    mhi_windows_str = str(get_checkpoint_arg(ckpt, "mhi_windows", ",".join(map(str, base.mhi_windows))))
     mhi_windows = tuple(int(x) for x in mhi_windows_str.split(",") if x.strip())
 
-    legacy_second_only = bool(_get(ckpt_args, "compute_second_only", base.compute_second_only))
-    active_branch = str(_get(ckpt_args, "active_branch", "second" if legacy_second_only else base.active_branch))
+    legacy_second_only = bool(get_checkpoint_arg(ckpt, "compute_second_only", base.compute_second_only))
+    active_branch = str(get_checkpoint_arg(ckpt, "active_branch", "second" if legacy_second_only else base.active_branch))
     if active_branch not in ("both", "first", "second"):
         active_branch = base.active_branch
 
-    use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", base.use_projection)))
-    dual_projection_heads = bool(_get(ckpt_args, "dual_projection_heads", base.dual_projection_heads))
+    use_projection = bool(
+        get_checkpoint_arg(
+            ckpt,
+            "use_projection",
+            get_checkpoint_arg(ckpt, "use_nonlinear_projection", base.use_projection),
+        )
+    )
+    dual_projection_heads = bool(get_checkpoint_arg(ckpt, "dual_projection_heads", base.dual_projection_heads))
 
     cfg = MotionCkptConfig(
-        model=str(_get(ckpt_args, "model", base.model)),
-        embed_dim=int(_get(ckpt_args, "embed_dim", base.embed_dim)),
-        fuse=str(_get(ckpt_args, "fuse", base.fuse)),
-        dropout=float(_get(ckpt_args, "dropout", base.dropout)),
+        model=str(get_checkpoint_arg(ckpt, "model", base.model)),
+        embed_dim=int(get_checkpoint_arg(ckpt, "embed_dim", base.embed_dim)),
+        fuse=str(get_checkpoint_arg(ckpt, "fuse", base.fuse)),
+        dropout=float(get_checkpoint_arg(ckpt, "dropout", base.dropout)),
 
-        second_type=str(_get(ckpt_args, "second_type", base.second_type)),
-        use_stems=bool(_get(ckpt_args, "use_stems", base.use_stems)),
+        second_type=str(get_checkpoint_arg(ckpt, "second_type", base.second_type)),
+        use_stems=bool(get_checkpoint_arg(ckpt, "use_stems", base.use_stems)),
         active_branch=active_branch,
         compute_second_only=(active_branch == "second"),
         use_projection=use_projection,
         dual_projection_heads=dual_projection_heads,
         use_nonlinear_projection=use_projection,
 
-        img_size=int(_get(ckpt_args, "img_size", base.img_size)),
-        mhi_frames=int(_get(ckpt_args, "mhi_frames", base.mhi_frames)),
-        flow_frames=int(_get(ckpt_args, "flow_frames", base.flow_frames)),
-        flow_hw=int(_get(ckpt_args, "flow_hw", base.flow_hw)),
+        img_size=int(get_checkpoint_arg(ckpt, "img_size", base.img_size)),
+        mhi_frames=int(get_checkpoint_arg(ckpt, "mhi_frames", base.mhi_frames)),
+        flow_frames=int(get_checkpoint_arg(ckpt, "flow_frames", base.flow_frames)),
+        flow_hw=int(get_checkpoint_arg(ckpt, "flow_hw", base.flow_hw)),
         mhi_windows=mhi_windows if mhi_windows else base.mhi_windows,
 
-        diff_threshold=float(_get(ckpt_args, "diff_threshold", base.diff_threshold)),
-        flow_max_disp=float(_get(ckpt_args, "flow_max_disp", base.flow_max_disp)),
+        diff_threshold=float(get_checkpoint_arg(ckpt, "diff_threshold", base.diff_threshold)),
+        flow_max_disp=float(get_checkpoint_arg(ckpt, "flow_max_disp", base.flow_max_disp)),
 
-        fb_pyr_scale=float(_get(ckpt_args, "fb_pyr_scale", base.fb_pyr_scale)),
-        fb_levels=int(_get(ckpt_args, "fb_levels", base.fb_levels)),
-        fb_winsize=int(_get(ckpt_args, "fb_winsize", base.fb_winsize)),
-        fb_iterations=int(_get(ckpt_args, "fb_iterations", base.fb_iterations)),
-        fb_poly_n=int(_get(ckpt_args, "fb_poly_n", base.fb_poly_n)),
-        fb_poly_sigma=float(_get(ckpt_args, "fb_poly_sigma", base.fb_poly_sigma)),
-        fb_flags=int(_get(ckpt_args, "fb_flags", base.fb_flags)),
+        fb_pyr_scale=float(get_checkpoint_arg(ckpt, "fb_pyr_scale", base.fb_pyr_scale)),
+        fb_levels=int(get_checkpoint_arg(ckpt, "fb_levels", base.fb_levels)),
+        fb_winsize=int(get_checkpoint_arg(ckpt, "fb_winsize", base.fb_winsize)),
+        fb_iterations=int(get_checkpoint_arg(ckpt, "fb_iterations", base.fb_iterations)),
+        fb_poly_n=int(get_checkpoint_arg(ckpt, "fb_poly_n", base.fb_poly_n)),
+        fb_poly_sigma=float(get_checkpoint_arg(ckpt, "fb_poly_sigma", base.fb_poly_sigma)),
+        fb_flags=int(get_checkpoint_arg(ckpt, "fb_flags", base.fb_flags)),
     )
     return cfg
 
 
 def build_fb_params(args: Any, ckpt_cfg: MotionCkptConfig) -> Dict[str, Any]:
-    def pick(value: Any, fallback: Any) -> Any:
-        return fallback if value is None else value
-
     return {
-        "pyr_scale": float(pick(getattr(args, "fb_pyr_scale", None), ckpt_cfg.fb_pyr_scale)),
-        "levels": int(pick(getattr(args, "fb_levels", None), ckpt_cfg.fb_levels)),
-        "winsize": int(pick(getattr(args, "fb_winsize", None), ckpt_cfg.fb_winsize)),
-        "iterations": int(pick(getattr(args, "fb_iterations", None), ckpt_cfg.fb_iterations)),
-        "poly_n": int(pick(getattr(args, "fb_poly_n", None), ckpt_cfg.fb_poly_n)),
-        "poly_sigma": float(pick(getattr(args, "fb_poly_sigma", None), ckpt_cfg.fb_poly_sigma)),
-        "flags": int(pick(getattr(args, "fb_flags", None), ckpt_cfg.fb_flags)),
+        "pyr_scale": float(
+            ckpt_cfg.fb_pyr_scale if getattr(args, "fb_pyr_scale", None) is None else getattr(args, "fb_pyr_scale")
+        ),
+        "levels": int(ckpt_cfg.fb_levels if getattr(args, "fb_levels", None) is None else getattr(args, "fb_levels")),
+        "winsize": int(ckpt_cfg.fb_winsize if getattr(args, "fb_winsize", None) is None else getattr(args, "fb_winsize")),
+        "iterations": int(
+            ckpt_cfg.fb_iterations if getattr(args, "fb_iterations", None) is None else getattr(args, "fb_iterations")
+        ),
+        "poly_n": int(ckpt_cfg.fb_poly_n if getattr(args, "fb_poly_n", None) is None else getattr(args, "fb_poly_n")),
+        "poly_sigma": float(
+            ckpt_cfg.fb_poly_sigma if getattr(args, "fb_poly_sigma", None) is None else getattr(args, "fb_poly_sigma")
+        ),
+        "flags": int(ckpt_cfg.fb_flags if getattr(args, "fb_flags", None) is None else getattr(args, "fb_flags")),
     }
 
-def apply_per_class_subset(dataset, max_per_class: int, seed: int):
-    from collections import defaultdict
 
+def apply_per_class_subset(dataset, max_per_class: int, seed: int):
     if max_per_class <= 0:
         return None
     if not hasattr(dataset, "labels") or not hasattr(dataset, "paths"):
