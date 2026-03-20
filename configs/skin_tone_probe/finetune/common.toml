@@ -35,7 +35,7 @@ active_branch = "both"
 [finetune]
 freeze_backbone = false
 freeze_bn_stats = false
-batch_size = 4
+batch_size = 8
 epochs = 10
 lr = 0.0002
 weight_decay = 0.0001
@@ -48,7 +48,7 @@ temporal_mixup_prob = 0.0
 lambda_rep_mix = 0.0
 
 [runtime]
-num_workers = 8
+num_workers = 4
 log_every = 10
 save_every = 50
 checkpoint_mode = "latest"

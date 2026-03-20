@@ -3,6 +3,7 @@ import cv2
 from torch.utils.data import Dataset, Sampler
 import torch.nn.functional as F
 import torchvision.transforms as T
+from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 import zstandard as zstd
 import os, json, struct
 import sys
@@ -36,6 +37,11 @@ _RAFT_PRE = T.Compose([
 ])
 _CLIP_RGB_MEAN = torch.tensor([0.48145466, 0.4578275, 0.40821073], dtype=torch.float32).view(3, 1, 1, 1)
 _CLIP_RGB_STD = torch.tensor([0.26862954, 0.26130258, 0.27577711], dtype=torch.float32).view(3, 1, 1, 1)
+
+
+def build_raft_large(device: str = "cuda") -> torch.nn.Module:
+    weights = Raft_Large_Weights.DEFAULT
+    return raft_large(weights=weights, progress=True).to(device).eval()
 
 class ResumableShuffleSampler(Sampler[int]):
     def __init__(self, dataset_len: int, seed: int, epoch: int, start_index: int, drop_last: bool, batch_size: int):
@@ -1199,3 +1205,4 @@ def raft_flow_from_paired_frames_batched(
         flow_out[b] = flow.to(out_dtype).permute(1, 0, 2, 3).contiguous()
 
     return flow_out
+

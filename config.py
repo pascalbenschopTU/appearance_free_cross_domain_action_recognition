@@ -653,6 +653,13 @@ def build_eval_parser(default_device: str) -> argparse.ArgumentParser:
     data.add_argument("--out_dir", type=str, default="eval_out")
     data.add_argument("--manifests", type=str, nargs="*", default=None, help="evaluation splits")
     data.add_argument("--input_modality", type=str, default="motion", choices=["motion", "rgb"])
+    data.add_argument(
+        "--motion_data_source",
+        type=str,
+        default="video",
+        choices=["video", "zstd"],
+        help="For motion evaluation: 'video' computes motion on the fly, 'zstd' loads precomputed motion tensors.",
+    )
     data.add_argument("--class_id_to_label_csv", type=str, default=None)
 
     runtime = parser.add_argument_group("Runtime")

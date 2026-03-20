@@ -20,6 +20,7 @@ motion_eval_crop_mode = "center"
 
 [text]
 text_bank_backend = "clip"
+no_clip = true
 use_heads = "fuse"
 head_weights = "1.0"
 rgb_frames = 1
@@ -28,6 +29,6 @@ rgb_weight = 0.5
 
 [runtime]
 batch_size = 8
-num_workers = 8
+num_workers = 4
 device = "cuda"
 out_dir = "eval_out/skin_tone_probe"

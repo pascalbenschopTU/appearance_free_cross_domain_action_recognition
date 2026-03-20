@@ -32,14 +32,11 @@ import contextlib
 from typing import List, Dict, Optional
 import math
 from pathlib import Path
-import cv2
 import numpy as np
-from PIL import Image
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
 from config import parse_eval_args
 from util import (
@@ -47,6 +44,7 @@ from util import (
     build_text_bank,
     expand_manifest_args,
     LogitScale,
+    load_clip_text_encoder,
     load_precomputed_text_bank_and_logit_scale,
     parse_floats,
     parse_list,
@@ -57,10 +55,13 @@ from e2s_x3d import TwoStreamE2S_X3D_CLIP
 from svt import TwoStreamSVT_CLIP
 from dataset import (
     RGBVideoClipDataset,
+    MotionTwoStreamZstdDataset,
+    collate_motion,
     collate_rgb_clip,
     VideoMotionDataset,
     collate_video_motion,
     VideoMHIFramesDataset,
+    build_raft_large,
     raft_flow_from_paired_frames_batched,
 )
 
@@ -71,16 +72,6 @@ except Exception as e:
     raise RuntimeError("Could not import 'clip'. Install OpenAI CLIP (or adapt to open_clip).") from e
 
 
-import matplotlib
-matplotlib.use("Agg")  # safe on servers
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-
-
-def build_raft_large(device: str = "cuda"):
-    weights = Raft_Large_Weights.DEFAULT
-    model = raft_large(weights=weights, progress=True).to(device).eval()
-    return model
 
 # -----------------------------
 # Confusion matrix
@@ -91,6 +82,11 @@ def save_cm_pdf(cm: np.ndarray, classnames: List[str], out_pdf: str, title: str 
     Saves confusion matrix as a vector PDF. For large #classes, hides tick labels and
     adds a second page with an ID->class mapping.
     """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
     num_classes = len(classnames)
 
     with PdfPages(out_pdf) as pdf:
@@ -456,7 +452,7 @@ def evaluate_one_split(
 
             if mhi is not None:
                 mhi = mhi.to(device, non_blocking=True)
-            if flow_backend == "raft_large":
+            if getattr(args, "motion_data_source", "video") == "video" and flow_backend == "raft_large":
                 if raft_model is None:
                     raise RuntimeError("flow_backend='raft_large' requires a loaded RAFT model.")
                 second = raft_flow_from_paired_frames_batched(
@@ -748,8 +744,16 @@ def main():
     args.motion_resize_mode = motion_resize_mode
     args.motion_eval_crop_mode = motion_eval_crop_mode
 
+    args.motion_data_source = str(getattr(args, "motion_data_source", "video") or "video").lower()
     if args.input_modality == "motion":
-        if args.flow_backend == "raft_large":
+        if args.motion_data_source == "zstd":
+            if args.flow_backend == "raft_large":
+                print("[EVAL] motion_data_source=zstd uses precomputed flow; skipping on-the-fly RAFT.", flush=True)
+            args.flow_backend = "farneback"
+            if args.roi_mode != "none":
+                print("[WARN] --roi_mode is ignored when --motion_data_source zstd.", flush=True)
+                args.roi_mode = "none"
+        elif args.flow_backend == "raft_large":
             if device.type != "cuda":
                 raise RuntimeError("--flow_backend raft_large requires CUDA for practical runtime.")
             if flow_hw < 128 or (flow_hw % 8) != 0:
@@ -759,6 +763,9 @@ def main():
             if args.roi_mode != "none":
                 raise ValueError("--roi_mode is currently only supported with --flow_backend farneback.")
     else:
+        if args.motion_data_source != "video":
+            print("[WARN] --motion_data_source is motion-only; forcing to 'video' in rgb mode.", flush=True)
+            args.motion_data_source = "video"
         if args.flow_backend != "farneback":
             print("[WARN] flow backend options are motion-only; forcing --flow_backend farneback in rgb mode.", flush=True)
             args.flow_backend = "farneback"
@@ -778,16 +785,25 @@ def main():
     )
     # -----------------------------
     # CLIP
-    # -----------------------------  
-    clip_model, clip_preprocess = clip.load("ViT-B/32", device=device, jit=False)
-    clip_model.eval()
-    for p in clip_model.parameters():
-        p.requires_grad_(False)
-
+    # -----------------------------
+    use_clip = not bool(getattr(args, "no_clip", getattr(args, "no_rgb", False)))
+    clip_model = None
+    clip_preprocess = None
+    text_clip_model = None
+    text_tokenize_fn = None
+    if use_clip:
+        clip_model, clip_preprocess = clip.load("ViT-B/32", device=device, jit=False)
+        clip_model.eval()
+        for p in clip_model.parameters():
+            p.requires_grad_(False)
+        text_clip_model = clip_model
+        text_tokenize_fn = clip.tokenize
+    else:
+        text_clip_model, text_tokenize_fn = load_clip_text_encoder(device)
     templates = CLIP_TEMPLATES
     raft_model = (
         build_raft_large(str(device))
-        if args.input_modality == "motion" and args.flow_backend == "raft_large"
+        if args.input_modality == "motion" and args.motion_data_source == "video" and args.flow_backend == "raft_large"
         else None
     )
 
@@ -898,8 +914,10 @@ def main():
 
     if args.clip_vision_scale and args.clip_vision_scale > 0:
         scale_clip = float(args.clip_vision_scale)
-    else:
+    elif clip_model is not None:
         scale_clip = float(clip_model.logit_scale.exp().item())
+    else:
+        scale_clip = 1.0
 
     for manifest_path in manifest_paths:
         split_name = split_name_from_manifest(manifest_path)
@@ -919,7 +937,30 @@ def main():
             )
             collate_fn = collate_rgb_clip
         else:
-            if args.flow_backend == "raft_large":
+            if args.motion_data_source == "zstd":
+                dataset = MotionTwoStreamZstdDataset(
+                    args.root_dir,
+                    img_size=img_size,
+                    flow_hw=flow_hw,
+                    mhi_frames=mhi_frames,
+                    flow_frames=flow_frames,
+                    mhi_windows=mhi_windows,
+                    out_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+                    in_ch_second=second_channels,
+                    p_hflip=0.0,
+                    p_max_drop_frame=0.0,
+                    p_affine=0.0,
+                    p_rot=0.0,
+                    p_scl=0.0,
+                    p_shr=0.0,
+                    p_trn=0.0,
+                    spatial_crop_mode="random",
+                    seed=0,
+                    dataset_split_txt=manifest_path,
+                    class_id_to_label_csv=args.class_id_to_label_csv,
+                )
+                collate_fn = collate_motion
+            elif args.flow_backend == "raft_large":
                 dataset = VideoMHIFramesDataset(
                     args.root_dir,
                     img_size=img_size,
@@ -937,6 +978,7 @@ def main():
                     dataset_split_txt=manifest_path,
                     class_id_to_label_csv=args.class_id_to_label_csv,
                 )
+                collate_fn = collate_video_motion
             else:
                 dataset = VideoMotionDataset(
                     args.root_dir,
@@ -966,7 +1008,7 @@ def main():
                     dataset_split_txt=manifest_path,
                     class_id_to_label_csv=args.class_id_to_label_csv,
                 )
-            collate_fn = collate_video_motion
+                collate_fn = collate_video_motion
 
         dataloader = DataLoader(
             dataset,
@@ -1004,15 +1046,14 @@ def main():
             )
         else:
             text_bank = build_text_bank(
-                clip_model=clip_model,
-                tokenize_fn=clip.tokenize,
+                clip_model=text_clip_model,
+                tokenize_fn=text_tokenize_fn,
                 classnames=classnames,
                 device=device,
                 templates=templates,
                 class_texts=class_texts,
                 l2_normalize=True,
             )  # (C,512)
-
         # Base json (per split)
         base_json = {
             "root_dir": args.root_dir,

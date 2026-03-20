@@ -34,6 +34,7 @@ import hashlib
 import argparse
 import sys
 import traceback
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import cv2
@@ -42,6 +43,11 @@ import torch
 import zstandard as zstd
 from multiprocessing import get_context
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.append(str(_REPO_ROOT))
+
+from dataset import _resize_and_crop_square, build_raft_large, raft_flow_from_paired_frames_batched
 from cropping_util import (
     detect_square_roi_largest_motion,
     detect_square_roi_yolo_person,
@@ -202,11 +208,23 @@ def compute_mhi_and_flow_stream_cpu(
     flow_normalize: bool = True,
     out_dtype: torch.dtype = torch.float16,
     roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
+    motion_img_resize: Optional[int] = None,
+    motion_flow_resize: Optional[int] = None,
+    motion_resize_mode: str = "short_side",
+    motion_crop_mode: str = "center",
+    crop_anchor: Optional[Tuple[float, float]] = None,
+    raft_model=None,
+    raft_device: str = "cuda",
+    raft_flow_clip: float = 1.0,
+    raft_amp: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     flow_backend = str(flow_backend).lower()
-    if flow_backend != "farneback":
+    if flow_backend not in ("farneback", "raft_large"):
         raise ValueError(f"Unsupported flow_backend: {flow_backend}")
+    if flow_backend == "raft_large" and raft_model is None:
+        raise ValueError("flow_backend='raft_large' requires a loaded RAFT model")
     fb_params = fb_params or {}
+    crop_anchor = crop_anchor if crop_anchor is not None else (0.5, 0.5)
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -215,7 +233,6 @@ def compute_mhi_and_flow_stream_cpu(
     num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     if num_frames <= 1:
         cap.release()
-        # fallback: count frames by decoding
         num_frames = _count_frames_fallback(path)
         if num_frames <= 1:
             raise RuntimeError(f"Video too short or unreadable (frames={num_frames}): {path}")
@@ -225,19 +242,17 @@ def compute_mhi_and_flow_stream_cpu(
 
     flow_idx = spaced_indices(num_frames, flow_frames).cpu()
     mhi_idx = aligned_mhi_indices_from_flow(flow_idx, mhi_frames).cpu()
-
     flow_set = set(map(int, flow_idx.numpy()))
     mhi_set = set(map(int, mhi_idx.numpy()))
-
     flow_pos = {int(t): i for i, t in enumerate(flow_idx.tolist())}
     mhi_pos = {int(t): i for i, t in enumerate(mhi_idx.tolist())}
 
-    prev_gray224 = None
-    prev_gray112 = None
+    prev_gray_mhi = None
+    prev_flow_frame = None
     t = -1
     last_needed = int(flow_idx[-1].item())
     C = len(mhi_windows)
-    dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
+    dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)
     mhi = None
     flows = None
     mhi_out = None
@@ -257,25 +272,35 @@ def compute_mhi_and_flow_stream_cpu(
             if cropped.shape[0] > 1 and cropped.shape[1] > 1:
                 frame_src = cropped
 
-        frame224 = resize_frame_preserve_height(frame_src, img_size, interpolation=cv2.INTER_AREA)
-        frame112 = resize_frame_preserve_height(frame_src, flow_hw, interpolation=cv2.INTER_AREA)
+        frame_mhi = _resize_and_crop_square(
+            frame_src,
+            resize_hw=motion_img_resize,
+            out_hw=img_size,
+            resize_mode=motion_resize_mode,
+            crop_mode=motion_crop_mode,
+            crop_anchor=crop_anchor,
+        )
+        frame_flow = _resize_and_crop_square(
+            frame_src,
+            resize_hw=motion_flow_resize,
+            out_hw=flow_hw,
+            resize_mode=motion_resize_mode,
+            crop_mode=motion_crop_mode,
+            crop_anchor=crop_anchor,
+        )
 
         if mhi is None:
-            mhi_h, mhi_w = frame224.shape[:2]
-            flow_h, flow_w = frame112.shape[:2]
-            mhi = torch.zeros((C, mhi_h, mhi_w), dtype=torch.float32)
-            flows = torch.zeros((2, flow_frames, flow_h, flow_w), dtype=torch.float32)
-            mhi_out = torch.zeros((C, mhi_frames, mhi_h, mhi_w), dtype=torch.float32)
+            mhi = torch.zeros((C, img_size, img_size), dtype=torch.float32)
+            flows = torch.zeros((2, flow_frames, flow_hw, flow_hw), dtype=torch.float32)
+            mhi_out = torch.zeros((C, mhi_frames, img_size, img_size), dtype=torch.float32)
 
-        gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
-        gray112 = cv2.cvtColor(frame112, cv2.COLOR_BGR2GRAY)
+        gray_mhi = cv2.cvtColor(frame_mhi, cv2.COLOR_BGR2GRAY)
 
-        if prev_gray224 is not None:
-            g_cur = torch.from_numpy(gray224).to(dtype=torch.float32)
-            g_prev = torch.from_numpy(prev_gray224).to(dtype=torch.float32)
+        if prev_gray_mhi is not None:
+            g_cur = torch.from_numpy(gray_mhi).to(dtype=torch.float32)
+            g_prev = torch.from_numpy(prev_gray_mhi).to(dtype=torch.float32)
             diff = (g_cur - g_prev).abs()
-            motion = (diff > diff_threshold).float().unsqueeze(0)  # (1,H,W)
-
+            motion = (diff > diff_threshold).float().unsqueeze(0)
             mhi = (mhi - 1.0).clamp_(min=0.0)
             mhi = torch.where(motion > 0, dur.view(C, 1, 1).expand_as(mhi), mhi)
             mhi = torch.minimum(mhi, dur.view(C, 1, 1))
@@ -284,17 +309,39 @@ def compute_mhi_and_flow_stream_cpu(
             j = mhi_pos[t]
             mhi_out[:, j] = mhi / dur.view(C, 1, 1)
 
-        if t in flow_set and prev_gray112 is not None:
+        if t in flow_set and prev_flow_frame is not None:
             i = flow_pos[t]
-            flow = cv2.calcOpticalFlowFarneback(prev_gray112, gray112, None, **fb_params)  # (H,W,2)
-            if flow_max_disp and flow_max_disp > 0:
-                np.clip(flow, -flow_max_disp, flow_max_disp, out=flow)
-                if flow_normalize:
-                    flow = flow / float(flow_max_disp)
-            flows[:, i] = torch.from_numpy(flow).permute(2, 0, 1)
+            if flow_backend == "farneback":
+                prev_gray_flow = cv2.cvtColor(prev_flow_frame, cv2.COLOR_BGR2GRAY)
+                gray_flow = cv2.cvtColor(frame_flow, cv2.COLOR_BGR2GRAY)
+                flow_np = cv2.calcOpticalFlowFarneback(prev_gray_flow, gray_flow, None, **fb_params)
+                if flow_max_disp and flow_max_disp > 0:
+                    np.clip(flow_np, -flow_max_disp, flow_max_disp, out=flow_np)
+                    if flow_normalize:
+                        flow_np = flow_np / float(flow_max_disp)
+                flows[:, i] = torch.from_numpy(flow_np).permute(2, 0, 1).float()
+            else:
+                pair_np = np.stack(
+                    [
+                        cv2.cvtColor(prev_flow_frame, cv2.COLOR_BGR2RGB),
+                        cv2.cvtColor(frame_flow, cv2.COLOR_BGR2RGB),
+                    ],
+                    axis=0,
+                )
+                pair = torch.from_numpy(pair_np).permute(0, 3, 1, 2).unsqueeze(0).unsqueeze(0).contiguous()
+                flow_t = raft_flow_from_paired_frames_batched(
+                    pairs_u8=pair,
+                    raft_model=raft_model,
+                    device=raft_device,
+                    use_amp=bool(raft_amp),
+                    out_dtype=torch.float32,
+                )[0, :, 0]
+                if raft_flow_clip and raft_flow_clip > 0:
+                    flow_t = torch.clamp(flow_t, min=-float(raft_flow_clip), max=float(raft_flow_clip))
+                flows[:, i] = flow_t.cpu().to(torch.float32)
 
-        prev_gray224 = gray224
-        prev_gray112 = gray112
+        prev_gray_mhi = gray_mhi
+        prev_flow_frame = frame_flow
 
     cap.release()
     if mhi_out is None or flows is None:
@@ -563,7 +610,8 @@ def _init_worker(opencv_threads: int):
     except Exception:
         pass
 
-def _worker_one(task):
+
+def _run_one(task, *, raft_model=None, raft_device: str = "cuda", raft_amp: bool = True):
     """
     task = (vp, op, cfg_dict)
     returns (ok:bool, vp:str, op:str, label:str, msg:str)
@@ -599,7 +647,6 @@ def _worker_one(task):
                     out_dir=cfg["roi_debug_dir"],
                 )
             except Exception:
-                # Debug artifacts should not break feature extraction.
                 pass
 
         mhi_out, flows = compute_mhi_and_flow_stream_cpu(
@@ -616,6 +663,15 @@ def _worker_one(task):
             flow_normalize=cfg["flow_normalize"],
             out_dtype=cfg["out_dtype"],
             roi_xyxy=roi_xyxy,
+            motion_img_resize=cfg["motion_img_resize"],
+            motion_flow_resize=cfg["motion_flow_resize"],
+            motion_resize_mode=cfg["motion_resize_mode"],
+            motion_crop_mode=cfg["motion_crop_mode"],
+            crop_anchor=cfg["crop_anchor"],
+            raft_model=raft_model,
+            raft_device=raft_device,
+            raft_flow_clip=cfg["raft_flow_clip"],
+            raft_amp=raft_amp,
         )
 
         save_zstd_features(
@@ -634,6 +690,10 @@ def _worker_one(task):
     except Exception as e:
         tb = traceback.format_exc(limit=2)
         return False, vp, op, label, f"{repr(e)}\n{tb}"
+
+
+def _worker_one(task):
+    return _run_one(task)
 
 
 def main():
@@ -674,7 +734,11 @@ def main():
     p.add_argument("--flow_hw", type=int, default=124, help="Flow pre-resize height while preserving aspect ratio")
     p.add_argument("--flow_frames", type=int, default=128)
     p.add_argument("--flow_max_disp", type=float, default=20.0)
-    p.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback"])
+    p.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "raft_large"])
+    p.add_argument("--raft_flow_clip", type=float, default=1.0, help="Clip RAFT flow to [-x, x] before quantization.")
+    p.add_argument("--raft_device", type=str, default="cuda", help="Device for RAFT inference, e.g. cuda or cuda:0")
+    p.add_argument("--raft_amp", action="store_true", default=True, help="Use AMP for RAFT inference on CUDA.")
+    p.add_argument("--no_raft_amp", action="store_false", dest="raft_amp", help="Disable AMP for RAFT inference.")
 
     # flow normalization
     g = p.add_mutually_exclusive_group()
@@ -683,6 +747,10 @@ def main():
     p.set_defaults(flow_normalize=True)
 
     p.add_argument("--flow_clip", type=float, default=1.0, help="Quant clip for stored flow (default 1.0)")
+    p.add_argument("--motion_img_resize", type=int, default=256, help="Resize short side before MHI crop.")
+    p.add_argument("--motion_flow_resize", type=int, default=128, help="Resize short side before flow crop.")
+    p.add_argument("--motion_resize_mode", type=str, default="short_side", choices=["square", "short_side"], help="Spatial resize policy.")
+    p.add_argument("--motion_crop_mode", type=str, default="center", choices=["none", "random", "center"], help="Crop mode applied after resize.")
 
     # optional pre-crop ROI (does not change default behavior)
     p.add_argument("--roi_mode", choices=["none", "yolo_person", "largest_motion"],default="none",help="Optional crop ROI before MHI/flow extraction")
@@ -786,7 +854,13 @@ def main():
         flow_max_disp=float(args.flow_max_disp),
         flow_normalize=bool(args.flow_normalize),
         flow_clip=float(args.flow_clip),
+        raft_flow_clip=float(args.raft_flow_clip),
         fb_params=fb_params,
+        motion_img_resize=int(args.motion_img_resize),
+        motion_flow_resize=int(args.motion_flow_resize),
+        motion_resize_mode=str(args.motion_resize_mode),
+        motion_crop_mode=str(args.motion_crop_mode),
+        crop_anchor=(0.5, 0.5) if str(args.motion_crop_mode).lower() == "center" else None,
         roi_mode=str(args.roi_mode),
         roi_stride=max(1, int(args.roi_stride)),
         yolo_model=str(args.yolo_model),
@@ -811,15 +885,17 @@ def main():
 
     index_f = open(args.write_index, "w", encoding="utf-8") if args.write_index else None
 
-    ctx = get_context("spawn")
-    with ctx.Pool(
-        processes=int(args.num_workers),
-        initializer=_init_worker,
-        initargs=(int(args.opencv_threads),),
-        maxtasksperchild=200,
-    ) as pool:
+    if cfg["flow_backend"] == "raft_large":
+        if cfg["flow_hw"] < 128 or (cfg["flow_hw"] % 8) != 0:
+            raise SystemExit(f"raft_large requires flow_hw >= 128 and divisible by 8 (got {cfg['flow_hw']})")
+        raft_device = str(args.raft_device)
+        raft_model = build_raft_large(raft_device)
         for i, (ok, vp, op, label, msg) in enumerate(
-            pool.imap_unordered(_worker_one, tasks, chunksize=int(args.chunksize)), 1
+            (
+                _run_one(task, raft_model=raft_model, raft_device=raft_device, raft_amp=bool(args.raft_amp))
+                for task in tasks
+            ),
+            1,
         ):
             if ok and msg == "skipped":
                 skipped_cnt += 1
@@ -838,7 +914,34 @@ def main():
 
             if args.log_every > 0 and (i % int(args.log_every) == 0 or i == total):
                 print(f"[{i}/{total}] ok={ok_cnt} skipped={skipped_cnt} failed={fail_cnt} out_root={out_root}")
+    else:
+        ctx = get_context("spawn")
+        with ctx.Pool(
+            processes=int(args.num_workers),
+            initializer=_init_worker,
+            initargs=(int(args.opencv_threads),),
+            maxtasksperchild=200,
+        ) as pool:
+            for i, (ok, vp, op, label, msg) in enumerate(
+                pool.imap_unordered(_worker_one, tasks, chunksize=int(args.chunksize)), 1
+            ):
+                if ok and msg == "skipped":
+                    skipped_cnt += 1
+                    status = "skipped"
+                elif ok:
+                    ok_cnt += 1
+                    status = "ok"
+                else:
+                    fail_cnt += 1
+                    status = "failed"
+                    with open(fail_log_path, "a", encoding="utf-8") as f:
+                        f.write(f"{vp}\t{op}\t{label}\t{msg}\n")
 
+                if index_f:
+                    index_f.write(json.dumps({"path": vp, "out": op, "label": label, "status": status}, ensure_ascii=False) + "\n")
+
+                if args.log_every > 0 and (i % int(args.log_every) == 0 or i == total):
+                    print(f"[{i}/{total}] ok={ok_cnt} skipped={skipped_cnt} failed={fail_cnt} out_root={out_root}")
     if index_f:
         index_f.close()
 
