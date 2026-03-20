@@ -43,7 +43,10 @@ from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
 
 from config import parse_eval_args
 from util import (
-    aggregate_description_logits_to_classes,
+    apply_text_adapter,
+    aggregate_text_logits_to_classes,
+    build_class_multi_positive_text_bank,
+    build_text_adapter,
     build_text_bank,
     expand_manifest_args,
     LogitScale,
@@ -386,6 +389,8 @@ def evaluate_one_split(
     clip_preprocess,
     text_bank,
     class_to_desc_indices=None,
+    class_to_text_indices=None,
+    class_to_text_weights=None,
     scale_motion: float,
     scale_clip: float,
     num_classes: int,
@@ -428,6 +433,8 @@ def evaluate_one_split(
 
     w_rgb = max(0.0, min(1.0, float(args.rgb_weight)))
     w_motion = 1.0 - w_rgb
+    aggregation_indices = class_to_text_indices if class_to_text_indices is not None else class_to_desc_indices
+    aggregation_weights = class_to_text_weights if class_to_text_indices is not None else None
 
     # -----------------------------
     # Eval loop
@@ -509,11 +516,12 @@ def evaluate_one_split(
                 if num_views > 1:
                     for head_name, head_logits in list(logits_by_head.items()):
                         logits_by_head[head_name] = head_logits.view(b, num_views, -1).mean(dim=1)
-                if class_to_desc_indices is not None:
+                if aggregation_indices is not None:
                     for head_name, head_logits in list(logits_by_head.items()):
-                        logits_by_head[head_name] = aggregate_description_logits_to_classes(
+                        logits_by_head[head_name] = aggregate_text_logits_to_classes(
                             head_logits,
-                            class_to_desc_indices,
+                            aggregation_indices,
+                            aggregation_weights,
                         )
 
                 logits_motion_ens = None
@@ -537,8 +545,8 @@ def evaluate_one_split(
                         "Use --no_rgb for this setup."
                     )
                 logits_rgb = scale_clip * (v_rgb @ text_bank.t().float())
-                if class_to_desc_indices is not None:
-                    logits_rgb = aggregate_description_logits_to_classes(logits_rgb, class_to_desc_indices)
+                if aggregation_indices is not None:
+                    logits_rgb = aggregate_text_logits_to_classes(logits_rgb, aggregation_indices, aggregation_weights)
                 logits_fused_ens = w_motion * logits_motion_ens + w_rgb * logits_rgb
 
             y_true_all.append(y.detach().cpu().numpy())
@@ -661,6 +669,7 @@ def main():
 
     ckpt = torch.load(args.ckpt, map_location=device)
     ckpt_args = ckpt.get("args", {}) if isinstance(ckpt, dict) else {}
+    ckpt_model_state = ckpt.get("model_state", {}) if isinstance(ckpt, dict) else {}
     print(f"Ckpt args: {ckpt_args}", flush=True)
     
     def _get(ckpt_args: dict, key: str, fallback):
@@ -694,8 +703,19 @@ def main():
     args.compute_second_only = (active_branch == "second")
     use_projection = bool(_get(ckpt_args, "use_projection", _get(ckpt_args, "use_nonlinear_projection", False)))
     dual_projection_heads = bool(_get(ckpt_args, "dual_projection_heads", False))
+    text_supervision_mode = str(_get(ckpt_args, "text_supervision_mode", "class_proto"))
+    text_adapter_type = str(_get(ckpt_args, "text_adapter", "none"))
+    class_text_label_weight = float(_get(ckpt_args, "class_text_label_weight", 0.5))
+    apply_templates_to_class_texts = bool(_get(ckpt_args, "apply_templates_to_class_texts", True))
+    apply_templates_to_class_descriptions = bool(_get(ckpt_args, "apply_templates_to_class_descriptions", False))
     second_channels = 1 if second_type in ("dphase", "phase") else 2
     selected_model = str(_get(ckpt_args, "model", "i3d"))
+    cls_head_weight = ckpt_model_state.get("cls_head.1.weight") if isinstance(ckpt_model_state, dict) else None
+    eval_num_classes = (
+        int(cls_head_weight.shape[0])
+        if isinstance(cls_head_weight, torch.Tensor) and cls_head_weight.ndim == 2
+        else 0
+    )
 
     # input size, frames
     img_size     = int(_get(ckpt_args, "img_size", args.img_size))
@@ -793,6 +813,7 @@ def main():
             use_stems=use_stems,
             use_projection=use_projection,
             dual_projection_heads=dual_projection_heads,
+            num_classes=eval_num_classes,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "x3d":
@@ -809,6 +830,7 @@ def main():
             dropout=dropout,
             use_projection=use_projection,
             dual_projection_heads=dual_projection_heads,
+            num_classes=eval_num_classes,
             active_branch=active_branch,
         ).to(device)
     elif selected_model == "svt":
@@ -846,6 +868,7 @@ def main():
             motion_eps=float(_get(ckpt_args, "svt_motion_eps", 1e-6)),
             use_projection=use_projection,
             dual_projection_heads=dual_projection_heads,
+            num_classes=eval_num_classes,
             active_branch=active_branch,
         ).to(device)
     else:
@@ -857,6 +880,18 @@ def main():
         print("[WARN] Missing keys:", missing)
     if unexpected:
         print("[WARN] Unexpected keys:", unexpected)
+    text_adapter = build_text_adapter(text_adapter_type, embed_dim=embed_dim)
+    if text_adapter is not None:
+        text_adapter = text_adapter.to(device)
+        if isinstance(ckpt, dict) and "text_adapter_state" in ckpt:
+            text_adapter.load_state_dict(ckpt["text_adapter_state"])
+            print(f"[TEXT-ADAPTER] loaded type={text_adapter_type}", flush=True)
+        else:
+            print(
+                f"[WARN] checkpoint args request text_adapter={text_adapter_type} but no text_adapter_state was found.",
+                flush=True,
+            )
+        text_adapter.eval()
 
     # -----------------------------
     # Scales
@@ -961,6 +996,8 @@ def main():
 
         classnames = dataset.classnames
         num_classes = len(classnames)
+        class_to_text_indices = None
+        class_to_text_weights = None
 
         # Enforce consistent classnames across splits (recommended)
         if reference_classnames is None:
@@ -983,6 +1020,32 @@ def main():
                 init_temp=0.07,
                 dtype=torch.float16 if device.type == "cuda" else torch.float32,
             )
+            text_bank = text_bank.float().to(device)
+        elif text_supervision_mode == "class_multi_positive" and class_texts is not None:
+            multi_text_bank = build_class_multi_positive_text_bank(
+                clip_model=clip_model,
+                tokenize_fn=clip.tokenize,
+                classnames=classnames,
+                device=device,
+                templates=templates,
+                class_texts=class_texts,
+                l2_normalize=True,
+                apply_templates_to_class_texts=apply_templates_to_class_texts,
+                apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+            )
+            text_bank = multi_text_bank.text_bank.float().to(device)
+            class_to_text_indices = multi_text_bank.class_to_text_indices
+            class_to_text_weights = multi_text_bank.build_class_weights(
+                label_weight=class_text_label_weight,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            print(
+                f"[EVAL] class_multi_positive aggregation enabled: texts={text_bank.shape[0]} "
+                f"per_class={multi_text_bank.text_entries_per_class} "
+                f"label_weight={class_text_label_weight:.3f}",
+                flush=True,
+            )
         else:
             text_bank = build_text_bank(
                 clip_model=clip_model,
@@ -992,7 +1055,11 @@ def main():
                 templates=templates,
                 class_texts=class_texts,
                 l2_normalize=True,
-            )  # (C,512)
+                apply_templates_to_class_texts=apply_templates_to_class_texts,
+                class_text_label_weight=class_text_label_weight,
+                apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+            ).float().to(device)  # (C,512)
+        text_bank = apply_text_adapter(text_bank.float().to(device), text_adapter).detach()
 
         # Base json (per split)
         base_json = {
@@ -1022,6 +1089,9 @@ def main():
             "rgb_sampling": args.rgb_sampling,
             "rgb_weight": float(max(0.0, min(1.0, float(args.rgb_weight)))),
             "logit_scale_clip_vision": float(scale_clip),
+            "text_adapter": text_adapter_type,
+            "text_supervision_mode": text_supervision_mode,
+            "class_text_label_weight": float(class_text_label_weight),
         }
 
         print(f"\n--- Evaluating split '{split_name}' | samples={len(dataset)} | out_dir={os.path.abspath(split_out_dir)} ---", flush=True)
@@ -1036,6 +1106,8 @@ def main():
             clip_model=clip_model,
             clip_preprocess=clip_preprocess,
             text_bank=text_bank,
+            class_to_text_indices=class_to_text_indices,
+            class_to_text_weights=class_to_text_weights,
             scale_motion=scale_motion,
             scale_clip=scale_clip,
             num_classes=num_classes,

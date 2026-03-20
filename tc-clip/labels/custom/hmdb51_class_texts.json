@@ -204,6 +204,11 @@
     "smoking a cigarette",
     "inhaling smoke"
   ],
+  "somersault": [
+    "doing a somersault",
+    "performing a forward or backward flip",
+    "acrobatic rolling flip movement"
+  ],
   "stand": [
     "standing",
     "standing upright",
@@ -218,6 +223,11 @@
     "using a sword",
     "sword fighting",
     "handling a sword"
+  ],
+  "sword_exercise": [
+    "practicing sword movements",
+    "training with a sword",
+    "performing sword exercise drills"
   ],
   "talk": [
     "talking",

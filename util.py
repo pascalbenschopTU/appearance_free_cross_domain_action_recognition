@@ -2,6 +2,7 @@
 import os
 import glob
 import json
+import os
 import re
 import sys
 import csv
@@ -62,6 +63,7 @@ def load_checkpoint(
     scheduler=None,
     scaler=None,
     logit_scale=None,
+    text_adapter=None,
     strict: bool = False,
 ) -> Dict[str, Any]:
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -98,6 +100,8 @@ def load_checkpoint(
 
     if logit_scale is not None and "logit_scale_state" in ckpt:
         logit_scale.load_state_dict(ckpt["logit_scale_state"])
+    if text_adapter is not None and "text_adapter_state" in ckpt:
+        text_adapter.load_state_dict(ckpt["text_adapter_state"])
 
     return ckpt
 
@@ -113,6 +117,7 @@ def make_ckpt_payload(
     scheduler=None,
     scaler=None,
     logit_scale=None,
+    text_adapter=None,
 ) -> Dict[str, Any]:
     payload = {
         "epoch": epoch,
@@ -129,6 +134,8 @@ def make_ckpt_payload(
         payload["scaler_state"] = scaler.state_dict()
     if logit_scale is not None:
         payload["logit_scale_state"] = logit_scale.state_dict()
+    if text_adapter is not None:
+        payload["text_adapter_state"] = text_adapter.state_dict()
     return payload
 
 
@@ -172,6 +179,60 @@ def unfreeze_named_submodules(root: nn.Module, name_substrings: Sequence[str]) -
                 parameter.requires_grad_(True)
 
 
+class ResidualTextAdapter(nn.Module):
+    def __init__(self, embed_dim: int, adapter_type: str = "mlp"):
+        super().__init__()
+        adapter_type = str(adapter_type).lower()
+        if adapter_type not in {"linear", "mlp"}:
+            raise ValueError(f"Unsupported text adapter type: {adapter_type}")
+        self.adapter_type = adapter_type
+        self.input_norm = nn.LayerNorm(embed_dim)
+        if adapter_type == "linear":
+            self.adapter = nn.Linear(embed_dim, embed_dim)
+            nn.init.xavier_uniform_(self.adapter.weight, gain=0.02)
+            nn.init.zeros_(self.adapter.bias)
+        else:
+            hidden_dim = max(64, min(int(embed_dim), 256))
+            self.adapter = nn.Sequential(
+                nn.Linear(embed_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, embed_dim),
+            )
+            nn.init.xavier_uniform_(self.adapter[0].weight, gain=0.5)
+            nn.init.zeros_(self.adapter[0].bias)
+            nn.init.xavier_uniform_(self.adapter[2].weight, gain=0.02)
+            nn.init.zeros_(self.adapter[2].bias)
+        self.residual_scale = nn.Parameter(torch.tensor(1e-3))
+
+    def forward(self, text_bank: torch.Tensor) -> torch.Tensor:
+        base = F.normalize(text_bank.float(), dim=-1)
+        delta = self.adapter(self.input_norm(base))
+        return F.normalize(base + self.residual_scale * delta, dim=-1)
+
+
+def build_text_adapter(adapter_type: str, embed_dim: int) -> Optional[nn.Module]:
+    adapter_type = str(adapter_type).lower()
+    if adapter_type == "none":
+        return None
+    return ResidualTextAdapter(embed_dim=int(embed_dim), adapter_type=adapter_type)
+
+
+def apply_text_adapter(text_bank: torch.Tensor, text_adapter: Optional[nn.Module]) -> torch.Tensor:
+    base = F.normalize(text_bank.float(), dim=-1)
+    if text_adapter is None:
+        return base
+    return text_adapter(base)
+
+
+def text_adapter_regularization_loss(
+    adapted_text_bank: torch.Tensor,
+    raw_text_bank: torch.Tensor,
+) -> torch.Tensor:
+    target = F.normalize(raw_text_bank.float(), dim=-1)
+    pred = F.normalize(adapted_text_bank.float(), dim=-1)
+    return ((pred - target) ** 2).sum(dim=-1).mean()
+
+
 # ----------------------------
 # CLIP text encoder
 # ----------------------------
@@ -179,6 +240,17 @@ def unfreeze_named_submodules(root: nn.Module, name_substrings: Sequence[str]) -
 def _norm(s: str) -> str:
     # normalize for matching only (don’t feed this into CLIP)
     return re.sub(r"[\s_]+", " ", s.strip().lower())
+
+
+def _norm_video_stem(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", Path(s).stem.strip().lower()).strip()
+
+
+def _tail_token_key(s: str, num_tokens: int = 7) -> str:
+    tokens = [tok for tok in Path(s).stem.strip().lower().split("_") if tok]
+    if not tokens:
+        return ""
+    return "_".join(tokens[-num_tokens:])
 
 
 def _append_unique(dst: List[str], value: Any) -> None:
@@ -307,7 +379,36 @@ def adapt_class_texts(
     return out
 
 
-def load_clip_text_encoder(device: torch.device):
+def resolve_clip_download_root(
+    out_dir: Optional[str] = None,
+    clip_cache_dir: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve the directory used by OpenAI CLIP for model downloads.
+
+    Priority:
+      1. Explicit clip_cache_dir argument
+      2. CLIP_DOWNLOAD_ROOT environment variable
+      3. <out_dir>/clip_cache when out_dir is provided
+      4. None -> CLIP falls back to ~/.cache/clip
+    """
+    candidate = (clip_cache_dir or "").strip()
+    if not candidate:
+        candidate = os.environ.get("CLIP_DOWNLOAD_ROOT", "").strip()
+    if not candidate and out_dir:
+        candidate = os.path.join(out_dir, "clip_cache")
+    if not candidate:
+        return None
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
+
+def load_clip_text_encoder(
+    device: torch.device,
+    *,
+    out_dir: Optional[str] = None,
+    clip_cache_dir: Optional[str] = None,
+):
     """
     Uses OpenAI 'clip' package if available.
     Returns:
@@ -315,7 +416,8 @@ def load_clip_text_encoder(device: torch.device):
     """
     if clip is None:
         raise RuntimeError("Could not import 'clip'. Install OpenAI CLIP (or adapt to open_clip).")
-    clip_model, _ = clip.load("ViT-B/32", device=device, jit=False)
+    download_root = resolve_clip_download_root(out_dir=out_dir, clip_cache_dir=clip_cache_dir)
+    clip_model, _ = clip.load("ViT-B/32", device=device, jit=False, download_root=download_root)
     clip_model.eval()
     for p in clip_model.parameters():
         p.requires_grad_(False)
@@ -431,6 +533,53 @@ class DescriptionTextBank:
     desc_to_class_index: torch.Tensor
     description_texts: List[str]
     descriptions_per_class: int
+
+
+@dataclass
+class ClassMultiPositiveTextBank:
+    text_bank: torch.Tensor
+    class_to_text_indices: torch.Tensor
+    text_entries_per_class: int
+
+    def build_class_weights(
+        self,
+        *,
+        label_weight: float,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        idx = self.class_to_text_indices.to(device=device, dtype=torch.long)
+        entries_per_class = int(idx.shape[1])
+        if entries_per_class < 2:
+            raise ValueError("class_multi_positive weights require at least 1 label + 1 description.")
+        alpha = float(max(0.0, min(1.0, label_weight)))
+        weights = torch.full(
+            idx.shape,
+            (1.0 - alpha) / float(entries_per_class - 1),
+            device=device,
+            dtype=dtype,
+        )
+        weights[:, 0] = alpha
+        return weights
+
+    def build_targets(
+        self,
+        *,
+        label_weight: float,
+        device: torch.device,
+        dtype: torch.dtype = torch.float32,
+    ) -> torch.Tensor:
+        num_classes = int(self.class_to_text_indices.shape[0])
+        num_texts = int(self.text_bank.shape[0])
+        targets = torch.zeros((num_classes, num_texts), device=device, dtype=dtype)
+        idx = self.class_to_text_indices.to(device=device, dtype=torch.long)
+        weights = self.build_class_weights(
+            label_weight=label_weight,
+            device=device,
+            dtype=dtype,
+        )
+        targets.scatter_(1, idx, weights)
+        return targets
 
 
 @dataclass
@@ -637,6 +786,104 @@ def build_description_text_bank(
     )
 
 
+@torch.no_grad()
+def build_class_multi_positive_text_bank(
+    clip_model,
+    tokenize_fn,
+    classnames: List[str],
+    device: torch.device,
+    templates: List[str],
+    class_texts: Optional[Dict[str, Any]] = None,
+    *,
+    l2_normalize: bool = True,
+    apply_templates_to_class_texts: bool = True,
+    apply_templates_to_class_descriptions: bool = False,
+) -> ClassMultiPositiveTextBank:
+    class_text_entries = adapt_class_texts(class_texts, classnames) if class_texts is not None else {}
+
+    def prompts_from_texts(texts: List[str], apply_templates: bool) -> List[str]:
+        prompts: List[str] = []
+        for text in texts:
+            t = str(text).strip()
+            if not t:
+                continue
+            if apply_templates:
+                for template in templates:
+                    prompts.append(template.format(t))
+            else:
+                prompts.append(t)
+        return prompts
+
+    def encode_prompt_set(prompts: List[str]) -> Optional[torch.Tensor]:
+        if not prompts:
+            return None
+        tok = tokenize_fn(prompts).to(device)
+        feats = clip_model.encode_text(tok)
+        if l2_normalize:
+            feats = F.normalize(feats, dim=-1)
+        emb = feats.mean(dim=0)
+        if l2_normalize:
+            emb = F.normalize(emb, dim=-1)
+        return emb
+
+    all_text_embs: List[torch.Tensor] = []
+    class_to_text: List[List[int]] = []
+    descs_per_class: Optional[int] = None
+
+    for raw in classnames:
+        canonical_label = normalize_classname_ucf(raw)
+        entry = class_text_entries.get(raw, {"labels": [], "descriptions": []})
+
+        label_texts: List[str] = [canonical_label]
+        for s in entry.get("labels", []):
+            t = str(s).strip()
+            if not t:
+                continue
+            if _norm(t) == _norm(raw):
+                t = canonical_label
+            _append_unique(label_texts, t)
+
+        desc_texts: List[str] = []
+        for s in entry.get("descriptions", []):
+            _append_unique(desc_texts, s)
+        if not desc_texts:
+            raise ValueError(f"Class '{raw}' does not contain any descriptions for class_multi_positive supervision.")
+
+        if descs_per_class is None:
+            descs_per_class = len(desc_texts)
+        elif len(desc_texts) != descs_per_class:
+            raise ValueError(
+                f"class_multi_positive supervision requires a fixed descriptions-per-class count. "
+                f"Expected {descs_per_class} for '{raw}', got {len(desc_texts)}."
+            )
+
+        class_indices: List[int] = []
+        label_emb = encode_prompt_set(prompts_from_texts(label_texts, apply_templates_to_class_texts))
+        if label_emb is None:
+            raise RuntimeError(f"Could not build label embedding for class: {raw}")
+        class_indices.append(len(all_text_embs))
+        all_text_embs.append(label_emb)
+
+        for desc_text in desc_texts:
+            desc_emb = encode_prompt_set(
+                prompts_from_texts([desc_text], apply_templates_to_class_descriptions)
+            )
+            if desc_emb is None:
+                raise RuntimeError(f"Could not build description embedding for class '{raw}': {desc_text!r}")
+            class_indices.append(len(all_text_embs))
+            all_text_embs.append(desc_emb)
+        class_to_text.append(class_indices)
+
+    if not all_text_embs:
+        raise ValueError("No text embeddings were created for class_multi_positive supervision.")
+
+    return ClassMultiPositiveTextBank(
+        text_bank=torch.stack(all_text_embs, dim=0),
+        class_to_text_indices=torch.tensor(class_to_text, dtype=torch.long),
+        text_entries_per_class=int((descs_per_class or 0) + 1),
+    )
+
+
 def build_clip_description_bank_and_logit_scale(
     *,
     dataset_classnames,
@@ -645,8 +892,14 @@ def build_clip_description_bank_and_logit_scale(
     dtype=torch.float16,
     class_texts=None,
     apply_templates_to_class_descriptions: bool = False,
+    out_dir: Optional[str] = None,
+    clip_cache_dir: Optional[str] = None,
 ):
-    clip_model, tokenize_fn = load_clip_text_encoder(device)
+    clip_model, tokenize_fn = load_clip_text_encoder(
+        device,
+        out_dir=out_dir,
+        clip_cache_dir=clip_cache_dir,
+    )
     logit_scale = LogitScale(init_temp=init_temp).to(device)
     desc_bank = build_description_text_bank(
         clip_model=clip_model,
@@ -661,20 +914,40 @@ def build_clip_description_bank_and_logit_scale(
     return desc_bank, logit_scale
 
 
+def aggregate_text_logits_to_classes(
+    logits: torch.Tensor,
+    class_to_text_indices: torch.Tensor,
+    class_to_text_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if logits.ndim != 2:
+        raise ValueError(f"Expected logits with shape (B, N), got {tuple(logits.shape)}")
+    if class_to_text_indices.ndim != 2:
+        raise ValueError(
+            f"Expected class_to_text_indices with shape (C, K), got {tuple(class_to_text_indices.shape)}"
+        )
+    idx = class_to_text_indices.to(device=logits.device, dtype=torch.long)
+    gathered = logits.index_select(1, idx.reshape(-1))
+    gathered = gathered.reshape(logits.shape[0], idx.shape[0], idx.shape[1])
+    if class_to_text_weights is None:
+        return torch.logsumexp(gathered, dim=-1) - math.log(float(idx.shape[1]))
+    weights = class_to_text_weights.to(device=logits.device, dtype=gathered.dtype)
+    if weights.shape != idx.shape:
+        raise ValueError(
+            f"Expected class_to_text_weights with shape {tuple(idx.shape)}, got {tuple(weights.shape)}"
+        )
+    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    return torch.logsumexp(gathered + torch.log(weights.clamp_min(1e-12)).unsqueeze(0), dim=-1)
+
+
 def aggregate_description_logits_to_classes(
     logits: torch.Tensor,
     class_to_desc_indices: torch.Tensor,
 ) -> torch.Tensor:
-    if logits.ndim != 2:
-        raise ValueError(f"Expected logits with shape (B, N), got {tuple(logits.shape)}")
-    if class_to_desc_indices.ndim != 2:
-        raise ValueError(
-            f"Expected class_to_desc_indices with shape (C, K), got {tuple(class_to_desc_indices.shape)}"
-        )
-    idx = class_to_desc_indices.to(device=logits.device, dtype=torch.long)
-    gathered = logits.index_select(1, idx.reshape(-1))
-    gathered = gathered.reshape(logits.shape[0], idx.shape[0], idx.shape[1])
-    return torch.logsumexp(gathered, dim=-1) - math.log(float(idx.shape[1]))
+    return aggregate_text_logits_to_classes(
+        logits,
+        class_to_text_indices=class_to_desc_indices,
+        class_to_text_weights=None,
+    )
 
 
 def build_description_match_resolver(
@@ -902,6 +1175,8 @@ def build_clip_text_bank_and_logit_scale(
     apply_templates_to_class_texts: bool = True,
     class_text_label_weight: float = 0.5,
     apply_templates_to_class_descriptions: bool = False,
+    out_dir: Optional[str] = None,
+    clip_cache_dir: Optional[str] = None,
 ):
     """
     Returns:
@@ -910,7 +1185,11 @@ def build_clip_text_bank_and_logit_scale(
     """
     templates = CLIP_TEMPLATES
 
-    clip_model, tokenize_fn = load_clip_text_encoder(device)
+    clip_model, tokenize_fn = load_clip_text_encoder(
+        device,
+        out_dir=out_dir,
+        clip_cache_dir=clip_cache_dir,
+    )
     logit_scale = LogitScale(init_temp=init_temp).to(device)
 
     text_bank = build_text_bank(
@@ -1061,12 +1340,16 @@ def list_videos(
 
         rel_map: Dict[str, str] = {}                 # "a/b/c.mp4" -> "/abs/.../a/b/c.mp4"
         stem_map: Dict[str, List[str]] = {}          # "c" (lower) -> ["/abs/.../c.zst", ...]
+        norm_stem_map: Dict[str, List[str]] = {}     # normalized stem -> ["/abs/.../c.zst", ...]
+        tail7_map: Dict[str, List[str]] = {}         # last 7 underscore tokens -> ["/abs/.../c.zst", ...]
         dir_stem_map: Dict[Tuple[str, str], List[str]] = {}  # ("a/b", "c") -> ["/abs/.../a/b/c.zst", ...]
 
         for p in all_vids:
             rel = p.relative_to(root).as_posix()
             rel_map[rel] = str(p)
             stem_map.setdefault(p.stem.lower(), []).append(str(p))
+            norm_stem_map.setdefault(_norm_video_stem(p.stem), []).append(str(p))
+            tail7_map.setdefault(_tail_token_key(p.stem), []).append(str(p))
             parent = p.parent.relative_to(root).as_posix().lower()
             key = ("" if parent == "." else parent, p.stem.lower())
             dir_stem_map.setdefault(key, []).append(str(p))
@@ -1132,7 +1415,44 @@ def list_videos(
                     f"Use relative paths in the txt to disambiguate."
                 )
 
-            # 5) Fallback to absolute entry when nothing under root could be matched.
+            # 5) Normalized stem-only match for datasets with sanitized filenames
+            # (e.g. HMDB local copies dropping '#', '[', ']', '&', etc.).
+            norm_stem = _norm_video_stem(fname_norm)
+            norm_hits = norm_stem_map.get(norm_stem, [])
+            if len(norm_hits) == 1:
+                paths.append(norm_hits[0])
+                labels.append(int(y))
+                continue
+            if len(norm_hits) > 1:
+                norm_hits = sorted(norm_hits, key=lambda path: (len(Path(path).stem), path))
+                if len(norm_hits) == 1 or len(Path(norm_hits[0]).stem) < len(Path(norm_hits[1]).stem):
+                    paths.append(norm_hits[0])
+                    labels.append(int(y))
+                    continue
+                raise ValueError(
+                    f"Ambiguous normalized stem match for {fname!r} (norm_stem={norm_stem!r}): "
+                    f"found {len(norm_hits)} files under {root_dir}."
+                )
+
+            # 6) HMDB-style tail-token match when clip title prefixes differ but the action/camera suffix matches.
+            tail7 = _tail_token_key(fname_norm)
+            tail_hits = tail7_map.get(tail7, [])
+            if len(tail_hits) == 1:
+                paths.append(tail_hits[0])
+                labels.append(int(y))
+                continue
+            if len(tail_hits) > 1:
+                tail_hits = sorted(tail_hits, key=lambda path: (len(Path(path).stem), path))
+                if len(tail_hits) == 1 or len(Path(tail_hits[0]).stem) < len(Path(tail_hits[1]).stem):
+                    paths.append(tail_hits[0])
+                    labels.append(int(y))
+                    continue
+                raise ValueError(
+                    f"Ambiguous tail-token match for {fname!r} (tail7={tail7!r}): "
+                    f"found {len(tail_hits)} files under {root_dir}."
+                )
+
+            # 7) Fallback to absolute entry when nothing under root could be matched.
             if abs_candidate is not None and abs_candidate.exists() and abs_candidate.is_file():
                 paths.append(str(abs_candidate))
                 labels.append(int(y))

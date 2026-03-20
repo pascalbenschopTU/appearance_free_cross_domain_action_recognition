@@ -1,0 +1,11 @@
+[data]
+root_dir = "../../datasets/hmdb51"
+manifests = [
+  "tc-clip/datasets_splits/hmdb_splits/val1.txt",
+  "tc-clip/datasets_splits/hmdb_splits/val2.txt",
+  "tc-clip/datasets_splits/hmdb_splits/val3.txt",
+]
+class_id_to_label_csv = "tc-clip/labels/hmdb_51_labels.csv"
+
+[text]
+class_text_json = "tc-clip/labels/custom/hmdb51_class_texts.json"

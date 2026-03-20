@@ -76,12 +76,55 @@ def _parse_simple_toml_value(raw_value: str) -> Any:
     return value
 
 
+def _simple_toml_value_complete(raw_value: str) -> bool:
+    bracket_depth = 0
+    brace_depth = 0
+    quote_char = None
+    escaped = False
+
+    for ch in raw_value:
+        if quote_char is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote_char:
+                quote_char = None
+            continue
+
+        if ch in ('"', "'"):
+            quote_char = ch
+        elif ch == "[":
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+        elif ch == "{":
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth = max(0, brace_depth - 1)
+
+    return quote_char is None and bracket_depth == 0 and brace_depth == 0
+
+
 def _load_simple_toml(text: str) -> Dict[str, Any]:
     data: Dict[str, Any] = {}
     current: Dict[str, Any] = data
+    pending_key: Optional[str] = None
+    pending_value_lines = []
 
     for line in text.splitlines():
         stripped = line.strip()
+
+        if pending_key is not None:
+            if stripped and not stripped.startswith("#"):
+                pending_value_lines.append(stripped)
+            raw_value = "\n".join(pending_value_lines)
+            if _simple_toml_value_complete(raw_value):
+                current[pending_key] = _parse_simple_toml_value(raw_value)
+                pending_key = None
+                pending_value_lines = []
+            continue
+
         if not stripped or stripped.startswith("#"):
             continue
         if stripped.startswith("[") and stripped.endswith("]"):
@@ -95,7 +138,16 @@ def _load_simple_toml(text: str) -> Dict[str, Any]:
         if "=" not in stripped:
             raise ValueError(f"Invalid TOML line: {line}")
         key, raw_value = stripped.split("=", 1)
-        current[key.strip()] = _parse_simple_toml_value(raw_value)
+        key = key.strip()
+        raw_value = raw_value.strip()
+        if _simple_toml_value_complete(raw_value):
+            current[key] = _parse_simple_toml_value(raw_value)
+        else:
+            pending_key = key
+            pending_value_lines = [raw_value]
+
+    if pending_key is not None:
+        raise ValueError(f"Unterminated TOML value for key '{pending_key}'")
 
     return data
 
@@ -290,7 +342,7 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
         "--motion_eval_crop_mode",
         type=str,
         default="none",
-        choices=["none", "random", "center"],
+        choices=["none", "random", "center", "motion"],
     )
     motion.add_argument(
         "--motion_eval_num_views",
@@ -375,7 +427,7 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
         "--text_supervision_mode",
         type=str,
         default="class_proto",
-        choices=["class_proto", "desc_soft_margin"],
+        choices=["class_proto", "desc_soft_margin", "class_multi_positive"],
     )
     text.add_argument(
         "--description_match_csv",
@@ -427,7 +479,18 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
         "--class_text_label_weight",
         type=float,
         default=0.5,
-        help="alpha in alpha*t_label + (1-alpha)*t_desc when descriptions are available.",
+        help=(
+            "Label-anchor weight when class labels and descriptions are combined. "
+            "For class_proto this is alpha*t_label + (1-alpha)*t_desc; "
+            "for class_multi_positive this assigns alpha to the class label and spreads (1-alpha) across descriptions."
+        ),
+    )
+    text.add_argument(
+        "--text_adapter",
+        type=str,
+        default="none",
+        choices=["none", "linear", "mlp"],
+        help="Optional residual adapter applied to frozen text embeddings before loss/eval.",
     )
     text.add_argument(
         "--lambda_clip_ce",
@@ -504,6 +567,12 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
     runtime.add_argument("--save_every", type=int, default=2000)
     runtime.add_argument("--seed", type=int, default=0)
     runtime.add_argument("--out_dir", type=str, default="out/train")
+    runtime.add_argument(
+        "--clip_cache_dir",
+        type=str,
+        default="",
+        help="Directory for CLIP model downloads. Defaults to <out_dir>/clip_cache.",
+    )
     runtime.add_argument("--tb_dir", type=str, default="runs")
     runtime.add_argument("--ckpt_dir", type=str, default="checkpoints")
     runtime.add_argument("--device", type=str, default=default_device)
@@ -535,6 +604,12 @@ def build_eval_parser(default_device: str) -> argparse.ArgumentParser:
     runtime.add_argument("--device", type=str, default=default_device)
     runtime.add_argument("--batch_size", type=int, default=8)
     runtime.add_argument("--num_workers", type=int, default=0)
+    runtime.add_argument(
+        "--clip_cache_dir",
+        type=str,
+        default="",
+        help="Directory for CLIP model downloads. Defaults to <out_dir>/clip_cache.",
+    )
 
     motion = parser.add_argument_group("Motion")
     motion.add_argument("--img_size", type=int, default=224)
@@ -605,7 +680,7 @@ def build_eval_parser(default_device: str) -> argparse.ArgumentParser:
         "--motion_eval_crop_mode",
         type=str,
         default="center",
-        choices=["none", "random", "center"],
+        choices=["none", "random", "center", "motion"],
         help="Spatial crop mode for evaluation.",
     )
     motion.add_argument(
@@ -750,7 +825,7 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         "--motion_eval_crop_mode",
         type=str,
         default="center",
-        choices=["none", "random", "center"],
+        choices=["none", "random", "center", "motion"],
         help="Spatial crop mode for evaluation.",
     )
     motion.add_argument("--roi_mode", type=str, default="none", choices=["none", "largest_motion", "yolo_person"])
@@ -845,6 +920,12 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
     runtime.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
     runtime.add_argument("--seed", type=int, default=0)
     runtime.add_argument("--out_dir", type=str, default="out/finetune")
+    runtime.add_argument(
+        "--clip_cache_dir",
+        type=str,
+        default="",
+        help="Directory for CLIP model downloads. Defaults to <out_dir>/clip_cache.",
+    )
     runtime.add_argument("--tb_dir", type=str, default="runs")
     runtime.add_argument("--ckpt_dir", type=str, default="checkpoints")
     runtime.add_argument("--eval_dir", type=str, default="eval_out")
