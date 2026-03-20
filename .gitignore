@@ -6,7 +6,11 @@ run_scripts.txt
 *.pth
 workspace/
 logs/
-scripts/
+scripts/*
+!scripts/aggregate_skin_tone_probe.py
+!scripts/train_skin_tone_torchvision_rgb_probe.py
+!scripts/build_skin_tone_shortcut_probe.py
+!scripts/compute_skin_tone_probe_stats.py
 PrivacyAttributes/
 privacy/_stprivacy_src/
 privacy/_downloads/
