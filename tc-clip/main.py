@@ -172,6 +172,8 @@ def main_training(logger, config):
         return
 
     "------------ Training mode -----------"
+    early_stop_patience = int(config.get('early_stop_patience', 1))
+    no_improve_epochs = 0
     for epoch in range(start_epoch, config.epochs):
         if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
@@ -203,6 +205,10 @@ def main_training(logger, config):
             is_best = acc1 > max_accuracy
             max_accuracy = acc1 if is_best else max_accuracy
             max_accuracy_acc5 = acc5 if is_best else max_accuracy_acc5
+            if is_best:
+                no_improve_epochs = 0
+            else:
+                no_improve_epochs += 1
             logger.info(f'Max accuracy: {max_accuracy:.2f}%\n')
             if is_main() and (epoch % config.save_freq == 0 or epoch == (config.epochs - 1) or is_best):
                 epoch_saving(config, epoch, model, max_accuracy, optimizer, lr_scheduler, logger, config.output,
@@ -217,8 +223,11 @@ def main_training(logger, config):
                 wandb.log(log_stats, step=(epoch + 1) * len(train_loader) - 1)
 
             # early stopping
-            if config.early_stop and acc1 < max_accuracy:
-                logger.info(f"Early stopping at epoch {epoch}...")
+            if config.early_stop and no_improve_epochs >= early_stop_patience:
+                logger.info(
+                    f"Early stopping at epoch {epoch} after {no_improve_epochs} validation epoch(s) "
+                    f"without improvement."
+                )
                 break
 
     del model

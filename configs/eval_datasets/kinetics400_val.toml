@@ -1,0 +1,7 @@
+[data]
+root_dir = "../../datasets/Kinetics/k400"
+manifests = ["tc-clip/datasets_splits/k400_splits/val.txt"]
+class_id_to_label_csv = "tc-clip/labels/kinetics_400_labels.csv"
+
+[text]
+class_text_json = "tc-clip/labels/custom/Kinetics_descriptions.json"

@@ -46,6 +46,7 @@ save_intermediate: false
 print_freq: 50
 final_test: false
 early_stop: false # early stopping during training
+early_stop_patience: 5
 
 # others
 selected_option: ${hydra:runtime.choices} # selected defaults
