@@ -378,16 +378,21 @@ def evaluate_one_split(
 
     y_pred_motion_ens = []
     y_pred_class_head = []
+    y_pred_class_head_ens = []
     y_pred_rgb_only = []
     y_pred_fused_ens = []
     top1_motion_ens = 0
     top5_motion_ens = 0
     top1_class_head = 0
     top5_class_head = 0
+    top1_class_head_ens = 0
+    top5_class_head_ens = 0
     top1_rgb = 0
     top5_rgb = 0
     top1_fused_ens = 0
     top5_fused_ens = 0
+    class_head_enabled = False
+    warned_class_head_mismatch = False
 
     head_tags = ["top", "bot", "fuse"]
 
@@ -492,7 +497,16 @@ def evaluate_one_split(
                     if logits_cls_model is not None:
                         logits_cls_model = logits_cls_model.view(b, num_views, -1).mean(dim=1)
                 if logits_cls_model is not None and int(logits_cls_model.shape[-1]) != int(num_classes):
+                    if not warned_class_head_mismatch:
+                        print(
+                            f"[EVAL] ignoring logits_cls: output_dim={int(logits_cls_model.shape[-1])} "
+                            f"!= dataset_num_classes={int(num_classes)}",
+                            flush=True,
+                        )
+                        warned_class_head_mismatch = True
                     logits_cls_model = None
+                elif logits_cls_model is not None:
+                    class_head_enabled = True
                 if aggregation_indices is not None:
                     for head_name, head_logits in list(logits_by_head.items()):
                         logits_by_head[head_name] = aggregate_text_logits_to_classes(
@@ -506,6 +520,12 @@ def evaluate_one_split(
                     if h not in logits_by_head:
                         raise ValueError(f"use_heads contains '{h}', but available are {list(logits_by_head.keys())}")
                     logits_motion_ens = logits_by_head[h] * w if logits_motion_ens is None else logits_motion_ens + logits_by_head[h] * w
+                logits_class_head_ens = None
+                if logits_cls_model is not None:
+                    logits_class_head_ens = 0.5 * (
+                        F.normalize(logits_motion_ens.float(), dim=-1) +
+                        F.normalize(logits_cls_model.float(), dim=-1)
+                    )
 
             use_clip = not bool(getattr(args, "no_clip", getattr(args, "no_rgb", False)))
 
@@ -537,6 +557,9 @@ def evaluate_one_split(
                 top1_class_head += topk_correct(logits_cls_model, y, 1)
                 top5_class_head += topk_correct(logits_cls_model, y, min(5, num_classes))
                 y_pred_class_head.append(torch.argmax(logits_cls_model, dim=-1).detach().cpu().numpy())
+                top1_class_head_ens += topk_correct(logits_class_head_ens, y, 1)
+                top5_class_head_ens += topk_correct(logits_class_head_ens, y, min(5, num_classes))
+                y_pred_class_head_ens.append(torch.argmax(logits_class_head_ens, dim=-1).detach().cpu().numpy())
 
             if use_clip:
                 top1_rgb += topk_correct(logits_rgb, y, 1)
@@ -549,13 +572,16 @@ def evaluate_one_split(
 
             if (n % max(1, args.batch_size * 10)) == 0:
                 dt = time.time() - t0
-                print(
-                    f"[{n}/{len(dataset)}] elapsed={dt:.1f}s | "
-                    f"ens_motion_top1={top1_motion_ens/n:.4f} | "
-                    f"clip_top1={(top1_rgb/n if use_clip else 0):.4f} | "
-                    f"ens_fused_top1={(top1_fused_ens/n if use_clip else 0):.4f}",
-                    flush=True
-                )
+                progress_parts = [
+                    f"[{n}/{len(dataset)}] elapsed={dt:.1f}s",
+                    f"ens_motion_top1={top1_motion_ens/n:.4f}",
+                ]
+                if class_head_enabled:
+                    progress_parts.append(f"class_head_top1={top1_class_head/n:.4f}")
+                    progress_parts.append(f"class_head_ens_top1={top1_class_head_ens/n:.4f}")
+                progress_parts.append(f"clip_top1={(top1_rgb/n if use_clip else 0):.4f}")
+                progress_parts.append(f"ens_fused_top1={(top1_fused_ens/n if use_clip else 0):.4f}")
+                print(" | ".join(progress_parts), flush=True)
 
     # -----------------------------
     # Finalize arrays
@@ -563,6 +589,7 @@ def evaluate_one_split(
     y_true = np.concatenate(y_true_all, axis=0)
     y_pred_motion_ens = np.concatenate(y_pred_motion_ens, axis=0)
     class_head_metrics = None
+    class_head_ensemble_metrics = None
     has_class_head = len(y_pred_class_head) > 0
 
     # -----------------------------
@@ -600,6 +627,7 @@ def evaluate_one_split(
     )
     if has_class_head:
         y_pred_class_head = np.concatenate(y_pred_class_head, axis=0)
+        y_pred_class_head_ens = np.concatenate(y_pred_class_head_ens, axis=0)
         class_head_metrics = compute_metrics_and_artifacts(
             tag="class_head",
             out_dir=out_dir,
@@ -611,6 +639,23 @@ def evaluate_one_split(
             extra_json=base_json,
             summary_only=summary_only,
         )
+        class_head_ensemble_metrics = compute_metrics_and_artifacts(
+            tag=f"{primary_mode}_plus_class_head_ensemble",
+            out_dir=out_dir,
+            classnames=classnames,
+            y_true=y_true,
+            y_pred=y_pred_class_head_ens,
+            top1_correct=top1_class_head_ens,
+            top5_correct=top5_class_head_ens,
+            extra_json=base_json,
+            summary_only=summary_only,
+        )
+        class_head_stats = {
+            "class_head": class_head_metrics,
+            f"{primary_mode}_plus_class_head_ensemble": class_head_ensemble_metrics,
+        }
+        with open(os.path.join(out_dir, "class_head_stats.json"), "w", encoding="utf-8") as f:
+            json.dump(class_head_stats, f, indent=2)
 
     r_metrics = None
     f_metrics = None
@@ -645,6 +690,7 @@ def evaluate_one_split(
     return {
         primary_mode: m_metrics,
         **({} if not has_class_head else {"class_head": class_head_metrics}),
+        **({} if not has_class_head else {f"{primary_mode}_plus_class_head_ensemble": class_head_ensemble_metrics}),
         **({} if not use_clip else {
             "clip_rgb_only": r_metrics,
             f"{primary_mode}_plus_clip_ensemble": f_metrics,
@@ -749,9 +795,7 @@ def main():
     )
     second_channels = 1 if second_type in ("dphase", "phase") else 2
     selected_model = str(get_checkpoint_arg(ckpt_args, "model", "i3d"))
-    args.primary_mode = "class_head" if finetune_head_mode == "class" else (
-        "rgb_model" if args.input_modality == "rgb" else "motion_only"
-    )
+    args.primary_mode = "rgb_model" if args.input_modality == "rgb" else "motion_only"
     cls_head_weight = ckpt_model_state.get("cls_head.1.weight") if isinstance(ckpt_model_state, dict) else None
     eval_num_classes = (
         int(cls_head_weight.shape[0])
@@ -1098,8 +1142,8 @@ def main():
             text_bank = text_bank.float().to(device)
         elif text_supervision_mode == "class_multi_positive" and class_texts is not None:
             multi_text_bank = build_class_multi_positive_text_bank(
-                clip_model=clip_model,
-                tokenize_fn=clip.tokenize,
+                clip_model=text_clip_model,
+                tokenize_fn=text_tokenize_fn,
                 classnames=classnames,
                 device=device,
                 templates=templates,

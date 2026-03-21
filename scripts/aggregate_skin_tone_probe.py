@@ -19,18 +19,21 @@ MODE_BY_MODALITY = {
     "motion": "motion_only",
     "rgb": "rgb_model",
     "rgb_k400": "rgb_k400_model",
+    "flow_i3d_external": "flow_i3d_external_model",
 }
 COLOR_BY_MODALITY = {
     "motion": "#1f77b4",
     "rgb": "#ff7f0e",
     "rgb_k400": "#2ca02c",
+    "flow_i3d_external": "#d62728",
 }
 DISPLAY_NAME_BY_MODALITY = {
     "motion": "motion",
     "rgb": "rgb",
     "rgb_k400": "rgb_k400",
+    "flow_i3d_external": "flow_i3d_external",
 }
-MODALITY_ORDER = ["motion", "rgb", "rgb_k400"]
+MODALITY_ORDER = ["motion", "rgb", "rgb_k400", "flow_i3d_external"]
 GOOD_COLOR = (46, 125, 50)
 BAD_COLOR = (198, 40, 40)
 

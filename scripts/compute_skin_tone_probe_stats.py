@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--metric", type=str, default="f1_macro")
     parser.add_argument("--reference", type=str, default="motion")
-    parser.add_argument("--comparators", type=str, default="rgb,rgb_k400")
+    parser.add_argument("--comparators", type=str, default="rgb,rgb_k400,flow_i3d_external")
     parser.add_argument("--targets", type=str, default=",".join(DEFAULT_TARGETS))
     return parser.parse_args()
 

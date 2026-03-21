@@ -18,7 +18,7 @@ flow_backend = "farneback"
 motion_img_resize = 256
 motion_flow_resize = 128
 motion_resize_mode = "short_side"
-motion_eval_crop_mode = "motion"
+motion_eval_crop_mode = "center"
 motion_eval_num_views = 1
 roi_mode = "none"
 
@@ -33,7 +33,7 @@ rgb_sampling = "center"
 rgb_weight = 0.5
 
 [runtime]
-batch_size = 8
-num_workers = 0
+batch_size = 16
+num_workers = 16
 out_dir = "eval_out"
 device = "cuda"
