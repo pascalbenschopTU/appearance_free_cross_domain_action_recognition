@@ -64,6 +64,10 @@ def parse_args() -> argparse.Namespace:
     ev.add_argument("--seed", type=int, default=0)
     ev.add_argument("--summary_only", action="store_true")
 
+    ag = subparsers.add_parser("aggregate")
+    ag.add_argument("--out_dir", type=str, required=True)
+    ag.add_argument("--model", type=str, required=True, choices=["r3d_18", "mc3_18", "r2plus1d_18"])
+
     return parser.parse_args()
 
 
@@ -197,6 +201,37 @@ def build_summary(*, split_name: str, metrics: Dict[str, float]) -> Dict[str, ob
         "num_splits": 1,
         "splits": {split_name: metrics},
         "aggregate": {key: {"mean": float(value), "std": 0.0} for key, value in metrics.items()},
+    }
+
+
+def aggregate_split_summaries(out_dir: Path, model_name: str) -> Dict[str, object]:
+    split_summaries: Dict[str, Dict[str, float]] = {}
+    for split_dir in sorted(path for path in out_dir.iterdir() if path.is_dir() and path.name.startswith("eval_")):
+        summary_path = split_dir / f"summary_{MODE_NAME}.json"
+        if not summary_path.exists():
+            continue
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        split_metrics = payload.get("splits", {}).get(split_dir.name)
+        if isinstance(split_metrics, dict):
+            split_summaries[split_dir.name] = {str(k): float(v) for k, v in split_metrics.items()}
+
+    metric_names = sorted({metric for metrics in split_summaries.values() for metric in metrics})
+    aggregate: Dict[str, Dict[str, float]] = {}
+    for metric_name in metric_names:
+        values = [float(metrics[metric_name]) for metrics in split_summaries.values() if metric_name in metrics]
+        if not values:
+            continue
+        aggregate[metric_name] = {
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
+        }
+
+    return {
+        "mode": MODE_NAME,
+        "model_name": str(model_name),
+        "num_splits": len(split_summaries),
+        "splits": split_summaries,
+        "aggregate": aggregate,
     }
 
 
@@ -367,12 +402,22 @@ def evaluate(args: argparse.Namespace) -> None:
     print(json.dumps(metrics, indent=2), flush=True)
 
 
+def aggregate(args: argparse.Namespace) -> None:
+    out_dir = Path(args.out_dir)
+    summary = aggregate_split_summaries(out_dir, model_name=str(args.model))
+    out_path = out_dir / f"summary_rgb_{str(args.model).lower()}.json"
+    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(json.dumps({"summary_path": out_path.as_posix(), "num_splits": summary["num_splits"]}, indent=2), flush=True)
+
+
 def main() -> None:
     args = parse_args()
     if args.command == "train":
         train(args)
     elif args.command == "eval":
         evaluate(args)
+    elif args.command == "aggregate":
+        aggregate(args)
     else:
         raise ValueError(f"Unsupported command: {args.command}")
 

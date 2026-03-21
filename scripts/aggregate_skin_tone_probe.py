@@ -89,10 +89,44 @@ def darken_hex(hex_color: str, factor: float = 0.72) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def normalize_seed_name(seed_name: str) -> str:
+    raw = str(seed_name).replace("seed_", "", 1)
+    return raw.split("_", 1)[0]
+
+
 def load_rows(root: Path) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     if not root.exists():
         return rows
+
+    seen_keys = set()
+    top_level_summary_paths = sorted(root.glob("*/*/seed_*/summary_*.json"))
+    for summary_path in top_level_summary_paths:
+        modality = summary_path.parents[2].name
+        pair_tag = summary_path.parents[1].name
+        seed_name = summary_path.parents[0].name
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        raw_mode = str(summary.get("mode", ""))
+        normalized_mode = "rgb_model" if modality == "rgb" and raw_mode == "motion_only" else raw_mode
+        if normalized_mode != MODE_BY_MODALITY.get(modality):
+            continue
+        for eval_split, metrics in summary.get("splits", {}).items():
+            key = (modality, pair_tag, seed_name, str(eval_split), normalized_mode)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            row: Dict[str, object] = {
+                "modality": modality,
+                "pair_tag": pair_tag,
+                "seed": normalize_seed_name(seed_name),
+                "eval_split": str(eval_split),
+                "mode": normalized_mode,
+                "summary_file": str(summary_path),
+            }
+            for metric_name, value in dict(metrics).items():
+                row[f"{metric_name}_mean"] = float(value)
+                row[f"{metric_name}_std"] = 0.0
+            rows.append(row)
 
     summary_paths = sorted(root.glob("*/*/eval_*/summary_*.json"))
     summary_paths.extend(sorted(root.glob("*/*/seed_*/eval_*/summary_*.json")))
@@ -112,10 +146,14 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
         normalized_mode = "rgb_model" if modality == "rgb" and raw_mode == "motion_only" else raw_mode
         if normalized_mode != MODE_BY_MODALITY.get(modality):
             continue
+        key = (modality, pair_tag, seed_name, eval_split, normalized_mode)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         row: Dict[str, object] = {
             "modality": modality,
             "pair_tag": pair_tag,
-            "seed": seed_name.replace("seed_", ""),
+            "seed": normalize_seed_name(seed_name),
             "eval_split": eval_split,
             "mode": normalized_mode,
             "summary_file": str(summary_path),

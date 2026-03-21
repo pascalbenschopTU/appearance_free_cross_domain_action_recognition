@@ -13,12 +13,13 @@ VAL_IDS="${SKIN_TONE_VAL_IDS:-}"
 SAME_ID_EVAL_IDS="${SKIN_TONE_SAME_ID_EVAL_IDS:-0,1,2,3,7,8}"
 DISJOINT_EVAL_IDS="${SKIN_TONE_DISJOINT_EVAL_IDS:-4,5,6,9}"
 MODALITIES_RAW="${SKIN_TONE_MODALITIES:-motion,rgb}"
+HEAD_MODES_RAW="${SKIN_TONE_HEAD_MODES:-both}"
 ACTION_PAIRS_RAW="${SKIN_TONE_ACTION_PAIRS:-squat:tie,clap:celebrate,dribble:golf,lunge:cartwheel,yawn:fish}"
 ACTIONS_RAW="${SKIN_TONE_ACTIONS:-}"
 INCLUDE_REVERSED_PAIRS="${SKIN_TONE_INCLUDE_REVERSED_PAIRS:-0}"
 SEEDS_RAW="${SKIN_TONE_SEEDS:-0,1,2}"
 OUT_ROOT="${SKIN_TONE_OUT_ROOT:-out/skin_tone_probe_seeded_v4}"
-MOTION_PRETRAINED_CKPT="out/checkpoint_epoch_027_loss0.6155.pt"
+MOTION_PRETRAINED_CKPT="out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_033_loss3.5884.pt"
 RGB_PRETRAINED_CKPT="out/rgb_checkpoint_epoch_019_loss0.6533.pt"
 RGB_FRAMES="${SKIN_TONE_RGB_FRAMES:-64}"
 RGB_SAMPLING="${SKIN_TONE_RGB_SAMPLING:-uniform}"
@@ -42,6 +43,32 @@ RGB_K400_PRETRAINED="${SKIN_TONE_RGB_K400_PRETRAINED:-1}"
 latest_ckpt() {
   local ckpt_dir="$1/checkpoints"
   ls -t "$ckpt_dir"/checkpoint*.pt 2>/dev/null | head -n 1
+}
+
+rgb_k400_summary_path() {
+  local out_dir="$1"
+  local model_name
+  model_name="$(printf '%s' "$RGB_K400_MODEL" | tr '[:upper:]' '[:lower:]')"
+  printf '%s/summary_rgb_%s.json\n' "$out_dir" "$model_name"
+}
+
+run_already_done() {
+  local modality="$1"
+  local out_dir="$2"
+  case "$modality" in
+    motion)
+      [[ -f "$out_dir/summary_motion_only.json" ]]
+      ;;
+    rgb_k400)
+      [[ -f "$(rgb_k400_summary_path "$out_dir")" ]]
+      ;;
+    rgb)
+      compgen -G "$out_dir/summary_*.json" >/dev/null
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 build_action_pairs() {
@@ -81,6 +108,7 @@ build_action_pairs() {
 }
 
 IFS=',' read -r -a MODALITIES <<< "$MODALITIES_RAW"
+IFS=',' read -r -a HEAD_MODES <<< "$HEAD_MODES_RAW"
 IFS=',' read -r -a SEEDS <<< "$SEEDS_RAW"
 mapfile -t ACTION_PAIRS < <(build_action_pairs "$ACTION_PAIRS_RAW" "$ACTIONS_RAW" "$INCLUDE_REVERSED_PAIRS")
 
@@ -142,9 +170,70 @@ for modality in "${MODALITIES[@]}"; do
     )
 
     for seed in "${SEEDS[@]}"; do
-      out_dir="${OUT_ROOT}/${modality}/${pair_tag}/seed_${seed}"
+      if [[ "$modality" == "motion" ]]; then
+        for head_mode in "${HEAD_MODES[@]}"; do
+          [[ -z "$head_mode" ]] && continue
 
-      if [[ "$modality" == "rgb_k400" ]]; then
+          out_dir="${OUT_ROOT}/${modality}/${pair_tag}/seed_${seed}"
+          if [[ "$head_mode" != "legacy" ]]; then
+            out_dir="${out_dir}_${head_mode}"
+          fi
+          run_already_done "$modality" "$out_dir" && continue
+
+          FINETUNE_ARGS=(
+            --config configs/skin_tone_probe/finetune/common.toml
+            --train_modality "$modality"
+            --val_modality "$modality"
+            --manifest "${manifest_root}/train_in_domain.txt"
+            --class_id_to_label_csv "$label_csv"
+            --out_dir "$out_dir"
+            --seed "$seed"
+            --val_subset_seed "$seed"
+            --rgb_frames "$RGB_FRAMES"
+            --rgb_sampling "$RGB_SAMPLING"
+            --rgb_norm "$RGB_NORM"
+            --finetune_head_mode "$head_mode"
+          )
+
+          if [[ -n "$MOTION_PRETRAINED_CKPT" ]]; then
+            FINETUNE_ARGS+=(--pretrained_ckpt "$MOTION_PRETRAINED_CKPT")
+            selected_ckpt="$MOTION_PRETRAINED_CKPT"
+          else
+            echo "Motion modality requires a valid motion checkpoint in this script." >&2
+            exit 1
+          fi
+
+          echo
+          echo "=================================================================="
+          echo "Training ${pair_tag} | modality=${modality} | seed=${seed} | head_mode=${head_mode} | pretrained=${selected_ckpt}"
+          echo "=================================================================="
+          "$PYTHON_BIN" finetune.py "${FINETUNE_ARGS[@]}"
+
+          ckpt="$(latest_ckpt "$out_dir")"
+          if [[ -z "${ckpt:-}" ]]; then
+            echo "No checkpoint found in $out_dir/checkpoints" >&2
+            exit 1
+          fi
+
+          eval_manifests=()
+          for eval_name in "${EVAL_SPLITS[@]}"; do
+            eval_manifests+=("${manifest_root}/${eval_name}.txt")
+          done
+          "$PYTHON_BIN" eval.py \
+            --config configs/skin_tone_probe/eval/common.toml \
+            --input_modality "$modality" \
+            --summary_only \
+            --ckpt "$ckpt" \
+            --class_id_to_label_csv "$label_csv" \
+            --out_dir "$out_dir" \
+            --model_rgb_frames "$RGB_FRAMES" \
+            --model_rgb_sampling "$RGB_SAMPLING" \
+            --model_rgb_norm "$RGB_NORM" \
+            --manifests "${eval_manifests[@]}"
+        done
+      elif [[ "$modality" == "rgb_k400" ]]; then
+        out_dir="${OUT_ROOT}/${modality}/${pair_tag}/seed_${seed}"
+        run_already_done "$modality" "$out_dir" && continue
         echo
         echo "=================================================================="
         echo "Training ${pair_tag} | modality=${modality} | seed=${seed} | model=${RGB_K400_MODEL} | pretrained=1"
@@ -167,6 +256,8 @@ for modality in "${MODALITIES[@]}"; do
           --num_workers "$RGB_K400_NUM_WORKERS" \
           --device "$RGB_K400_DEVICE"
       else
+        out_dir="${OUT_ROOT}/${modality}/${pair_tag}/seed_${seed}"
+        run_already_done "$modality" "$out_dir" && continue
         FINETUNE_ARGS=(
           --config configs/skin_tone_probe/finetune/common.toml
           --train_modality "$modality"
@@ -181,23 +272,13 @@ for modality in "${MODALITIES[@]}"; do
           --rgb_norm "$RGB_NORM"
         )
 
-        if [[ "$modality" == "motion" ]]; then
-          if [[ -n "$MOTION_PRETRAINED_CKPT" ]]; then
-            FINETUNE_ARGS+=(--pretrained_ckpt "$MOTION_PRETRAINED_CKPT")
-            selected_ckpt="$MOTION_PRETRAINED_CKPT"
-          else
-            echo "Motion modality requires a valid motion checkpoint in this script." >&2
-            exit 1
-          fi
+        if [[ -n "$RGB_PRETRAINED_CKPT" ]]; then
+          FINETUNE_ARGS+=(--pretrained_ckpt "$RGB_PRETRAINED_CKPT")
+          selected_ckpt="$RGB_PRETRAINED_CKPT"
         else
-          if [[ -n "$RGB_PRETRAINED_CKPT" ]]; then
-            FINETUNE_ARGS+=(--pretrained_ckpt "$RGB_PRETRAINED_CKPT")
-            selected_ckpt="$RGB_PRETRAINED_CKPT"
-          else
-            echo "RGB modality requires an RGB-compatible checkpoint in this script." >&2
-            echo "The motion checkpoint is not compatible with RGB because its first conv expects 1 input channel." >&2
-            exit 1
-          fi
+          echo "RGB modality requires an RGB-compatible checkpoint in this script." >&2
+          echo "The motion checkpoint is not compatible with RGB because its first conv expects 1 input channel." >&2
+          exit 1
         fi
 
         echo
@@ -205,6 +286,10 @@ for modality in "${MODALITIES[@]}"; do
         echo "Training ${pair_tag} | modality=${modality} | seed=${seed} | pretrained=${selected_ckpt}"
         echo "=================================================================="
         "$PYTHON_BIN" finetune.py "${FINETUNE_ARGS[@]}"
+      fi
+
+      if [[ "$modality" == "motion" ]]; then
+        continue
       fi
 
       ckpt="$(latest_ckpt "$out_dir")"
@@ -219,6 +304,10 @@ for modality in "${MODALITIES[@]}"; do
           echo "Evaluating ${pair_tag} | modality=${modality} | seed=${seed} | split=${eval_name}"
           "$PYTHON_BIN" scripts/train_skin_tone_torchvision_rgb_probe.py             eval             --root_dir "$RGB_K400_ROOT_DIR"             --manifest "${manifest_root}/${eval_name}.txt"             --class_id_to_label_csv "$label_csv"             --ckpt "$ckpt"             --out_dir "$out_dir/${eval_name}"             --split_name "$eval_name"             --model "$RGB_K400_MODEL"             --rgb_frames "$RGB_K400_FRAMES"             --img_size "$RGB_K400_IMG_SIZE"             --rgb_sampling uniform             --batch_size "$RGB_K400_BATCH_SIZE"             --num_workers "$RGB_K400_NUM_WORKERS"             --device "$RGB_K400_DEVICE"             --seed "$seed"             --summary_only
         done
+        "$PYTHON_BIN" scripts/train_skin_tone_torchvision_rgb_probe.py \
+          aggregate \
+          --out_dir "$out_dir" \
+          --model "$RGB_K400_MODEL"
       else
         eval_manifests=()
         for eval_name in "${EVAL_SPLITS[@]}"; do

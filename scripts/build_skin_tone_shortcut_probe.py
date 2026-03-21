@@ -65,7 +65,7 @@ def collect_entries(
         action_dir = DATASET_ROOT / background / "__generated_synthetic_videos" / action
         for variant in variants:
             for base_id in base_ids:
-                path = action_dir / video_name(action, int(base_id), str(variant))
+                path = next((p for p in ((action_dir / video_name(action, int(base_id), str(variant))), (action_dir / video_name(action, int(base_id), str(variant))).with_suffix(".zst")) if p.exists()), action_dir / video_name(action, int(base_id), str(variant)))
                 if path.exists():
                     entries.append(
                         {

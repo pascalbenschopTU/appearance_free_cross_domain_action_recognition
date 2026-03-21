@@ -18,14 +18,16 @@ flow_backend = "farneback"
 motion_img_resize = 256
 motion_flow_resize = 128
 motion_resize_mode = "short_side"
-motion_eval_crop_mode = "center"
+motion_eval_crop_mode = "motion"
+motion_eval_num_views = 1
+roi_mode = "none"
 
 [text]
 text_bank_backend = "clip"
 class_text_json = ""
 use_heads = "fuse"
 head_weights = "1.0"
-no_rgb = false
+no_clip = true
 rgb_frames = 1
 rgb_sampling = "center"
 rgb_weight = 0.5

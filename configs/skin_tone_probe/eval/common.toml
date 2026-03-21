@@ -3,6 +3,7 @@
 [data]
 root_dir = "../../datasets/skin_tone_actions/camera_far"
 input_modality = "motion"
+motion_data_source = "video"
 
 [motion]
 img_size = 224
@@ -29,6 +30,6 @@ rgb_weight = 0.5
 
 [runtime]
 batch_size = 8
-num_workers = 4
+num_workers = 8
 device = "cuda"
 out_dir = "eval_out/skin_tone_probe"

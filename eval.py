@@ -491,6 +491,8 @@ def evaluate_one_split(
                         logits_by_head[head_name] = head_logits.view(b, num_views, -1).mean(dim=1)
                     if logits_cls_model is not None:
                         logits_cls_model = logits_cls_model.view(b, num_views, -1).mean(dim=1)
+                if logits_cls_model is not None and int(logits_cls_model.shape[-1]) != int(num_classes):
+                    logits_cls_model = None
                 if aggregation_indices is not None:
                     for head_name, head_logits in list(logits_by_head.items()):
                         logits_by_head[head_name] = aggregate_text_logits_to_classes(

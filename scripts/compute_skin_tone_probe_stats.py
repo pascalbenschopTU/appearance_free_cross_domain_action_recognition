@@ -114,6 +114,8 @@ def main() -> None:
     targets = [item.strip() for item in str(args.targets).split(",") if item.strip()]
 
     raw_rows = load_rows(args.root)
+    present_modalities = {str(row["modality"]) for row in raw_rows}
+    comparators = [item for item in comparators if item in present_modalities]
     per_seed_rows = build_per_seed_rows(raw_rows, args.metric)
     by_key = {
         (str(row["pair_tag"]), str(row["seed"]), str(row["modality"])): row
@@ -143,6 +145,9 @@ def main() -> None:
                 comp_values.append(comp_val)
                 units.append(f"{pair_tag}/seed_{seed}")
 
+            if not ref_values:
+                continue
+
             if target in HIGHER_IS_BETTER:
                 standardized_ref = list(ref_values)
                 standardized_comp = list(comp_values)
@@ -157,6 +162,7 @@ def main() -> None:
                 standardized_diffs = [r - c for r, c in zip(standardized_ref, standardized_comp)]
 
             t_stat, p_value, method = ttest_rel_with_fallback(standardized_ref, standardized_comp)
+            paired_diffs = [r - c for r, c in zip(ref_values, comp_values)]
             result = {
                 "reference": reference,
                 "comparator": comparator,
@@ -164,8 +170,11 @@ def main() -> None:
                 "metric": args.metric,
                 "n": len(ref_values),
                 "reference_mean": mean(ref_values),
+                "reference_std": sample_std(ref_values),
                 "comparator_mean": mean(comp_values),
-                "reference_minus_comparator_mean": mean([r - c for r, c in zip(ref_values, comp_values)]) if ref_values else float("nan"),
+                "comparator_std": sample_std(comp_values),
+                "reference_minus_comparator_mean": mean(paired_diffs) if ref_values else float("nan"),
+                "reference_minus_comparator_std": sample_std(paired_diffs) if ref_values else float("nan"),
                 "reference_better_mean": mean(standardized_diffs) if ref_values else float("nan"),
                 "t_stat": t_stat,
                 "p_value_two_sided": p_value,
@@ -185,8 +194,11 @@ def main() -> None:
         "metric",
         "n",
         "reference_mean",
+        "reference_std",
         "comparator_mean",
+        "comparator_std",
         "reference_minus_comparator_mean",
+        "reference_minus_comparator_std",
         "reference_better_mean",
         "t_stat",
         "p_value_two_sided",
@@ -210,13 +222,25 @@ def main() -> None:
         "",
         "Positive `reference_better_mean` means the reference modality performed better.",
         "For shifted scores, higher is better. For absolute drop scores, lower is better.",
+        "For `abs_drop_*`, smaller means the model changes less when skin colors are swapped.",
         "",
     ]
     for row in results:
+        if str(row["target"]).startswith("abs_drop_"):
+            effect_text = (
+                f"swap_effect: ref={row['reference_mean']:.4f}+-{row['reference_std']:.4f}, "
+                f"comp={row['comparator_mean']:.4f}+-{row['comparator_std']:.4f}, "
+                f"ref_changes_less_mean={row['reference_better_mean']:.4f}"
+            )
+        else:
+            effect_text = (
+                f"ref={row['reference_mean']:.4f}+-{row['reference_std']:.4f}, "
+                f"comp={row['comparator_mean']:.4f}+-{row['comparator_std']:.4f}, "
+                f"ref_better_mean={row['reference_better_mean']:.4f}"
+            )
         lines.append(
             f"- `{row['reference']}` vs `{row['comparator']}` on `{row['target']}`: "
-            f"n={row['n']}, ref={row['reference_mean']:.4f}, comp={row['comparator_mean']:.4f}, "
-            f"ref_better_mean={row['reference_better_mean']:.4f}, t={row['t_stat']:.4f}, p={row['p_value_two_sided']:.4g} ({row['test_method']})"
+            f"n={row['n']}, {effect_text}, t={row['t_stat']:.4f}, p={row['p_value_two_sided']:.4g} ({row['test_method']})"
         )
     out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
