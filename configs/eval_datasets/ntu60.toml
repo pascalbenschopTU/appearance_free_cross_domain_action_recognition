@@ -5,6 +5,3 @@ class_id_to_label_csv = "tc-clip/labels/custom/ntu60_labels.csv"
 
 [text]
 class_text_json = "tc-clip/labels/custom/ntu60_class_texts.json"
-
-[runtime]
-out_dir = "eval_out/ntu60_val"

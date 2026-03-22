@@ -1,0 +1,14 @@
+#@package _global_
+data:
+  train:
+    dataset_name: ntu60_k${shot}
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.few_shot_train}
+  val:
+    dataset_name: ntu60_val
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.val}

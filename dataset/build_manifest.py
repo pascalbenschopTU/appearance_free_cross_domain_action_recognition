@@ -2,8 +2,9 @@
 """
 Build a CI3D manifest with a fixed number of samples per class.
 
-Expected input layout example:
+Expected input layout examples:
   s04/videos/<camera_id>/<ClassName> <idx>.mp4
+  s03/videos/<ClassName>/<camera_id>_<ClassName>_<idx>.mp4
 
 Output manifest line format:
   <path> <class_id>
@@ -102,7 +103,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root_dir", required=True, help="Videos dir (flat or nested), e.g. datasets/NTU/nturgb+d_rgb")
     ap.add_argument("--out_manifest", required=True, help="Output manifest (.txt)")
-    ap.add_argument("--samples_per_class", type=int, required=True, help="Number of samples per class")
+    ap.add_argument(
+        "--samples_per_class",
+        type=int,
+        required=True,
+        help="Number of samples per class. <=0 keeps all samples.",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--exts", nargs="+", default=[".mp4", ".avi"], help="File extensions to include")
     ap.add_argument(
@@ -181,8 +187,8 @@ def main():
         n = len(vids)
         k = int(args.samples_per_class)
         if k <= 0:
-            raise SystemExit("--samples_per_class must be > 0")
-        if n < k:
+            picked = vids
+        elif n < k:
             if not args.allow_fewer:
                 raise SystemExit(
                     f"Class '{cls}' has only {n} samples (< {k}). Use --allow_fewer to continue."
@@ -228,8 +234,9 @@ def main():
     print(f"root_dir      : {root_dir}")
     print(f"manifest        : {out_manifest}")
     print(f"class_map       : {out_class_map}")
-    print(f"classes         : {len(class_keys)}")
-    print(f"total_selected  : {len(chosen)}")
+    print(f"samples_per_class: {args.samples_per_class} (<=0 means all)")
+    print(f"classes          : {len(class_keys)}")
+    print(f"total_selected   : {len(chosen)}")
     for i, cls in enumerate(class_keys):
         if args.class_mode == "ntu":
             cname = class_id_to_name.get(cls, str(cls))

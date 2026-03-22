@@ -1,0 +1,11 @@
+#@package _global_
+data:
+  test:
+    - name: ntu120_xsub_val
+      protocol: top1
+      dataset_list:
+      - dataset_name: ntu120_xsub_val
+        root: ${ntu120.root}
+        num_classes: ${ntu120.num_classes.default}
+        label_file: ${ntu120.label_files.default}
+        ann_file: ${ntu120.ann_files.val_xsub}

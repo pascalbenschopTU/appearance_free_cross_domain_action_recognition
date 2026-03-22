@@ -1,0 +1,72 @@
+{
+  "Abuse": [
+    "physical abuse or mistreatment of a person",
+    "an aggressive attack or rough handling of someone",
+    "violent abusive behavior directed at another person"
+  ],
+  "Arrest": [
+    "law enforcement restraining and detaining a person",
+    "an officer making an arrest",
+    "someone being taken into custody"
+  ],
+  "Arson": [
+    "deliberately setting property on fire",
+    "an intentional fire being started",
+    "someone causing a fire or burning incident"
+  ],
+  "Assault": [
+    "a person physically attacking another person",
+    "an assaultive attack with punches kicks or force",
+    "violent aggression directed at someone nearby"
+  ],
+  "Burglary": [
+    "breaking into a building to steal",
+    "unauthorized entry into a property for theft",
+    "a burglary or break-in taking place"
+  ],
+  "Explosion": [
+    "an explosion or blast event",
+    "a sudden detonation with fire and smoke",
+    "an explosive incident causing a violent burst"
+  ],
+  "Fighting": [
+    "two or more people fighting",
+    "a physical altercation between people",
+    "mutual violence with punches kicks or grappling"
+  ],
+  "Normal": [
+    "ordinary everyday activity with no crime or anomaly",
+    "a normal scene without violence theft or danger",
+    "people moving or standing in a routine non-criminal situation"
+  ],
+  "RoadAccidents": [
+    "a road accident involving vehicles",
+    "a traffic collision or crash on the street",
+    "vehicles crashing or colliding in traffic"
+  ],
+  "Robbery": [
+    "stealing from a person through force or threat",
+    "a robbery in progress",
+    "taking valuables directly from someone during a crime"
+  ],
+  "Shooting": [
+    "a person firing a gun",
+    "gunfire or a shooting incident",
+    "someone using a firearm against others"
+  ],
+  "Shoplifting": [
+    "stealing goods from a store",
+    "concealing or taking merchandise without paying",
+    "a shoplifting incident inside a retail setting"
+  ],
+  "Stealing": [
+    "taking property that does not belong to the person",
+    "a theft or stealing incident",
+    "someone removing valuables without permission"
+  ],
+  "Vandalism": [
+    "damaging or defacing property on purpose",
+    "an act of vandalism against objects or buildings",
+    "intentional destruction or damage of public or private property"
+  ]
+}

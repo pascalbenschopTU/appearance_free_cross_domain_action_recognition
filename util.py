@@ -5,13 +5,14 @@ import glob
 import json
 import math
 import os
+import unicodedata
 from pathlib import Path
 import random
 import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union, cast
 
 import numpy as np
 import torch
@@ -53,6 +54,12 @@ HASHED_VIDEO_SUFFIX_RE = re.compile(r"^(?P<base>.+)_[0-9a-f]{8,}$", re.IGNORECAS
 def _strip_hashed_video_suffix(stem: str) -> str:
     match = HASHED_VIDEO_SUFFIX_RE.match(stem)
     return match.group("base") if match else stem
+
+
+def _normalize_manifest_lookup_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value))
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    return "".join(ch for ch in ascii_only.lower() if ch.isalnum())
 
 # ----------------------------
 # Checkpoint loading
@@ -456,7 +463,8 @@ def count_matching_class_texts(
     loaded = load_class_texts(class_texts)
     if loaded is None:
         return 0
-    return len(adapt_class_texts(loaded, list(classnames)))
+    adapted = adapt_class_texts(loaded, list(classnames))
+    return sum(1 for raw in classnames if raw in adapted)
 
 
 def _adapted_class_text_entries(
@@ -594,18 +602,28 @@ def build_text_bank(
     apply_templates_to_class_texts: bool = True,
     class_text_label_weight: float = 0.5,
     apply_templates_to_class_descriptions: bool = False,
-) -> torch.Tensor:
+    output_mode: str = "class_proto",
+) -> Union[torch.Tensor, "ClassMultiPositiveTextBank"]:
     """
-    Builds (num_classes, 512) text bank.
+    Builds either:
+      - class_proto: (num_classes, 512) text bank
+      - class_multi_positive: label + descriptions bank with class-to-text indices
+
     class_texts can be raw JSON-style values or already adapted output.
     When descriptions are available, class embedding is:
       alpha * t_label + (1 - alpha) * t_desc
     where alpha=class_text_label_weight.
     """
+    if output_mode not in {"class_proto", "class_multi_positive"}:
+        raise ValueError(f"Unsupported build_text_bank output_mode: {output_mode!r}")
+
     alpha = float(max(0.0, min(1.0, class_text_label_weight)))
     class_text_entries = _adapted_class_text_entries(classnames, class_texts)
 
     all_class_embs: List[torch.Tensor] = []
+    all_text_embs: List[torch.Tensor] = []
+    class_to_text: List[List[int]] = []
+    descs_per_class: Optional[int] = None
     for raw in classnames:
         label_texts, description_texts = _collect_class_text_lists(raw, class_text_entries)
 
@@ -631,6 +649,37 @@ def build_text_bank(
         if label_emb is None:
             raise RuntimeError(f"Could not build label embedding for class: {raw}")
 
+        if output_mode == "class_multi_positive":
+            if not description_texts:
+                raise ValueError(f"Class '{raw}' does not contain any descriptions for class_multi_positive supervision.")
+
+            if descs_per_class is None:
+                descs_per_class = len(description_texts)
+            elif len(description_texts) != descs_per_class:
+                raise ValueError(
+                    f"class_multi_positive supervision requires a fixed descriptions-per-class count. "
+                    f"Expected {descs_per_class} for '{raw}', got {len(description_texts)}."
+                )
+
+            class_indices: List[int] = [len(all_text_embs)]
+            all_text_embs.append(label_emb)
+            for description_text in description_texts:
+                description_emb = _encode_texts(
+                    clip_model,
+                    tokenize_fn,
+                    [description_text],
+                    device,
+                    templates,
+                    apply_templates=apply_templates_to_class_descriptions,
+                    l2_normalize=l2_normalize,
+                )
+                if description_emb is None:
+                    raise RuntimeError(f"Could not build description embedding for class '{raw}': {description_text!r}")
+                class_indices.append(len(all_text_embs))
+                all_text_embs.append(description_emb)
+            class_to_text.append(class_indices)
+            continue
+
         class_embedding = label_emb
         if description_texts:
             description_emb = _encode_texts(
@@ -647,6 +696,15 @@ def build_text_bank(
                 if l2_normalize:
                     class_embedding = F.normalize(class_embedding, dim=-1)
         all_class_embs.append(class_embedding)
+
+    if output_mode == "class_multi_positive":
+        if not all_text_embs:
+            raise ValueError("No text embeddings were created for class_multi_positive supervision.")
+        return ClassMultiPositiveTextBank(
+            text_bank=torch.stack(all_text_embs, dim=0),
+            class_to_text_indices=torch.tensor(class_to_text, dtype=torch.long),
+            text_entries_per_class=int((descs_per_class or 0) + 1),
+        )
 
     return torch.stack(all_class_embs, dim=0)  # (C,512)
 
@@ -903,63 +961,20 @@ def build_class_multi_positive_text_bank(
     apply_templates_to_class_texts: bool = True,
     apply_templates_to_class_descriptions: bool = False,
 ) -> ClassMultiPositiveTextBank:
-    class_text_entries = _adapted_class_text_entries(classnames, class_texts)
-
-    all_text_embs: List[torch.Tensor] = []
-    class_to_text: List[List[int]] = []
-    descs_per_class: Optional[int] = None
-
-    for raw in classnames:
-        label_texts, description_texts_for_class = _collect_class_text_lists(raw, class_text_entries)
-        if not description_texts_for_class:
-            raise ValueError(f"Class '{raw}' does not contain any descriptions for class_multi_positive supervision.")
-
-        if descs_per_class is None:
-            descs_per_class = len(description_texts_for_class)
-        elif len(description_texts_for_class) != descs_per_class:
-            raise ValueError(
-                f"class_multi_positive supervision requires a fixed descriptions-per-class count. "
-                f"Expected {descs_per_class} for '{raw}', got {len(description_texts_for_class)}."
-            )
-
-        class_indices: List[int] = []
-        label_emb = _encode_texts(
+    return cast(
+        ClassMultiPositiveTextBank,
+        build_text_bank(
             clip_model,
             tokenize_fn,
-            label_texts,
+            classnames,
             device,
             templates,
-            apply_templates=apply_templates_to_class_texts,
+            class_texts=class_texts,
             l2_normalize=l2_normalize,
-        )
-        if label_emb is None:
-            raise RuntimeError(f"Could not build label embedding for class: {raw}")
-        class_indices.append(len(all_text_embs))
-        all_text_embs.append(label_emb)
-
-        for description_text in description_texts_for_class:
-            description_emb = _encode_texts(
-                clip_model,
-                tokenize_fn,
-                [description_text],
-                device,
-                templates,
-                apply_templates=apply_templates_to_class_descriptions,
-                l2_normalize=l2_normalize,
-            )
-            if description_emb is None:
-                raise RuntimeError(f"Could not build description embedding for class '{raw}': {description_text!r}")
-            class_indices.append(len(all_text_embs))
-            all_text_embs.append(description_emb)
-        class_to_text.append(class_indices)
-
-    if not all_text_embs:
-        raise ValueError("No text embeddings were created for class_multi_positive supervision.")
-
-    return ClassMultiPositiveTextBank(
-        text_bank=torch.stack(all_text_embs, dim=0),
-        class_to_text_indices=torch.tensor(class_to_text, dtype=torch.long),
-        text_entries_per_class=int((descs_per_class or 0) + 1),
+            apply_templates_to_class_texts=apply_templates_to_class_texts,
+            apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+            output_mode="class_multi_positive",
+        ),
     )
 
 
@@ -1411,6 +1426,8 @@ def _build_video_lookup_tables(root: Path) -> Dict[str, Dict[Any, Any]]:
     dir_stem_map: Dict[Tuple[str, str], List[str]] = defaultdict(list)
     stripped_stem_map: Dict[str, List[str]] = defaultdict(list)
     dir_stripped_stem_map: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    normalized_stem_map: Dict[str, List[str]] = defaultdict(list)
+    dir_normalized_stem_map: Dict[Tuple[str, str], List[str]] = defaultdict(list)
 
     for video_path in _scan_videos_under_root(root):
         absolute_path = str(video_path)
@@ -1428,12 +1445,19 @@ def _build_video_lookup_tables(root: Path) -> Dict[str, Dict[Any, Any]]:
             stripped_stem_map[stripped_stem].append(absolute_path)
             dir_stripped_stem_map[(parent, stripped_stem)].append(absolute_path)
 
+        normalized_stem = _normalize_manifest_lookup_text(stripped_stem)
+        if normalized_stem:
+            normalized_stem_map[normalized_stem].append(absolute_path)
+            dir_normalized_stem_map[(parent, normalized_stem)].append(absolute_path)
+
     return {
         "relative_path": relative_path_map,
         "stem": stem_map,
         "dir_stem": dir_stem_map,
         "stripped_stem": stripped_stem_map,
         "dir_stripped_stem": dir_stripped_stem_map,
+        "normalized_stem": normalized_stem_map,
+        "dir_normalized_stem": dir_normalized_stem_map,
     }
 
 
@@ -1489,6 +1513,7 @@ def _resolve_manifest_video_path(
         parent = ""
     stem = normalized_path.stem.lower()
     stripped_stem = _strip_hashed_video_suffix(stem)
+    normalized_stem = _normalize_manifest_lookup_text(stripped_stem)
     candidate_specs: List[Tuple[str, Any, Dict[Any, List[str]]]] = [
         ("dir+stem", (parent, stem), video_lookup["dir_stem"]),
         ("stem", stem, video_lookup["stem"]),
@@ -1496,6 +1521,11 @@ def _resolve_manifest_video_path(
     if stripped_stem != stem:
         candidate_specs.insert(1, ("dir+stem-without-hash", (parent, stripped_stem), video_lookup["dir_stripped_stem"]))
         candidate_specs.append(("stem-without-hash", stripped_stem, video_lookup["stripped_stem"]))
+    if normalized_stem and normalized_stem not in {stem, stripped_stem}:
+        candidate_specs.append(
+            ("dir+normalized-stem", (parent, normalized_stem), video_lookup["dir_normalized_stem"])
+        )
+        candidate_specs.append(("normalized-stem", normalized_stem, video_lookup["normalized_stem"]))
 
     for match_type, lookup_key, lookup_table in candidate_specs:
         match = _pick_unique_video_match(

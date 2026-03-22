@@ -1,0 +1,23 @@
+#@package _global_
+data:
+  train:
+    dataset_name: ntu60_all
+    root: ${ntu60.root}
+    num_classes: ${ntu60.num_classes.default}
+    label_file: ${ntu60.label_files.default}
+    ann_file: ${ntu60.ann_files.all}
+  val:
+    dataset_name: ci3d_s03_all
+    root: ${ci3d_s03.root}
+    num_classes: ${ci3d_s03.num_classes.default}
+    label_file: ${ci3d_s03.label_files.default}
+    ann_file: ${ci3d_s03.ann_files.all}
+  test:
+    - name: ci3d_s03_all
+      protocol: top1
+      dataset_list:
+      - dataset_name: ci3d_s03_all
+        root: ${ci3d_s03.root}
+        num_classes: ${ci3d_s03.num_classes.default}
+        label_file: ${ci3d_s03.label_files.default}
+        ann_file: ${ci3d_s03.ann_files.all}

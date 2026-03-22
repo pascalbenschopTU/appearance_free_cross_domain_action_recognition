@@ -33,6 +33,6 @@ rgb_sampling = "center"
 rgb_weight = 0.5
 
 [runtime]
-batch_size = 8
+batch_size = 16
 num_workers = 16
 device = "cuda"

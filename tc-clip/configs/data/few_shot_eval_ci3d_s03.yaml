@@ -1,0 +1,13 @@
+#@package _global_
+data:
+  test:
+    - name: ci3d_s03_val
+      protocol: top1
+      dataset_list:
+      - dataset_name: ci3d_s03_val
+        root: ${ci3d_s03.root}
+        num_classes: ${ci3d_s03.num_classes.default}
+        label_file: ${ci3d_s03.label_files.default}
+        ann_file: ${ci3d_s03.ann_files.val}
+        grouped_text_file: ${ci3d_s03.label_files.grouped_text}
+        eval_group_reduce: max

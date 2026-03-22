@@ -1,4 +1,8 @@
+# Legacy alias kept for backwards compatibility. Prefer ci3d_s03.toml.
 [data]
-root_dir = "../../datasets/CI3D/s02/videos"
-manifests = ["tc-clip/datasets_splits/custom/ci3d_s02_val.txt"]
-class_id_to_label_csv = "tc-clip/labels/custom/ci3d_s02_labels.csv"
+root_dir = "../../datasets/CI3D/s03/videos"
+manifests = ["tc-clip/datasets_splits/custom/ci3d_s03_val.txt"]
+class_id_to_label_csv = "tc-clip/labels/custom/ci3d_s03_labels.csv"
+
+[text]
+text_supervision_mode = "class_proto"

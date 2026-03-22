@@ -1,0 +1,16 @@
+#@package _global_
+data:
+  train:
+    dataset_name: ci3d_s02_k${shot}
+    root: ${ci3d_s02.root}
+    num_classes: ${ci3d_s02.num_classes.default}
+    label_file: ${ci3d_s02.label_files.default}
+    ann_file: ${ci3d_s02.ann_files.few_shot_train}
+  val:
+    dataset_name: ci3d_s02_val
+    root: ${ci3d_s02.root}
+    num_classes: ${ci3d_s02.num_classes.default}
+    label_file: ${ci3d_s02.label_files.default}
+    ann_file: ${ci3d_s02.ann_files.val}
+    grouped_text_file: ${ci3d_s02.label_files.grouped_text}
+    eval_group_reduce: max

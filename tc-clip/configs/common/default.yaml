@@ -143,12 +143,11 @@ ntu60:
     default: 60
   label_files:
     default: labels/custom/ntu60_labels.csv
+    grouped_text: labels/custom/ntu60_class_texts.json
   ann_files:
-    train_xsub: datasets_splits/custom/ntu60_xsub_train.txt
-    few_shot_train_xsub: datasets_splits/custom/ntu60_xsub_k${shot}_train.txt
-    val_xsub: datasets_splits/custom/ntu60_xsub_val.txt
-    train_xview: datasets_splits/custom/ntu60_xview_train.txt
-    val_xview: datasets_splits/custom/ntu60_xview_val.txt
+    train: datasets_splits/custom/ntu60_train.txt
+    few_shot_train: datasets_splits/custom/ntu60_k${shot}_train.txt
+    val: datasets_splits/custom/ntu60_val.txt
     all: datasets_splits/custom/ntu60_all_all.txt
 
 ntu120:
@@ -182,7 +181,8 @@ rwf2000:
   label_files:
     default: labels/custom/rwf2000_labels.csv
     ntu_text: labels/custom/rwf2000_ntu_texts.json
-    ntu_grouped_text: labels/custom/rwf2000_ntu_grouped_texts.json
+    ntu_class_text: labels/custom/rwf2000_ntu_class_texts.json
+    ntu_grouped_text: labels/custom/rwf2000_ntu_weak_sets.json
   ann_files:
     train: datasets_splits/custom/rwf2000_train.txt
     val: datasets_splits/custom/rwf2000_val.txt
@@ -195,10 +195,38 @@ ci3d_s02:
     default: 8
   label_files:
     default: labels/custom/ci3d_s02_labels.csv
+    grouped_text: labels/custom/ci3d_class_texts.json
   ann_files:
+    few_shot_train: datasets_splits/custom/ci3d_s02_k${shot}_train.txt
     train: datasets_splits/custom/ci3d_s02_train.txt
     val: datasets_splits/custom/ci3d_s02_val.txt
     all: datasets_splits/custom/ci3d_s02_all.txt
+
+ci3d_s03:
+  dataset_name: ci3d_s03
+  root: /YOUR/PATH/TO/DATASET/CI3D/s03/videos
+  num_classes:
+    default: 8
+  label_files:
+    default: labels/custom/ci3d_s03_labels.csv
+    grouped_text: labels/custom/ci3d_class_texts.json
+  ann_files:
+    train: datasets_splits/custom/ci3d_s03_train.txt
+    val: datasets_splits/custom/ci3d_s03_val.txt
+    all: datasets_splits/custom/ci3d_s03_all.txt
+
+ucf_crime:
+  dataset_name: ucf_crime
+  root: /YOUR/PATH/TO/DATASET/UCF_Crime/videos
+  num_classes:
+    default: 14
+  label_files:
+    default: labels/custom/ucf_crime_labels.csv
+    grouped_text: labels/custom/ucf_crime_grouped_texts.json
+  ann_files:
+    train: datasets_splits/custom/ucf_crime_train.txt
+    val: datasets_splits/custom/ucf_crime_val.txt
+    all: datasets_splits/custom/ucf_crime_all.txt
 
 custom:
   root: /YOUR/PATH/TO/DATASET
