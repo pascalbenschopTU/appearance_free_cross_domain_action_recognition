@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--metric", type=str, default="f1_macro")
     parser.add_argument("--reference", type=str, default="motion")
-    parser.add_argument("--comparators", type=str, default="rgb,rgb_k400,flow_i3d_external")
+    parser.add_argument("--comparators", type=str, default="rgb,rgb_r2plus1d,flow_i3d_external,tc_clip")
     parser.add_argument("--targets", type=str, default=",".join(DEFAULT_TARGETS))
     return parser.parse_args()
 
@@ -42,11 +42,13 @@ def parse_args() -> argparse.Namespace:
 def build_per_seed_rows(rows: List[Dict[str, object]], metric_name: str) -> List[Dict[str, object]]:
     by_seed_key: Dict[Tuple[str, str, str], Dict[str, object]] = {}
     for row in rows:
-        key = (str(row["pair_tag"]), str(row["modality"]), str(row["seed"]))
+        experiment_tag = str(row.get("experiment_tag", row["pair_tag"]))
+        key = (experiment_tag, str(row["modality"]), str(row["seed"]))
         item = by_seed_key.setdefault(
             key,
             {
                 "pair_tag": key[0],
+                "experiment_tag": key[0],
                 "modality": key[1],
                 "seed": key[2],
                 "mode": row["mode"],
@@ -118,7 +120,7 @@ def main() -> None:
     comparators = [item for item in comparators if item in present_modalities]
     per_seed_rows = build_per_seed_rows(raw_rows, args.metric)
     by_key = {
-        (str(row["pair_tag"]), str(row["seed"]), str(row["modality"])): row
+        (str(row.get("experiment_tag", row["pair_tag"])), str(row["seed"]), str(row["modality"])): row
         for row in per_seed_rows
     }
 
@@ -130,11 +132,11 @@ def main() -> None:
             ref_values: List[float] = []
             comp_values: List[float] = []
             units: List[str] = []
-            for pair_tag, seed, modality in sorted(by_key.keys()):
+            for experiment_tag, seed, modality in sorted(by_key.keys()):
                 if modality != reference:
                     continue
-                ref_row = by_key.get((pair_tag, seed, reference))
-                comp_row = by_key.get((pair_tag, seed, comparator))
+                ref_row = by_key.get((experiment_tag, seed, reference))
+                comp_row = by_key.get((experiment_tag, seed, comparator))
                 if ref_row is None or comp_row is None:
                     continue
                 ref_val = float(ref_row.get(metric_key, float("nan")))
@@ -143,7 +145,7 @@ def main() -> None:
                     continue
                 ref_values.append(ref_val)
                 comp_values.append(comp_val)
-                units.append(f"{pair_tag}/seed_{seed}")
+                units.append(f"{experiment_tag}/seed_{seed}")
 
             if not ref_values:
                 continue

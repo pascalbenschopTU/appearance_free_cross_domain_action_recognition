@@ -15,7 +15,6 @@ PrivacyAttributes/
 privacy/_stprivacy_src/
 privacy/_downloads/
 kinetics400_train_description_matches_clip.csv
-tc-clip/datasets_splits/custom/skin_tone_camera_far/
-tc-clip/datasets_splits/custom/skin_tone_camera_far_binary/
-tc-clip/labels/custom/skin_tone_camera_far_binary/
+tc-clip/datasets_splits/custom/skin_tone_camera_far*/
+tc-clip/labels/custom/skin_tone_camera_far_binary*/
 tc-clip/labels/custom/skin_tone_camera_far_labels.csv

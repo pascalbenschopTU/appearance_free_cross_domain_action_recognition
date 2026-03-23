@@ -487,7 +487,7 @@ def main():
         f"mhi_windows={mhi_windows_str} embed_dim={embed_dim} fuse={fuse} dropout={dropout} "
         f"active_branch={active_branch} train_modality={train_modality} val_modality={val_modality} "
         f"rgb_frames={args.rgb_frames} rgb_sampling={args.rgb_sampling} rgb_norm={args.rgb_norm} "
-        f"motion_data_source={args.motion_data_source} p_affine={args.p_affine} "
+        f"motion_data_source={args.motion_data_source} p_hflip={args.p_hflip} p_affine={args.p_affine} "
         f"diff_threshold={diff_threshold} flow_max_disp={flow_max_disp} fb_params={fb_params} "
         f"motion_img_resize={args.motion_img_resize} motion_flow_resize={args.motion_flow_resize} "
         f"motion_resize_mode={args.motion_resize_mode} "
@@ -498,8 +498,8 @@ def main():
     )
     # Dataset (uses dataset_split_txt directly)
     if train_modality == "rgb":
-        if args.p_affine > 0:
-            print("[WARN] --p_affine is motion-only; ignored for --train_modality rgb.", flush=True)
+        if args.p_hflip > 0 or args.p_affine > 0:
+            print("[WARN] --p_hflip/--p_affine are motion-only; ignored for --train_modality rgb.", flush=True)
         dataset = RGBVideoClipDataset(
             root_dir=args.root_dir,
             rgb_frames=args.rgb_frames,
@@ -510,15 +510,11 @@ def main():
             rgb_norm=args.rgb_norm,
             out_dtype=data_dtype,
             seed=args.seed,
+            color_jitter_prob=getattr(args, "color_jitter", 0.0),
         )
         train_collate_fn = collate_rgb_clip
     else:
         if args.motion_data_source == "video":
-            if args.p_affine > 0:
-                print(
-                    "[WARN] --p_affine is only applied in zstd dataset mode; ignored for --motion_data_source video.",
-                    flush=True,
-                )
             dataset = VideoMotionDataset(
                 args.root_dir,
                 img_size=img_size,
@@ -545,6 +541,10 @@ def main():
                 out_dtype=data_dtype,
                 dataset_split_txt=manifest_path,
                 class_id_to_label_csv=args.class_id_to_label_csv,
+                p_hflip=args.p_hflip,
+                p_affine=args.p_affine,
+                seed=args.seed,
+                motion_noise_std=getattr(args, "motion_noise_std", 0.0),
             )
             train_collate_fn = collate_video_motion
         else:
@@ -556,12 +556,13 @@ def main():
                 flow_frames=flow_frames,
                 mhi_windows=mhi_windows,
                 out_dtype=data_dtype,
-                p_hflip=0.5,
+                p_hflip=args.p_hflip,
                 p_affine=args.p_affine,
                 spatial_crop_mode=args.motion_spatial_crop,
                 seed=args.seed,
                 dataset_split_txt=manifest_path,
                 class_id_to_label_csv=args.class_id_to_label_csv,
+                motion_noise_std=getattr(args, "motion_noise_std", 0.0),
             )
             train_collate_fn = collate_motion
 
@@ -1152,6 +1153,7 @@ def main():
             and (epochs_completed - args.val_skip_epochs) % args.val_every == 0
         )
         checkpoint_mode = str(getattr(args, "checkpoint_mode", "best")).lower()
+        is_final_epoch = epochs_completed >= int(args.epochs)
         if do_val:
             val_metrics = eval_on_validation_split(
                 args=args,
@@ -1185,10 +1187,16 @@ def main():
                 f"[VAL] top1={top_1_acc:.6f} best={best_top1_acc if best_top1_acc > -1e8 else float('nan'):.6f} improved={improved}",
                 flush=True,
             )
-            should_save = checkpoint_mode == "latest" or improved
+            should_save = (
+                checkpoint_mode == "latest"
+                or (checkpoint_mode == "final" and is_final_epoch)
+                or (checkpoint_mode == "best" and improved)
+            )
             if should_save:
                 if checkpoint_mode == "latest":
                     save_path = os.path.join(args.ckpt_dir, "checkpoint_latest.pt")
+                elif checkpoint_mode == "final":
+                    save_path = os.path.join(args.ckpt_dir, "checkpoint_final.pt")
                 else:
                     save_path = os.path.join(
                         args.ckpt_dir,
@@ -1213,10 +1221,16 @@ def main():
             if val_dataloader is not None:
                 print(f"[EPOCH {epoch:03d}] validation skipped (schedule)", flush=True)
             else:
-                should_save = checkpoint_mode == "latest" or current < best_loss
+                should_save = (
+                    checkpoint_mode == "latest"
+                    or (checkpoint_mode == "final" and is_final_epoch)
+                    or (checkpoint_mode == "best" and current < best_loss)
+                )
                 if should_save:
                     if checkpoint_mode == "latest":
                         save_path = os.path.join(args.ckpt_dir, "checkpoint_latest.pt")
+                    elif checkpoint_mode == "final":
+                        save_path = os.path.join(args.ckpt_dir, "checkpoint_final.pt")
                     else:
                         save_path = os.path.join(
                             args.ckpt_dir,

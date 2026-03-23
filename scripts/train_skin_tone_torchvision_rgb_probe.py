@@ -26,7 +26,7 @@ from dataset import RGBVideoClipDataset, collate_rgb_clip
 
 K400_RGB_MEAN = torch.tensor([0.43216, 0.394666, 0.37645], dtype=torch.float32).view(1, 3, 1, 1, 1)
 K400_RGB_STD = torch.tensor([0.22803, 0.22145, 0.216989], dtype=torch.float32).view(1, 3, 1, 1, 1)
-MODE_NAME = "rgb_k400_model"
+MODE_NAME = "rgb_r2plus1d_model"
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--checkpoint_name", type=str, default="checkpoint_latest.pt")
     train.add_argument("--amp", action="store_true", default=True)
     train.add_argument("--no_amp", dest="amp", action="store_false")
+    train.add_argument("--color_jitter", type=float, default=0.0,
+                        help="Probability of applying ColorJitter to RGB frames during training.")
 
     ev = subparsers.add_parser("eval")
     add_common_dataset_args(ev)
@@ -141,6 +143,7 @@ def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDatas
         class_id_to_label_csv=args.class_id_to_label_csv,
         rgb_norm="none",
         seed=args.seed,
+        color_jitter_prob=getattr(args, "color_jitter", 0.0) if training else 0.0,
     )
 
 
@@ -405,7 +408,7 @@ def evaluate(args: argparse.Namespace) -> None:
 def aggregate(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir)
     summary = aggregate_split_summaries(out_dir, model_name=str(args.model))
-    out_path = out_dir / f"summary_rgb_{str(args.model).lower()}.json"
+    out_path = out_dir / f"summary_{MODE_NAME}.json"
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps({"summary_path": out_path.as_posix(), "num_splits": summary["num_splits"]}, indent=2), flush=True)
 

@@ -180,7 +180,10 @@ def wise_state_dict(logger, ori_model, loaded_state_dict, weight_for_ft=None, ke
 def load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_only=False):
     if os.path.isfile(config.resume):
         logger.info(f"==============> Resuming from {config.resume}....................")
-        checkpoint = torch.load(config.resume, map_location='cpu')
+        # PyTorch 2.6 changed torch.load default weights_only=False -> True.
+        # TC-CLIP checkpoints store full training state including OmegaConf config objects,
+        # so we need the old full-object loading behavior for trusted local checkpoints.
+        checkpoint = torch.load(config.resume, map_location='cpu', weights_only=False)
         load_state_dict = checkpoint['model']
 
         # now remove the unwanted keys:

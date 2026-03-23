@@ -18,22 +18,25 @@ SPLIT_ORDER = [
 MODE_BY_MODALITY = {
     "motion": "motion_only",
     "rgb": "rgb_model",
-    "rgb_k400": "rgb_k400_model",
+    "rgb_r2plus1d": "rgb_r2plus1d_model",
     "flow_i3d_external": "flow_i3d_external_model",
+    "tc_clip": "tc_clip_model",
 }
 COLOR_BY_MODALITY = {
     "motion": "#1f77b4",
     "rgb": "#ff7f0e",
-    "rgb_k400": "#2ca02c",
+    "rgb_r2plus1d": "#2ca02c",
     "flow_i3d_external": "#d62728",
+    "tc_clip": "#9467bd",
 }
 DISPLAY_NAME_BY_MODALITY = {
     "motion": "motion",
     "rgb": "rgb",
-    "rgb_k400": "rgb_k400",
+    "rgb_r2plus1d": "rgb_r2plus1d",
     "flow_i3d_external": "flow_i3d_external",
+    "tc_clip": "tc_clip",
 }
-MODALITY_ORDER = ["motion", "rgb", "rgb_k400", "flow_i3d_external"]
+MODALITY_ORDER = ["motion", "rgb", "rgb_r2plus1d", "flow_i3d_external", "tc_clip"]
 GOOD_COLOR = (46, 125, 50)
 BAD_COLOR = (198, 40, 40)
 
@@ -97,6 +100,10 @@ def normalize_seed_name(seed_name: str) -> str:
     return raw.split("_", 1)[0]
 
 
+def normalize_experiment_tag(raw_tag: str) -> str:
+    return str(raw_tag)
+
+
 def load_rows(root: Path) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     if not root.exists():
@@ -106,7 +113,7 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
     top_level_summary_paths = sorted(root.glob("*/*/seed_*/summary_*.json"))
     for summary_path in top_level_summary_paths:
         modality = summary_path.parents[2].name
-        pair_tag = summary_path.parents[1].name
+        experiment_tag = normalize_experiment_tag(summary_path.parents[1].name)
         seed_name = summary_path.parents[0].name
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         raw_mode = str(summary.get("mode", ""))
@@ -114,13 +121,14 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
         if normalized_mode != MODE_BY_MODALITY.get(modality):
             continue
         for eval_split, metrics in summary.get("splits", {}).items():
-            key = (modality, pair_tag, seed_name, str(eval_split), normalized_mode)
+            key = (modality, experiment_tag, seed_name, str(eval_split), normalized_mode)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
             row: Dict[str, object] = {
                 "modality": modality,
-                "pair_tag": pair_tag,
+                "pair_tag": experiment_tag,
+                "experiment_tag": experiment_tag,
                 "seed": normalize_seed_name(seed_name),
                 "eval_split": str(eval_split),
                 "mode": normalized_mode,
@@ -136,12 +144,12 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
     for summary_path in summary_paths:
         if summary_path.parents[1].name.startswith("seed_"):
             modality = summary_path.parents[3].name
-            pair_tag = summary_path.parents[2].name
+            experiment_tag = normalize_experiment_tag(summary_path.parents[2].name)
             seed_name = summary_path.parents[1].name
             eval_split = summary_path.parents[0].name
         else:
             modality = summary_path.parents[2].name
-            pair_tag = summary_path.parents[1].name
+            experiment_tag = normalize_experiment_tag(summary_path.parents[1].name)
             seed_name = "seed_0"
             eval_split = summary_path.parents[0].name
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -149,13 +157,14 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
         normalized_mode = "rgb_model" if modality == "rgb" and raw_mode == "motion_only" else raw_mode
         if normalized_mode != MODE_BY_MODALITY.get(modality):
             continue
-        key = (modality, pair_tag, seed_name, eval_split, normalized_mode)
+        key = (modality, experiment_tag, seed_name, eval_split, normalized_mode)
         if key in seen_keys:
             continue
         seen_keys.add(key)
         row: Dict[str, object] = {
             "modality": modality,
-            "pair_tag": pair_tag,
+            "pair_tag": experiment_tag,
+            "experiment_tag": experiment_tag,
             "seed": normalize_seed_name(seed_name),
             "eval_split": eval_split,
             "mode": normalized_mode,
@@ -171,11 +180,13 @@ def load_rows(root: Path) -> List[Dict[str, object]]:
 def build_compact_rows(rows: List[Dict[str, object]], metric_name: str) -> List[Dict[str, object]]:
     by_seed_key: Dict[tuple[str, str, str], Dict[str, object]] = {}
     for row in rows:
-        key = (str(row["pair_tag"]), str(row["modality"]), str(row["seed"]))
+        experiment_tag = str(row.get("experiment_tag", row["pair_tag"]))
+        key = (experiment_tag, str(row["modality"]), str(row["seed"]))
         item = by_seed_key.setdefault(
             key,
             {
                 "pair_tag": key[0],
+                "experiment_tag": key[0],
                 "modality": key[1],
                 "seed": key[2],
                 "mode": row["mode"],
@@ -201,12 +212,14 @@ def build_compact_rows(rows: List[Dict[str, object]], metric_name: str) -> List[
 
     by_pair_key: Dict[tuple[str, str], List[Dict[str, object]]] = {}
     for row in per_seed_rows:
-        by_pair_key.setdefault((str(row["pair_tag"]), str(row["modality"])), []).append(row)
+        experiment_tag = str(row.get("experiment_tag", row["pair_tag"]))
+        by_pair_key.setdefault((experiment_tag, str(row["modality"])), []).append(row)
 
     compact_rows: List[Dict[str, object]] = []
     for key, seed_rows in by_pair_key.items():
         item: Dict[str, object] = {
             "pair_tag": key[0],
+            "experiment_tag": key[0],
             "modality": key[1],
             "mode": seed_rows[0]["mode"],
             "num_seeds": len(seed_rows),
@@ -226,13 +239,14 @@ def build_compact_rows(rows: List[Dict[str, object]], metric_name: str) -> List[
             item[f"{metric_name}_{label}_seed_std"] = std_value
         compact_rows.append(item)
 
-    compact_rows.sort(key=lambda row: (str(row["pair_tag"]), str(row["modality"])))
+    compact_rows.sort(key=lambda row: (str(row.get("experiment_tag", row["pair_tag"])), str(row["modality"])))
     return compact_rows
 
 
 def write_csv(root: Path, rows: List[Dict[str, object]], metric_name: str) -> Path:
     out_path = root / "shortcut_probe_summary.csv"
     fieldnames = [
+        "experiment_tag",
         "pair_tag",
         "modality",
         "mode",

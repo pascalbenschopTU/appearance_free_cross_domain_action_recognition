@@ -4,7 +4,6 @@ import argparse
 import csv
 import importlib.util
 import json
-import math
 import random
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -52,6 +51,9 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--checkpoint_name", type=str, default="checkpoint_latest.pt")
     train.add_argument("--amp", action="store_true", default=True)
     train.add_argument("--no_amp", dest="amp", action="store_false")
+    train.add_argument("--freeze_until", type=str, default="none")
+    train.add_argument("--motion_noise_std", type=float, default=0.0,
+                        help="Std of Gaussian noise added to flow during training.")
 
     ev = subparsers.add_parser("eval")
     add_common_dataset_args(ev)
@@ -85,6 +87,15 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 def resolve_device(raw: str) -> torch.device:
@@ -162,6 +173,7 @@ class TVL1FlowClipDataset(Dataset):
         sampling: str,
         seed: int,
         training: bool,
+        motion_noise_std: float = 0.0,
     ) -> None:
         self.root_dir = Path(root_dir)
         self.items = read_manifest(manifest)
@@ -171,6 +183,7 @@ class TVL1FlowClipDataset(Dataset):
         self.sampling = str(sampling)
         self.seed = int(seed)
         self.training = bool(training)
+        self.motion_noise_std = float(motion_noise_std)
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -191,13 +204,34 @@ class TVL1FlowClipDataset(Dataset):
             return npy_path
         raise FileNotFoundError(f"Could not resolve converted flow path for manifest entry: {rel_path}")
 
-    def _load_flow(self, path: Path) -> np.ndarray:
+    def _load_flow(self, path: Path) -> Tuple[np.ndarray, Dict[str, object]]:
+        metadata: Dict[str, object] = {}
         if path.suffix == ".npz":
-            payload = np.load(path, allow_pickle=False)
-            if "flow" in payload:
-                return payload["flow"]
-            return payload[payload.files[0]]
-        return np.load(path, allow_pickle=False)
+            with np.load(path, allow_pickle=False) as payload:
+                if "meta" in payload:
+                    raw_meta = payload["meta"]
+                    if isinstance(raw_meta, np.ndarray):
+                        raw_meta = raw_meta.item()
+                    if isinstance(raw_meta, bytes):
+                        raw_meta = raw_meta.decode("utf-8")
+                    if isinstance(raw_meta, str) and raw_meta:
+                        metadata = json.loads(raw_meta)
+                if "flow" in payload:
+                    return payload["flow"], metadata
+                return payload[payload.files[0]], metadata
+        return np.load(path, allow_pickle=False), metadata
+
+    def _normalize_flow(self, clip: np.ndarray, metadata: Dict[str, object]) -> np.ndarray:
+        raw_dtype = clip.dtype
+        encoding = str(metadata.get("encoding", ""))
+        flow_bound = float(metadata.get("flow_bound", 20.0))
+        clip = clip.astype(np.float32, copy=False)
+        if raw_dtype == np.uint8 or "uint8" in encoding:
+            return (clip / 255.0) * 2.0 - 1.0
+        if flow_bound <= 0:
+            raise RuntimeError(f"Invalid flow_bound={flow_bound} for clip normalization.")
+        clip = np.clip(clip, -flow_bound, flow_bound)
+        return clip / flow_bound
 
     def _sample_indices(self, length: int, rng: random.Random) -> np.ndarray:
         if length <= 0:
@@ -217,11 +251,14 @@ class TVL1FlowClipDataset(Dataset):
         rel_path, label = self.items[index]
         rng = random.Random(self.seed * 100000 + self.epoch * 1000 + index)
         flow_path = self._resolve_flow_path(rel_path)
-        flow_u8 = self._load_flow(flow_path)
-        idx = self._sample_indices(int(flow_u8.shape[0]), rng)
-        clip_u8 = flow_u8[idx]
-        clip_u8 = crop_frames(clip_u8, img_size=self.img_size, mode="random" if self.training else "center", rng=rng)
-        clip = (clip_u8.astype(np.float32) / 255.0) * 2.0 - 1.0
+        flow, metadata = self._load_flow(flow_path)
+        idx = self._sample_indices(int(flow.shape[0]), rng)
+        clip = flow[idx]
+        clip = crop_frames(clip, img_size=self.img_size, mode="random" if self.training else "center", rng=rng)
+        clip = self._normalize_flow(clip, metadata)
+        if self.training and self.motion_noise_std > 0:
+            noise_rng = np.random.default_rng(self.seed * 100000 + self.epoch * 1000 + index)
+            clip = clip + noise_rng.normal(0.0, self.motion_noise_std, size=clip.shape).astype(np.float32)
         tensor = torch.from_numpy(clip.transpose(3, 0, 1, 2))
         return tensor, int(label), rel_path
 
@@ -427,6 +464,8 @@ def train(args: argparse.Namespace) -> None:
         pin_memory=device.type == "cuda",
         collate_fn=collate_flow,
         drop_last=False,
+        worker_init_fn=seed_worker,
+        generator=torch.Generator().manual_seed(int(args.seed)),
     )
 
     model = load_pretrained_flow_model(
@@ -497,6 +536,8 @@ def evaluate(args: argparse.Namespace) -> None:
         pin_memory=device.type == "cuda",
         collate_fn=collate_flow,
         drop_last=False,
+        worker_init_fn=seed_worker,
+        generator=torch.Generator().manual_seed(int(args.seed)),
     )
 
     InceptionI3d = load_external_i3d()

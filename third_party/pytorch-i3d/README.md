@@ -24,4 +24,13 @@ This relied on having the optical flow and RGB frames extracted and saved as ima
 ## Feature Extraction
 [extract_features.py](extract_features.py) contains the code to load a pre-trained I3D model and extract the features and save the features as numpy arrays. The [charades_dataset_full.py](charades_dataset_full.py) script loads an entire video to extract per-segment features.
 
-python3 motion_only_AR/models/appearance_free_cross_domain_action_recognition/dataset/convert_rgb_to_tvl1_flow_npz.py   --glob "motion_only_AR/datasets/skin_tone_actions/camera_far/*/__generated_synthetic_videos/**/*.mp4"   --rel_root "motion_only_AR/datasets/skin_tone_actions/camera_far"   --out_root "motion_only_AR/datasets/skin_tone_actions/camera_far_flow_tvl1_npz"   --out_layout mirror   --flow_bound 20.0   --write_index "motion_only_AR/datasets/skin_tone_actions/camera_far_flow_tvl1_npz/index.jsonl"
+python models/appearance_free_cross_domain_action_recognition/dataset/convert_rgb_to_tvl1_flow_npz.py \
+  --glob "datasets/skin_tone_actions/camera_far/*/__generated_synthetic_videos/**/*.mp4" \
+  --rel_root "datasets/skin_tone_actions/camera_far" \
+  --out_root "datasets/skin_tone_actions/camera_far_flow_tvl1_fast_npz" \
+  --out_layout mirror \
+  --resize_short_side 256 \
+  --sample_flow_frames 96 \
+  --output_dtype float16 \
+  --flow_bound 20.0 \
+  --write_index "datasets/skin_tone_actions/camera_far_flow_tvl1_fast_npz/index.jsonl"

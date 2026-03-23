@@ -19,6 +19,14 @@ RGB_FRAMES="${SKIN_TONE_RGB_FRAMES:-64}"
 RGB_SAMPLING="${SKIN_TONE_RGB_SAMPLING:-uniform}"
 RGB_NORM="${SKIN_TONE_RGB_NORM:-i3d}"
 X3D_FLOW_PRETRAINED_CKPT="${X3D_FLOW_PRETRAINED_CKPT:-}"
+MIX_PCT="${SKIN_TONE_MIX_PCT:-0}"
+
+if [[ "$MIX_PCT" -gt 0 ]]; then
+  OUT_ROOT="${OUT_ROOT}_mix${MIX_PCT}"
+  DATASET_SUBDIR="skin_tone_camera_far_binary_mix${MIX_PCT}"
+else
+  DATASET_SUBDIR="skin_tone_camera_far_binary"
+fi
 
 latest_ckpt() {
   local ckpt_dir="$1/checkpoints"
@@ -54,12 +62,13 @@ for pair_spec in "${ACTION_PAIRS[@]}"; do
     --val_ids "$VAL_IDS"
     --same_id_eval_ids "$SAME_ID_EVAL_IDS"
     --disjoint_eval_ids "$DISJOINT_EVAL_IDS"
+    --mix_pct "$MIX_PCT"
   )
 
   "$PYTHON_BIN" scripts/build_skin_tone_shortcut_probe.py "${BUILD_ARGS[@]}"
 
-  manifest_root="tc-clip/datasets_splits/custom/skin_tone_camera_far_binary/${manifest_pair_tag}"
-  label_csv="tc-clip/labels/custom/skin_tone_camera_far_binary/${manifest_pair_tag}_labels.csv"
+  manifest_root="tc-clip/datasets_splits/custom/${DATASET_SUBDIR}/${manifest_pair_tag}"
+  label_csv="tc-clip/labels/custom/${DATASET_SUBDIR}/${manifest_pair_tag}_labels.csv"
 
   EVAL_SPLITS=(
     eval_matched_unseen_ids

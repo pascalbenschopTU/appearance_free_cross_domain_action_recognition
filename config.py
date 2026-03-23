@@ -1020,10 +1020,32 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
     motion.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
     motion.add_argument("--motion_spatial_crop", type=str, default="random", choices=["random", "motion"])
     motion.add_argument(
-        "--p_affine",
+        "--p_hflip",
+        "--probability_hflip",
+        dest="p_hflip",
         type=float,
-        default=0.25,
-        help="Probability of applying geometric affine augmentation in MotionTwoStreamZstdDataset.",
+        default=0.5,
+        help="Probability of applying horizontal flip augmentation during motion finetuning.",
+    )
+    motion.add_argument(
+        "--p_affine",
+        "--probability_affine",
+        dest="p_affine",
+        type=float,
+        default=0.0,
+        help="Probability of applying geometric affine augmentation during motion finetuning.",
+    )
+    motion.add_argument(
+        "--color_jitter",
+        type=float,
+        default=0.0,
+        help="Probability of applying ColorJitter to RGB frames during training (0.0 = off, 0.8 = TC-CLIP-like).",
+    )
+    motion.add_argument(
+        "--motion_noise_std",
+        type=float,
+        default=0.0,
+        help="Std of Gaussian noise added to MHI/flow tensors during motion training (0.0 = off).",
     )
 
     model = parser.add_argument_group("Model")
@@ -1105,8 +1127,8 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         "--checkpoint_mode",
         type=str,
         default="best",
-        choices=["best", "latest"],
-        help="'best' keeps the best checkpoint according to the active criterion; 'latest' overwrites a single rolling checkpoint.",
+        choices=["best", "latest", "final"],
+        help="'best' keeps the best checkpoint according to the active criterion; 'latest' overwrites a single rolling checkpoint; 'final' saves only once after the last epoch.",
     )
     runtime.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
     runtime.add_argument("--seed", type=int, default=0)

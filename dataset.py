@@ -274,19 +274,20 @@ class MotionTwoStreamZstdDataset(Dataset):
         # aug:
         p_hflip: float = 0.25,
         p_max_drop_frame: float = 0.10,
-        p_affine: float = 0.25,
+        p_affine: float = 0.0,
         p_rot: float = 0.30,
         p_scl: float = 0.30,
         p_shr: float = 0.10,
         p_trn: float = 0.30,
         affine_degrees: float = 10.0,
         affine_translate: float = 0.10,
-        affine_scale=(0.5, 1.5),
+        affine_scale=(0.75, 1.25),
         affine_shear=(-2.0, 2.0),
         spatial_crop_mode: str = "random",
         seed: int = 0,
         dataset_split_txt=None,
         class_id_to_label_csv=None,
+        motion_noise_std: float = 0.0,
     ):
         self.root_dir = os.path.abspath(root_dir)
         self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
@@ -301,6 +302,7 @@ class MotionTwoStreamZstdDataset(Dataset):
         self.out_dtype = out_dtype
         self._dctx = None
         self.in_ch_second=in_ch_second
+        self.motion_noise_std = float(motion_noise_std)
 
         self.p_hflip = float(p_hflip)
         self.p_max_drop_frame = float(p_max_drop_frame)
@@ -512,6 +514,7 @@ class RGBVideoClipDataset(Dataset):
         rgb_norm: str = "i3d",
         out_dtype: torch.dtype = torch.float32,
         seed: int = 0,
+        color_jitter_prob: float = 0.0,
     ):
         self.root_dir = os.path.abspath(root_dir)
         self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
@@ -525,6 +528,13 @@ class RGBVideoClipDataset(Dataset):
         self.out_dtype = out_dtype
         self.seed = int(seed)
         self.epoch = 0
+
+        self._color_jitter_prob = float(color_jitter_prob)
+        self._color_jitter = (
+            T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
+            if self._color_jitter_prob > 0
+            else None
+        )
 
         if self.sampling_mode not in ("uniform", "center", "random"):
             raise ValueError(f"sampling_mode must be one of: uniform, center, random (got {sampling_mode})")
@@ -558,6 +568,10 @@ class RGBVideoClipDataset(Dataset):
                 rng=rng,
             )
             rgb = self._decode_clip_rgb(path, idxs)
+            # Apply color jitter per-frame before normalization (rgb is uint8 C,T,H,W)
+            if self._color_jitter is not None and rng.random() < self._color_jitter_prob:
+                for t_idx in range(rgb.shape[1]):
+                    rgb[:, t_idx] = self._color_jitter(rgb[:, t_idx])
             rgb = _normalize_rgb_clip(rgb, self.rgb_norm).to(dtype=self.out_dtype)
         except Exception as e:
             print(f"Something went wrong, video: {path}, error: {e}", flush=True)
@@ -899,7 +913,10 @@ class VideoMotionDataset(Dataset):
         yolo_device: Optional[str] = None,
         out_dtype=torch.float16,
         dataset_split_txt=None,
-        class_id_to_label_csv=None
+        class_id_to_label_csv=None,
+        p_hflip: float = 0.0,
+        p_affine: float = 0.0,
+        seed: int = 0,
     ):
         self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
         if dataset_split_txt is not None and class_id_to_label_csv is not None:
@@ -931,8 +948,15 @@ class VideoMotionDataset(Dataset):
         if self.roi_mode not in ("none", "largest_motion", "yolo_person"):
             raise ValueError(f"Unsupported roi_mode for VideoMotionDataset: {self.roi_mode}")
         self.out_dtype = out_dtype
+        self.p_hflip = float(p_hflip)
+        self.p_affine = float(p_affine)
+        self.seed = int(seed)
+        self.epoch = 0
 
     def __len__(self): return len(self.paths)
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
 
     def _get_roi_xyxy(self, path: str) -> Optional[Tuple[int, int, int, int]]:
         if self.roi_mode == "none":
@@ -987,6 +1011,19 @@ class VideoMotionDataset(Dataset):
                     crop_anchor=crop_anchor,
                     out_dtype=self.out_dtype,
                 )
+                if self.p_hflip > 0.0 or self.p_affine > 0.0:
+                    rng = np.random.default_rng(
+                        self.seed + 1000003 * self.epoch + idx * max(1, self.num_views) + len(mhi_views)
+                    )
+                    mhi, flow = random_motion_augment(
+                        mhi,
+                        flow,
+                        rng,
+                        second_type="flow",
+                        p_horizontal_flip=self.p_hflip,
+                        p_max_drop_frame=0.0,
+                        p_affine=self.p_affine,
+                    )
                 mhi_views.append(mhi)
                 flow_views.append(flow)
             if self.num_views == 1:

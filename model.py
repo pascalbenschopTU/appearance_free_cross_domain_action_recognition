@@ -448,16 +448,16 @@ if __name__ == "__main__":
     # ----------------------------
     # Hard-coded settings
     # ----------------------------
-    batch = 16
+    batch = 1
 
-    mhi = torch.randn(16, 1, 32, 224, 224, device=device, dtype=torch.float32)
-    flow = torch.randn(16, 2, 128, 160, 160, device=device, dtype=torch.float32)
+    mhi = torch.randn(batch, 1, 32, 224, 224, device=device, dtype=torch.float32)
+    flow = torch.randn(batch, 2, 128, 112, 112, device=device, dtype=torch.float32)
 
     model = TwoStreamI3D_CLIP(
         mhi_channels=1,
         second_channels=2,
         embed_dim=512,
-        fuse="concat",
+        fuse="avg_then_proj",
         dropout=0.0,
         use_stems=True,
         init_scratch=True,

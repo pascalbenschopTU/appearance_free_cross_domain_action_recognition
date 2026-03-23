@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Iterable
@@ -42,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_max_samples_per_class", type=int, default=12)
     parser.add_argument("--val_max_samples_per_class", type=int, default=6)
     parser.add_argument("--eval_max_samples_per_class", type=int, default=0)
+    parser.add_argument("--mix_pct", type=int, default=0,
+                        help="Percentage of opposite-skin-tone samples to mix into each class for training (0=pure, 10=10%% minority).")
+    parser.add_argument("--mix_seed", type=int, default=0,
+                        help="Seed controlling which training IDs are skin-tone swapped when --mix_pct > 0.")
     return parser.parse_args()
 
 
@@ -134,6 +139,48 @@ def cap_entries_per_class(entries: list[dict[str, object]], max_samples_per_clas
     return selected
 
 
+def choose_swapped_base_ids(base_ids: list[int], mix_pct: int, mix_seed: int) -> set[int]:
+    if mix_pct <= 0 or not base_ids:
+        return set()
+    n_swap = max(1, round(len(base_ids) * mix_pct / 100.0))
+    n_swap = min(n_swap, len(base_ids))
+    ordered = sorted(int(base_id) for base_id in base_ids)
+    rng = random.Random(int(mix_seed))
+    rng.shuffle(ordered)
+    return set(ordered[:n_swap])
+
+
+def swap_skin_variants_for_selected_ids(
+    *,
+    majority: list[dict[str, object]],
+    minority: list[dict[str, object]],
+    swapped_base_ids: set[int],
+    rng: random.Random,
+) -> list[dict[str, object]]:
+    if not swapped_base_ids or not minority:
+        return list(majority)
+
+    # Group minority pool by background so replacements stay background-matched.
+    minority_by_bg: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for entry in minority:
+        minority_by_bg[str(entry["background"])].append(entry)
+    all_minority = list(minority)
+
+    selected: list[dict[str, object]] = []
+    for entry in majority:
+        if int(entry["base_id"]) not in swapped_base_ids:
+            selected.append(entry)
+            continue
+        pool = minority_by_bg.get(str(entry["background"]), all_minority)
+        replacement = rng.choice(pool)
+        swapped_entry = dict(replacement)
+        swapped_entry["label"] = int(entry["label"])
+        selected.append(swapped_entry)
+
+    selected.sort(key=lambda item: (int(item["label"]), str(item["background"]), int(item["base_id"]), str(item["variant"]), str(item["rel_path"])))
+    return selected
+
+
 def balance_by_background(entries: list[dict[str, object]], max_samples_per_class: int) -> list[tuple[str, int]]:
     grouped: dict[tuple[int, str], list[dict[str, object]]] = defaultdict(list)
     labels = sorted({int(entry["label"]) for entry in entries})
@@ -187,9 +234,18 @@ def main() -> None:
     train_max_samples_per_class = int(args.train_max_samples_per_class)
     val_max_samples_per_class = int(args.val_max_samples_per_class)
     eval_max_samples_per_class = int(args.eval_max_samples_per_class)
+    mix_seed = int(args.mix_seed)
 
-    manifest_root = MODEL_ROOT / "tc-clip" / "datasets_splits" / "custom" / "skin_tone_camera_far_binary" / args.pair_tag
-    label_csv = MODEL_ROOT / "tc-clip" / "labels" / "custom" / "skin_tone_camera_far_binary" / f"{args.pair_tag}_labels.csv"
+    mix_pct = int(args.mix_pct)
+    if mix_pct < 0 or mix_pct > 50:
+        raise ValueError(f"--mix_pct must be between 0 and 50, got {mix_pct}")
+
+    dataset_subdir = "skin_tone_camera_far_binary"
+    if mix_pct > 0:
+        dataset_subdir = f"skin_tone_camera_far_binary_mix{mix_pct}_seed{mix_seed}"
+
+    manifest_root = MODEL_ROOT / "tc-clip" / "datasets_splits" / "custom" / dataset_subdir / args.pair_tag
+    label_csv = MODEL_ROOT / "tc-clip" / "labels" / "custom" / dataset_subdir / f"{args.pair_tag}_labels.csv"
     summary_path = manifest_root / "summary.json"
 
     specs = [
@@ -198,8 +254,14 @@ def main() -> None:
             "dark_variants": dark_variants,
             "light_variants": light_variants,
             "base_ids": train_ids,
-            "max_samples_per_class": train_max_samples_per_class,
-            "notes": "Training split with action label fully correlated with skin-tone group.",
+            "max_samples_per_class": 0,
+            "mix_pct": mix_pct,
+            "mix_seed": mix_seed,
+            "notes": (
+                f"Training split with {mix_pct}% of training IDs deterministically skin-tone-swapped within each class."
+                if mix_pct > 0
+                else "Training split with action label fully correlated with skin-tone group."
+            ),
         },
         {
             "name": "eval_matched_unseen_ids",
@@ -262,6 +324,8 @@ def main() -> None:
         "train_max_samples_per_class": train_max_samples_per_class,
         "val_max_samples_per_class": val_max_samples_per_class,
         "eval_max_samples_per_class": eval_max_samples_per_class,
+        "mix_pct": mix_pct,
+        "mix_seed": mix_seed,
         "label_csv": str(label_csv),
         "manifests": {},
     }
@@ -269,6 +333,7 @@ def main() -> None:
     write_label_csv(label_csv, args.dark_action, args.light_action)
 
     for spec in specs:
+        swapped_base_ids: set[int] = set()
         dark_entries, dark_missing = collect_entries(
             action=args.dark_action,
             label=0,
@@ -283,6 +348,43 @@ def main() -> None:
             variants=spec["light_variants"],
             base_ids=spec["base_ids"],
         )
+
+        spec_mix_pct = int(spec.get("mix_pct", 0))
+        if spec_mix_pct > 0:
+            dark_minority, _ = collect_entries(
+                action=args.dark_action,
+                label=0,
+                backgrounds=backgrounds,
+                variants=spec["light_variants"],
+                base_ids=spec["base_ids"],
+            )
+            light_minority, _ = collect_entries(
+                action=args.light_action,
+                label=1,
+                backgrounds=backgrounds,
+                variants=spec["dark_variants"],
+                base_ids=spec["base_ids"],
+            )
+            _mix_seed = int(spec.get("mix_seed", 0))
+            swapped_base_ids = choose_swapped_base_ids(list(spec["base_ids"]), spec_mix_pct, _mix_seed)
+            swap_rng = random.Random(_mix_seed)
+            print(
+                f"  [mix] swapping training IDs {sorted(swapped_base_ids)} "
+                f"using mix_seed={_mix_seed}"
+            )
+            dark_entries = swap_skin_variants_for_selected_ids(
+                majority=dark_entries,
+                minority=dark_minority,
+                swapped_base_ids=swapped_base_ids,
+                rng=swap_rng,
+            )
+            light_entries = swap_skin_variants_for_selected_ids(
+                majority=light_entries,
+                minority=light_minority,
+                swapped_base_ids=swapped_base_ids,
+                rng=swap_rng,
+            )
+
         balanced_entries = balance_by_background(dark_entries + light_entries, int(spec["max_samples_per_class"]))
         manifest_path = manifest_root / f"{spec['name']}.txt"
         write_manifest(manifest_path, balanced_entries)
@@ -297,6 +399,9 @@ def main() -> None:
             "dark_variants": list(spec["dark_variants"]),
             "light_variants": list(spec["light_variants"]),
             "max_samples_per_class": int(spec["max_samples_per_class"]),
+            "mix_pct": int(spec.get("mix_pct", 0)),
+            "mix_seed": int(spec.get("mix_seed", 0)),
+            "swapped_base_ids": sorted(swapped_base_ids),
             "notes": spec["notes"],
             "dark_missing_files": dark_missing,
             "light_missing_files": light_missing,
