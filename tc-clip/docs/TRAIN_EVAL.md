@@ -221,27 +221,27 @@ bash scripts/train/custom/train_eval_tc_clip_ntu60_k16_to_ntu120_rwf2000.sh
 ```
 
 ```bash
-# Finetune on NTU60 (xsub)
+# Finetune on NTU60
 torchrun --nproc_per_node=4 main.py -cn fully_supervised \
-data=fully_supervised_ntu_xsub \
-output=workspace/expr/fully_supervised_ntu_xsub/tc_clip \
+data=fully_supervised_ntu \
+output=workspace/expr/fully_supervised_ntu/tc_clip \
 trainer=tc_clip
 ```
 
 ```bash
 # Evaluate trained checkpoint on NTU60 validation split
 torchrun --nproc_per_node=4 main.py -cn fully_supervised \
-data=fully_supervised_ntu_xsub \
+data=fully_supervised_ntu \
 eval=test \
-output=workspace/results/fully_supervised_ntu_xsub/tc_clip \
+output=workspace/results/fully_supervised_ntu/tc_clip \
 resume=/PATH/TO/CHECKPOINT/best.pth \
 trainer=tc_clip
 ```
 
 ```bash
-# Finetune on NTU60 (xsub) and run final_test on both NTU val and RWF2000
+# Finetune on NTU60 and run final_test on both NTU val and RWF2000
 torchrun --nproc_per_node=4 main.py -cn fully_supervised \
-data=fully_supervised_ntu_xsub_to_rwf2000 \
-output=workspace/expr/fully_supervised_ntu_xsub_to_rwf2000/tc_clip \
+data=fully_supervised_ntu_to_rwf2000 \
+output=workspace/expr/fully_supervised_ntu_to_rwf2000/tc_clip \
 trainer=tc_clip
 ```

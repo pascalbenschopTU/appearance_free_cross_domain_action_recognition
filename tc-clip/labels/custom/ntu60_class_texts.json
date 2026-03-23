@@ -1,0 +1,302 @@
+{
+  "drink water": [
+    "a person lifting a cup or bottle and drinking water",
+    "someone taking a sip of water from a container",
+    "a person bringing a drink to their mouth and swallowing"
+  ],
+  "eat meal/snack": [
+    "a person eating food with their hands or utensils",
+    "someone bringing food to their mouth and chewing",
+    "a person consuming a meal or snack"
+  ],
+  "brushing teeth": [
+    "a person brushing their teeth with a toothbrush",
+    "someone moving a toothbrush back and forth across their teeth",
+    "a person performing a teeth-cleaning motion with their hand near their mouth"
+  ],
+  "brushing hair": [
+    "a person brushing or combing their hair",
+    "someone running a brush through their hair repeatedly",
+    "a person grooming their hair with a brushing motion"
+  ],
+  "drop": [
+    "a person dropping an object from their hand",
+    "someone releasing an item and letting it fall to the ground",
+    "a person letting go of something they were holding"
+  ],
+  "pickup": [
+    "a person bending down to pick something up from the ground",
+    "someone reaching down and grabbing an object off the floor",
+    "a person picking up an item from a lower surface"
+  ],
+  "throw": [
+    "a person throwing an object forward",
+    "someone winding up their arm and tossing something",
+    "a person launching an object through the air with their hand"
+  ],
+  "sitting down": [
+    "a person lowering themselves into a seated position",
+    "someone bending their knees and sitting down on a chair or surface",
+    "a person transitioning from standing to sitting"
+  ],
+  "standing up (from sitting position)": [
+    "a person rising from a seated position to standing",
+    "someone pushing themselves up from a chair to stand",
+    "a person transitioning from sitting to a standing posture"
+  ],
+  "clapping": [
+    "a person clapping their hands together repeatedly",
+    "someone bringing both palms together to applaud",
+    "a person making a clapping motion with their hands"
+  ],
+  "reading": [
+    "a person reading a book or document",
+    "someone holding reading material and looking at it",
+    "a person focusing their gaze downward on a page or text"
+  ],
+  "writing": [
+    "a person writing with a pen or pencil",
+    "someone moving their hand across a surface to write",
+    "a person making writing motions on paper or a desk"
+  ],
+  "tear up paper": [
+    "a person tearing a piece of paper apart with both hands",
+    "someone ripping paper into pieces",
+    "a person pulling a sheet of paper apart with force"
+  ],
+  "wear jacket": [
+    "a person putting on a jacket",
+    "someone sliding their arms into the sleeves of a jacket",
+    "a person pulling a jacket over their shoulders"
+  ],
+  "take off jacket": [
+    "a person removing a jacket from their body",
+    "someone sliding a jacket off their shoulders and arms",
+    "a person taking off an outer layer of clothing"
+  ],
+  "wear a shoe": [
+    "a person putting on a shoe",
+    "someone sliding their foot into a shoe",
+    "a person bending down to put a shoe on their foot"
+  ],
+  "take off a shoe": [
+    "a person removing a shoe from their foot",
+    "someone pulling a shoe off their foot",
+    "a person bending down to take off their shoe"
+  ],
+  "wear on glasses": [
+    "a person putting on eyeglasses",
+    "someone placing glasses onto their face",
+    "a person positioning eyeglasses on the bridge of their nose"
+  ],
+  "take off glasses": [
+    "a person removing eyeglasses from their face",
+    "someone taking glasses off and holding them",
+    "a person pulling their eyeglasses away from their eyes"
+  ],
+  "put on a hat/cap": [
+    "a person placing a hat or cap on their head",
+    "someone lifting a hat and putting it on",
+    "a person positioning a cap onto the top of their head"
+  ],
+  "take off a hat/cap": [
+    "a person removing a hat or cap from their head",
+    "someone lifting a hat off their head",
+    "a person taking a cap off and holding it"
+  ],
+  "cheer up": [
+    "a person raising their arms and cheering",
+    "someone celebrating with enthusiastic arm movements",
+    "a person expressing joy with upward arm gestures"
+  ],
+  "hand waving": [
+    "a person waving their hand in greeting or farewell",
+    "someone raising their hand and waving side to side",
+    "a person making a waving gesture with their hand"
+  ],
+  "kicking something": [
+    "a person kicking an object on the ground",
+    "someone swinging their foot forward to kick something",
+    "a person striking an object with their foot"
+  ],
+  "reach into pocket": [
+    "a person reaching into their pocket with their hand",
+    "someone inserting their hand into a trouser or jacket pocket",
+    "a person putting their hand into their pocket to retrieve something"
+  ],
+  "hopping (one foot jumping)": [
+    "a person hopping on one foot",
+    "someone jumping repeatedly on a single leg",
+    "a person bouncing up and down on one foot"
+  ],
+  "jump up": [
+    "a person jumping up into the air with both feet",
+    "someone springing upward off the ground",
+    "a person leaping vertically into the air"
+  ],
+  "make a phone call/answer phone": [
+    "a person holding a phone to their ear and talking",
+    "someone making or answering a phone call",
+    "a person raising a phone to their ear to speak"
+  ],
+  "playing with phone/tablet": [
+    "a person interacting with a phone or tablet in their hands",
+    "someone tapping and swiping on a mobile device",
+    "a person looking at and using a handheld electronic device"
+  ],
+  "typing on a keyboard": [
+    "a person typing on a keyboard with both hands",
+    "someone pressing keys on a keyboard rapidly",
+    "a person making typing motions with their fingers"
+  ],
+  "pointing to something with finger": [
+    "a person pointing at something with their index finger",
+    "someone extending their arm and finger to indicate a direction",
+    "a person gesturing toward an object by pointing"
+  ],
+  "taking a selfie": [
+    "a person holding a phone in front of themselves to take a photo",
+    "someone extending their arm to capture a self-portrait",
+    "a person posing while holding a camera or phone at arm's length"
+  ],
+  "check time (from watch)": [
+    "a person looking at their wristwatch to check the time",
+    "someone raising their wrist and glancing at their watch",
+    "a person tilting their arm to read the time on their watch"
+  ],
+  "rub two hands together": [
+    "a person rubbing both hands together",
+    "someone pressing their palms together and sliding them back and forth",
+    "a person warming their hands by rubbing them together"
+  ],
+  "nod head/bow": [
+    "a person nodding their head up and down",
+    "someone bowing their head forward in agreement or greeting",
+    "a person making a nodding or bowing motion with their head"
+  ],
+  "shake head": [
+    "a person shaking their head from side to side",
+    "someone turning their head left and right to indicate no",
+    "a person making a head-shaking motion to disagree"
+  ],
+  "wipe face": [
+    "a person wiping their face with their hand or cloth",
+    "someone rubbing their face with their palm",
+    "a person making a wiping motion across their face"
+  ],
+  "salute": [
+    "a person raising their hand to their forehead in a salute",
+    "someone performing a military-style salute gesture",
+    "a person bringing their hand sharply to their brow"
+  ],
+  "put the palms together": [
+    "a person pressing both palms together in front of their chest",
+    "someone bringing their hands together in a prayer-like gesture",
+    "a person joining their palms together"
+  ],
+  "cross hands in front (say stop)": [
+    "a person crossing their arms in front of their body",
+    "someone making an X shape with their arms to signal stop",
+    "a person holding their crossed hands forward in a blocking gesture"
+  ],
+  "sneeze/cough": [
+    "a person sneezing or coughing into their hand or elbow",
+    "someone covering their mouth while sneezing or coughing",
+    "a person making a sudden sneezing or coughing motion"
+  ],
+  "staggering": [
+    "a person staggering and struggling to keep balance",
+    "someone walking unsteadily as if dizzy or disoriented",
+    "a person swaying and stumbling while trying to walk"
+  ],
+  "falling": [
+    "a person losing balance and falling to the ground",
+    "someone collapsing or tumbling down",
+    "a person falling over from a standing position"
+  ],
+  "touch head (headache)": [
+    "a person touching their head as if having a headache",
+    "someone pressing their hand against their forehead in pain",
+    "a person holding their head with an expression of discomfort"
+  ],
+  "touch chest (stomachache/heart pain)": [
+    "a person pressing their hand against their chest in pain",
+    "someone clutching their chest as if experiencing heart pain",
+    "a person holding their chest area showing signs of discomfort"
+  ],
+  "touch back (backache)": [
+    "a person reaching behind to touch their lower back in pain",
+    "someone pressing their hand against their back due to discomfort",
+    "a person holding their back as if experiencing a backache"
+  ],
+  "touch neck (neckache)": [
+    "a person touching their neck as if in pain",
+    "someone rubbing or pressing their hand against their neck",
+    "a person holding the back of their neck showing discomfort"
+  ],
+  "nausea or vomiting condition": [
+    "a person bending over and appearing nauseous",
+    "someone covering their mouth as if about to vomit",
+    "a person showing signs of nausea with forward-leaning posture"
+  ],
+  "use a fan (with hand or paper)/feeling warm": [
+    "a person fanning themselves with their hand or a paper fan",
+    "someone waving an object near their face to cool down",
+    "a person making a fanning motion to relieve heat"
+  ],
+  "punching/slapping other person": [
+    "one person punching or slapping another person",
+    "someone striking another person with their hand or fist",
+    "a person delivering a punch or slap to someone else"
+  ],
+  "kicking other person": [
+    "one person kicking another person",
+    "someone swinging their leg to kick another person",
+    "a person striking another person with their foot"
+  ],
+  "pushing other person": [
+    "one person pushing another person away",
+    "someone forcefully shoving another person with their hands",
+    "a person using both hands to push someone backward"
+  ],
+  "pat on back of other person": [
+    "one person patting another person on the back",
+    "someone giving a friendly pat on another person's back",
+    "a person tapping someone else's back in a supportive gesture"
+  ],
+  "point finger at the other person": [
+    "one person pointing their finger at another person",
+    "someone directing their index finger toward another person",
+    "a person making an accusatory or directive pointing gesture at someone"
+  ],
+  "hugging other person": [
+    "one person hugging another person",
+    "two people embracing each other with their arms",
+    "a person wrapping their arms around someone in a hug"
+  ],
+  "giving something to other person": [
+    "one person handing an object to another person",
+    "someone passing an item to another person's hands",
+    "a person giving or transferring something to someone else"
+  ],
+  "touching other person's pocket": [
+    "one person reaching toward another person's pocket",
+    "someone touching or reaching into another person's pocket area",
+    "a person making contact with another person's pocket"
+  ],
+  "handshaking": [
+    "two people shaking hands with each other",
+    "a greeting where two people clasp and shake hands",
+    "two people performing a handshake gesture"
+  ],
+  "walking towards each other": [
+    "two people walking toward each other from opposite directions",
+    "two people approaching one another while walking",
+    "people moving closer together by walking face to face"
+  ],
+  "walking apart from each other": [
+    "two people walking away from each other in opposite directions",
+    "two people separating and moving apart",
+    "people walking in diverging directions away from one another"
+  ]
+}

@@ -186,15 +186,16 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_only=F
         checkpoint = torch.load(config.resume, map_location='cpu', weights_only=False)
         load_state_dict = checkpoint['model']
 
-        # now remove the unwanted keys:
-        if "module.prompt_learner.token_prefix" in load_state_dict:
-            del load_state_dict["module.prompt_learner.token_prefix"]
-
-        if "module.prompt_learner.token_suffix" in load_state_dict:
-            del load_state_dict["module.prompt_learner.token_suffix"]
-
-        if "module.prompt_learner.complete_text_embeddings" in load_state_dict:
-            del load_state_dict["module.prompt_learner.complete_text_embeddings"]
+        # Remove class-dependent prompt buffers from either plain or DDP checkpoints.
+        # These are rebuilt from the target dataset class names at eval time.
+        prompt_buffer_suffixes = (
+            "prompt_learner.token_prefix",
+            "prompt_learner.token_suffix",
+            "prompt_learner.complete_text_embeddings",
+        )
+        for key in list(load_state_dict.keys()):
+            if key in prompt_buffer_suffixes or any(key.endswith(f".{suffix}") for suffix in prompt_buffer_suffixes):
+                del load_state_dict[key]
 
         # Remove "module." prefix if present
         if not hasattr(model, 'module'):

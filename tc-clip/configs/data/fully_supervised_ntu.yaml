@@ -1,23 +1,23 @@
 #@package _global_
 data:
   train:
-    dataset_name: ntu60_xview_train
+    dataset_name: ntu60_train
     root: ${ntu60.root}
     num_classes: ${ntu60.num_classes.default}
     label_file: ${ntu60.label_files.default}
-    ann_file: ${ntu60.ann_files.train_xview}
+    ann_file: ${ntu60.ann_files.train}
   val:
-    dataset_name: ntu60_xview_val
+    dataset_name: ntu60_val
     root: ${ntu60.root}
     num_classes: ${ntu60.num_classes.default}
     label_file: ${ntu60.label_files.default}
-    ann_file: ${ntu60.ann_files.val_xview}
+    ann_file: ${ntu60.ann_files.val}
   test:
-    - name: ntu60_xview_val
+    - name: ntu60_val
       protocol: top1
       dataset_list:
-      - dataset_name: ntu60_xview_val
+      - dataset_name: ntu60_val
         root: ${ntu60.root}
         num_classes: ${ntu60.num_classes.default}
         label_file: ${ntu60.label_files.default}
-        ann_file: ${ntu60.ann_files.val_xview}
+        ann_file: ${ntu60.ann_files.val}

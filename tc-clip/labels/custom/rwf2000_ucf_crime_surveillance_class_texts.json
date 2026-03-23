@@ -1,0 +1,12 @@
+{
+  "Fight": [
+    "a person physically attacking another person",
+    "two or more people fighting",
+    "violent aggression with punches kicks or force"
+  ],
+  "NonFight": [
+    "ordinary everyday activity with no crime or anomaly",
+    "a normal scene without violence theft or danger",
+    "people moving or standing in a routine non-criminal situation"
+  ]
+}

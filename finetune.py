@@ -783,52 +783,26 @@ def main():
         t_norm = F.normalize(clip_text_bank, dim=-1).float()
         class_text_sim = (t_norm @ t_norm.t()).detach()
 
-    has_explicit_backbone_modules = (
-        getattr(model, "top", None) is not None
-        or getattr(model, "bot", None) is not None
-    )
+    unfreeze_list = [s.strip() for s in args.unfreeze_modules.split(",") if s.strip()]
 
     # Freeze / trainable modules
-    if head_mode == "legacy":
-        if args.freeze_backbone:
-            if has_explicit_backbone_modules:
-                if getattr(model, "top", None) is not None:
-                    freeze_module(model.top)
-                if getattr(model, "bot", None) is not None:
-                    freeze_module(model.bot)
-            else:
-                freeze_module(model)
-
-        unfreeze_list = [s.strip() for s in args.unfreeze_modules.split(",") if s.strip()]
-        if unfreeze_list:
-            if has_explicit_backbone_modules:
-                if getattr(model, "top", None) is not None:
-                    unfreeze_named_submodules(model.top, unfreeze_list)
-                if getattr(model, "bot", None) is not None:
-                    unfreeze_named_submodules(model.bot, unfreeze_list)
-            else:
-                unfreeze_named_submodules(model, unfreeze_list)
-    else:
+    if args.freeze_backbone:
+        freeze_module(model)
+        _enable_module_training(getattr(model, "clip_head", None))
+        _enable_module_training(getattr(model, "cls_head", None))
+    elif head_mode != "legacy":
         freeze_module(model)
         if head_mode in {"language", "both"}:
-            if getattr(model, "clip_head", None) is None:
-                raise RuntimeError(
-                    f"--finetune_head_mode {head_mode} requires a checkpoint/model with clip_head."
-                )
             _enable_module_training(getattr(model, "clip_head", None))
-            if text_adapter is not None:
-                _enable_module_training(text_adapter)
-            for parameter in logit_scale.parameters():
-                parameter.requires_grad_(True)
-        else:
-            for parameter in logit_scale.parameters():
-                parameter.requires_grad_(False)
         if head_mode in {"class", "both"}:
-            if getattr(model, "cls_head", None) is None:
-                raise RuntimeError(
-                    f"--finetune_head_mode {head_mode} requires a checkpoint/model with cls_head."
-                )
             _enable_module_training(getattr(model, "cls_head", None))
+        if text_adapter is not None and head_mode in {"language", "both"}:
+            _enable_module_training(text_adapter)
+        for parameter in logit_scale.parameters():
+            parameter.requires_grad_(head_mode in {"language", "both"})
+
+    if unfreeze_list:
+        unfreeze_named_submodules(model, unfreeze_list)
 
     if args.freeze_bn_stats:
         force_bn_eval(model)
@@ -844,13 +818,7 @@ def main():
         raise RuntimeError("No trainable parameters found (did you freeze everything?)")
 
     opt = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
-    # scaler = torch.amp.GradScaler(args.device, enabled=(device.type == "cuda"))
-    try:
-        # Newer PyTorch (supports torch.amp.GradScaler("cuda", ...))
-        scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
-    except AttributeError:
-        # Older PyTorch (e.g., 2.0) fallback
-        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    scaler = torch.amp.GradScaler(args.device, enabled=(device.type == "cuda"))
 
     steps_per_epoch = len(loader)
     total_steps = steps_per_epoch * args.epochs
@@ -917,16 +885,6 @@ def main():
         model.train()
         if text_adapter is not None:
             text_adapter.train(any(parameter.requires_grad for parameter in text_adapter.parameters()))
-        if args.freeze_backbone:
-            if has_explicit_backbone_modules:
-                if getattr(model, "top", None) is not None:
-                    model.top.eval()
-                if getattr(model, "bot", None) is not None:
-                    model.bot.eval()
-            elif head_mode == "legacy":
-                model.eval()
-            elif getattr(model, "backbone", None) is not None:
-                model.backbone.eval()
         if args.freeze_bn_stats:
             force_bn_eval(model)
 

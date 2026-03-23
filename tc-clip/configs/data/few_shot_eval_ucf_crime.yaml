@@ -1,0 +1,13 @@
+#@package _global_
+data:
+  test:
+    - name: ucf_crime_all
+      protocol: top1
+      dataset_list:
+      - dataset_name: ucf_crime_all
+        root: ${ucf_crime.root}
+        num_classes: ${ucf_crime.num_classes.default}
+        label_file: ${ucf_crime.label_files.default}
+        ann_file: ${ucf_crime.ann_files.all}
+        grouped_text_file: ${ucf_crime.label_files.grouped_text}
+        eval_group_reduce: max

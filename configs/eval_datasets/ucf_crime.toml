@@ -1,0 +1,6 @@
+[data]
+root_dir = "../../datasets/UCF_Crime"
+class_id_to_label_csv = "tc-clip/labels/custom/ucf_crime_labels.csv"
+
+[text]
+class_text_json = "tc-clip/labels/custom/ucf_crime_class_texts.json"

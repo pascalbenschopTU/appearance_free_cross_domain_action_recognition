@@ -1,17 +1,17 @@
 #@package _global_
 data:
   train:
-    dataset_name: ntu60_xsub_train
+    dataset_name: ntu60_train
     root: ${ntu60.root}
     num_classes: ${ntu60.num_classes.default}
     label_file: ${ntu60.label_files.default}
-    ann_file: ${ntu60.ann_files.train_xsub}
+    ann_file: ${ntu60.ann_files.train}
   val:
-    dataset_name: ntu60_xsub_val
+    dataset_name: ntu60_val
     root: ${ntu60.root}
     num_classes: ${ntu60.num_classes.default}
     label_file: ${ntu60.label_files.default}
-    ann_file: ${ntu60.ann_files.val_xsub}
+    ann_file: ${ntu60.ann_files.val}
   test:
     - name: rwf2000_all
       protocol: top1

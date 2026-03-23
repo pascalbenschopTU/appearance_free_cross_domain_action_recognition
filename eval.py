@@ -42,7 +42,6 @@ from config import parse_eval_args
 from util import (
     apply_text_adapter,
     aggregate_text_logits_to_classes,
-    build_class_multi_positive_text_bank,
     build_text_adapter,
     build_text_bank,
     count_matching_class_texts,
@@ -786,7 +785,9 @@ def main():
     if "use_stems" not in ckpt_args and inferred_use_stems:
         print("[EVAL] inferred use_stems=True from checkpoint weights.", flush=True)
     finetune_head_mode = str(get_checkpoint_arg(ckpt_args, "finetune_head_mode", "legacy")).lower()
-    text_supervision_mode = str(get_checkpoint_arg(ckpt_args, "text_supervision_mode", "class_proto"))
+    text_supervision_mode = str(
+        getattr(args, "text_supervision_mode", "") or get_checkpoint_arg(ckpt_args, "text_supervision_mode", "class_proto")
+    )
     text_adapter_type = str(get_checkpoint_arg(ckpt_args, "text_adapter", "none"))
     class_text_label_weight = float(get_checkpoint_arg(ckpt_args, "class_text_label_weight", 0.5))
     apply_templates_to_class_texts = bool(get_checkpoint_arg(ckpt_args, "apply_templates_to_class_texts", True))
@@ -910,12 +911,19 @@ def main():
 
     class_texts = None
     class_text_json = str(getattr(args, "class_text_json", "") or "").strip()
+    class_text_json_source = "args" if class_text_json else ""
     if not class_text_json:
         class_text_json = str(get_checkpoint_arg(ckpt_args, "val_class_text_json", "") or "").strip()
+        if class_text_json:
+            class_text_json_source = "checkpoint_val"
     if not class_text_json:
         class_text_json = str(get_checkpoint_arg(ckpt_args, "train_class_text_json", "") or "").strip()
+        if class_text_json:
+            class_text_json_source = "checkpoint_train"
     if not class_text_json:
         class_text_json = str(get_checkpoint_arg(ckpt_args, "class_text_json", "") or "").strip()
+        if class_text_json:
+            class_text_json_source = "checkpoint"
     if args.text_bank_backend == "clip" and class_text_json:
         class_texts = load_class_texts(class_text_json)
         print(f"[EVAL] using class_text_json={class_text_json}", flush=True)
@@ -1111,12 +1119,22 @@ def main():
         num_classes = len(classnames)
         class_to_text_indices = None
         class_to_text_weights = None
+        matching_class_texts = 0
         if class_texts is not None:
+            matching_class_texts = count_matching_class_texts(class_texts, classnames)
             print(
-                f"[EVAL] custom prompts available for {count_matching_class_texts(class_texts, classnames)}/"
+                f"[EVAL] custom prompts available for {matching_class_texts}/"
                 f"{len(classnames)} classes",
                 flush=True,
             )
+            if matching_class_texts < len(classnames) and class_text_json_source.startswith("checkpoint"):
+                print(
+                    f"[EVAL] inherited class_text_json matched only {matching_class_texts}/{len(classnames)} classes; "
+                    "ignoring it for this dataset and falling back to class names.",
+                    flush=True,
+                )
+                class_texts = None
+                matching_class_texts = 0
 
         # Enforce consistent classnames across splits (recommended)
         if reference_classnames is None:
@@ -1141,30 +1159,51 @@ def main():
             )
             text_bank = text_bank.float().to(device)
         elif text_supervision_mode == "class_multi_positive" and class_texts is not None:
-            multi_text_bank = build_class_multi_positive_text_bank(
-                clip_model=text_clip_model,
-                tokenize_fn=text_tokenize_fn,
-                classnames=classnames,
-                device=device,
-                templates=templates,
-                class_texts=class_texts,
-                l2_normalize=True,
-                apply_templates_to_class_texts=apply_templates_to_class_texts,
-                apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
-            )
-            text_bank = multi_text_bank.text_bank.float().to(device)
-            class_to_text_indices = multi_text_bank.class_to_text_indices
-            class_to_text_weights = multi_text_bank.build_class_weights(
-                label_weight=class_text_label_weight,
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-            )
-            print(
-                f"[EVAL] class_multi_positive aggregation enabled: texts={text_bank.shape[0]} "
-                f"per_class={multi_text_bank.text_entries_per_class} "
-                f"label_weight={class_text_label_weight:.3f}",
-                flush=True,
-            )
+            try:
+                multi_text_bank = build_text_bank(
+                    clip_model=text_clip_model,
+                    tokenize_fn=text_tokenize_fn,
+                    classnames=classnames,
+                    device=device,
+                    templates=templates,
+                    class_texts=class_texts,
+                    l2_normalize=True,
+                    apply_templates_to_class_texts=apply_templates_to_class_texts,
+                    apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+                    output_mode="class_multi_positive",
+                )
+            except ValueError as exc:
+                print(
+                    f"[EVAL] class_multi_positive unavailable for this dataset ({exc}); "
+                    "falling back to class_proto text bank.",
+                    flush=True,
+                )
+                text_bank = build_text_bank(
+                    clip_model=text_clip_model,
+                    tokenize_fn=text_tokenize_fn,
+                    classnames=classnames,
+                    device=device,
+                    templates=templates,
+                    class_texts=class_texts,
+                    l2_normalize=True,
+                    apply_templates_to_class_texts=apply_templates_to_class_texts,
+                    class_text_label_weight=class_text_label_weight,
+                    apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+                ).float().to(device)
+            else:
+                text_bank = multi_text_bank.text_bank.float().to(device)
+                class_to_text_indices = multi_text_bank.class_to_text_indices
+                class_to_text_weights = multi_text_bank.build_class_weights(
+                    label_weight=class_text_label_weight,
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                )
+                print(
+                    f"[EVAL] class_multi_positive aggregation enabled: texts={text_bank.shape[0]} "
+                    f"per_class={multi_text_bank.text_entries_per_class} "
+                    f"label_weight={class_text_label_weight:.3f}",
+                    flush=True,
+                )
         else:
             text_bank = build_text_bank(
                 clip_model=text_clip_model,

@@ -20,7 +20,6 @@ from augment import (
 from util import (
     apply_text_adapter,
     build_warmup_cosine_scheduler,
-    build_class_multi_positive_text_bank,
     count_matching_class_texts,
     find_latest_ckpt,
     load_checkpoint,
@@ -303,7 +302,7 @@ def main():
                 )
 
             if args.text_supervision_mode == "class_multi_positive" and args.val_class_text_json.strip():
-                val_multi_text_bank = build_class_multi_positive_text_bank(
+                val_multi_text_bank = build_text_bank(
                     clip_model=clip_text_model_val,
                     tokenize_fn=clip_tokenize_fn_val,
                     classnames=list(val_dataset.classnames),
@@ -320,6 +319,7 @@ def main():
                     class_texts=val_class_texts,
                     apply_templates_to_class_texts=args.apply_templates_to_class_texts,
                     apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+                    output_mode="class_multi_positive",
                 )
                 val_clip_text_bank = val_multi_text_bank.text_bank.float().to(device).detach()
                 val_class_to_text_indices = val_multi_text_bank.class_to_text_indices
@@ -487,7 +487,7 @@ def main():
         )
         logit_scale = LogitScale(init_temp=0.07).to(device)
         if args.text_supervision_mode == "class_multi_positive":
-            class_multi_positive_bank = build_class_multi_positive_text_bank(
+            class_multi_positive_bank = build_text_bank(
                 clip_model=clip_text_model,
                 tokenize_fn=clip_tokenize_fn,
                 classnames=list(dataset.classnames),
@@ -496,6 +496,7 @@ def main():
                 class_texts=class_texts,
                 apply_templates_to_class_texts=args.apply_templates_to_class_texts,
                 apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
+                output_mode="class_multi_positive",
             )
             clip_text_bank_raw = class_multi_positive_bank.text_bank.float().to(device).detach()
             class_multi_positive_targets = class_multi_positive_bank.build_targets(

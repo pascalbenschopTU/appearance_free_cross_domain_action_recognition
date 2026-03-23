@@ -1,0 +1,14 @@
+{
+  "Fight": [
+    "one person hitting another person",
+    "one person kicking another person",
+    "one person pushing another person",
+    "one person grabbing another person aggressively"
+  ],
+  "NonFight": [
+    "two people shaking hands",
+    "two people holding hands",
+    "two people hugging each other",
+    "a person posing without aggression"
+  ]
+}

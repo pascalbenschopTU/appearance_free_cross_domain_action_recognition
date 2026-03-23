@@ -1,0 +1,17 @@
+{
+  "Assault": [
+    "a person physically attacking another person",
+    "an assaultive attack with punches kicks or force",
+    "violent aggression directed at someone nearby"
+  ],
+  "Fighting": [
+    "two or more people fighting",
+    "a physical altercation between people",
+    "mutual violence with punches kicks or grappling"
+  ],
+  "Normal": [
+    "ordinary everyday activity with no crime or anomaly",
+    "a normal scene without violence theft or danger",
+    "people moving or standing in a routine non-criminal situation"
+  ]
+}

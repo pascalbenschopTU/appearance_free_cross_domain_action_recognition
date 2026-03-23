@@ -811,6 +811,13 @@ def build_eval_parser(default_device: str) -> argparse.ArgumentParser:
     text.add_argument("--precomputed_text_index", type=str, default="")
     text.add_argument("--precomputed_text_key", type=str, default="")
     text.add_argument("--class_text_json", type=str, default="")
+    text.add_argument(
+        "--text_supervision_mode",
+        type=str,
+        default="",
+        choices=["", "class_proto", "desc_soft_margin", "class_multi_positive"],
+        help="Optional eval-time override for text supervision aggregation. Empty uses checkpoint setting.",
+    )
     text.add_argument("--use_heads", type=str, default="fuse")
     text.add_argument("--head_weights", type=str, default="1.0")
     text.add_argument("--logit_scale", type=float, default=0.0)

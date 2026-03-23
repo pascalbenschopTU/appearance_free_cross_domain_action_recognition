@@ -1,0 +1,13 @@
+#@package _global_
+data:
+  test:
+    - name: rwf2000_val
+      protocol: top1
+      dataset_list:
+      - dataset_name: rwf2000_val
+        root: ${rwf2000.root}
+        num_classes: ${rwf2000.num_classes.default}
+        label_file: ${rwf2000.label_files.default}
+        ann_file: ${rwf2000.ann_files.val}
+        grouped_text_file: ${rwf2000.label_files.grouped_text}
+        eval_group_reduce: max
