@@ -2,6 +2,7 @@
 reference: https://github.com/muzairkhattak/ViFi-CLIP/blob/main/trainers/vificlip.py
 """
 
+import os
 import torch
 
 from clip import clip
@@ -19,7 +20,16 @@ _tokenizer = _Tokenizer()
 def load_clip_to_cpu(cfg):
     backbone_name = cfg.model_arch
     url = clip._MODELS[backbone_name]
-    model_path = clip._download(url)
+    filename = os.path.basename(url)
+
+    _local_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "out", "clip", filename
+    )
+    if os.path.isfile(_local_path):
+        model_path = _local_path
+    else:
+        model_path = clip._download(url)
 
     try:
         # loading JIT archive

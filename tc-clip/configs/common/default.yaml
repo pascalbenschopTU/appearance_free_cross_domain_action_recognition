@@ -180,6 +180,7 @@ rwf2000:
     default: 2
   label_files:
     default: labels/custom/rwf2000_labels.csv
+    grouped_text: labels/custom/rwf2000_class_texts.json
     ntu_text: labels/custom/rwf2000_ntu_texts.json
     ntu_class_text: labels/custom/rwf2000_ntu_class_texts.json
     ntu_grouped_text: labels/custom/rwf2000_ntu_weak_sets.json
@@ -227,6 +228,19 @@ ucf_crime:
     train: datasets_splits/custom/ucf_crime_train.txt
     val: datasets_splits/custom/ucf_crime_val.txt
     all: datasets_splits/custom/ucf_crime_all.txt
+
+ucf_crime_surveillance:
+  dataset_name: ucf_crime_surveillance
+  root: /YOUR/PATH/TO/DATASET/UCF_Crime/videos
+  num_classes:
+    default: 3
+  label_files:
+    default: labels/custom/ucf_crime_surveillance_labels.csv
+    grouped_text: labels/custom/ucf_crime_surveillance_class_texts.json
+  ann_files:
+    train: datasets_splits/custom/ucf_crime_surveillance_train.txt
+    val: datasets_splits/custom/ucf_crime_surveillance_val.txt
+    all: datasets_splits/custom/ucf_crime_surveillance_all.txt
 
 custom:
   root: /YOUR/PATH/TO/DATASET

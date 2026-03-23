@@ -1,0 +1,16 @@
+#@package _global_
+data:
+  train:
+    dataset_name: ucf_crime_surveillance_train
+    root: ${ucf_crime_surveillance.root}
+    num_classes: ${ucf_crime_surveillance.num_classes.default}
+    label_file: ${ucf_crime_surveillance.label_files.default}
+    ann_file: ${ucf_crime_surveillance.ann_files.train}
+  val:
+    dataset_name: ucf_crime_surveillance_val
+    root: ${ucf_crime_surveillance.root}
+    num_classes: ${ucf_crime_surveillance.num_classes.default}
+    label_file: ${ucf_crime_surveillance.label_files.default}
+    ann_file: ${ucf_crime_surveillance.ann_files.val}
+    grouped_text_file: ${ucf_crime_surveillance.label_files.grouped_text}
+    eval_group_reduce: max

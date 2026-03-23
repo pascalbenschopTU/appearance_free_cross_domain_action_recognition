@@ -32,8 +32,8 @@ motion_train_crop_mode = "random"
 motion_eval_crop_mode = "center"
 
 [finetune]
-freeze_backbone = false
-freeze_bn_stats = false
+freeze_backbone = true
+freeze_bn_stats = true
 batch_size = 16
 epochs = 10
 lr = 2e-4

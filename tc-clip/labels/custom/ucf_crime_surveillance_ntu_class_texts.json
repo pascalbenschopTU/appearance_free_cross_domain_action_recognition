@@ -1,0 +1,19 @@
+{
+  "Assault": [
+    "one person punching or slapping another person",
+    "one person kicking another person",
+    "one person pushing another person violently"
+  ],
+  "Fighting": [
+    "people fighting each other with punches and kicks",
+    "a mutual physical fight between people",
+    "a violent altercation with pushing and striking"
+  ],
+  "Normal": [
+    "people walking towards each other",
+    "people walking apart from each other",
+    "someone standing up or sitting down",
+    "people handshaking or hugging peacefully",
+    "someone making a phone call reading or writing"
+  ]
+}

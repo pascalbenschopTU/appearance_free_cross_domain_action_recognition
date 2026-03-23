@@ -48,8 +48,9 @@ normalize_train_dataset() {
 normalize_eval_target() {
   local token="$1"
   case "$token" in
+    source|source_eval|in_domain|self) echo "source" ;;
+    ntu60) echo "ntu60" ;;
     ci3d_s03|ci3d_s03_all) echo "ci3d_s03" ;;
-    ntu120|ntu120_xsub) echo "ntu120" ;;
     rwf2000|rwf) echo "rwf2000" ;;
     ucf_crime|ucf-crime|UCF_Crime) echo "ucf_crime" ;;
     *)
@@ -63,19 +64,40 @@ supports_eval_target() {
   local train_dataset="$1"
   local eval_target="$2"
   case "$train_dataset:$eval_target" in
-    ntu60:ci3d_s03|ntu60:ntu120|ntu60:rwf2000|ntu60:ucf_crime) return 0 ;;
-    ci3d_s02:ci3d_s03|ci3d_s02:rwf2000|ci3d_s02:ucf_crime) return 0 ;;
+    ntu60:source|ntu60:ntu60|ntu60:rwf2000|ntu60:ucf_crime) return 0 ;;
+    ci3d_s02:source|ci3d_s02:ci3d_s03|ci3d_s02:rwf2000|ci3d_s02:ucf_crime) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-eval_config_for_target() {
-  local target="$1"
+resolved_eval_name() {
+  local train_dataset="$1"
+  local target="$2"
   case "$target" in
+    source)
+      case "$train_dataset" in
+        ntu60) echo "ntu60" ;;
+        ci3d_s02) echo "ci3d_s03" ;;
+      esac
+      ;;
+    *) echo "$target" ;;
+  esac
+}
+
+eval_config_for_target() {
+  local train_dataset="$1"
+  local target="$2"
+  case "$target" in
+    source)
+      case "$train_dataset" in
+        ntu60) echo "configs/ntu_transfer/eval/ntu60_val.toml" ;;
+        ci3d_s02) echo "configs/ntu_transfer/eval/ci3d_s03_val.toml" ;;
+      esac
+      ;;
+    ntu60) echo "configs/ntu_transfer/eval/ntu60_val.toml" ;;
     ci3d_s03) echo "configs/ntu_transfer/eval/ci3d_s03_val.toml" ;;
-    ntu120) echo "configs/ntu_transfer/eval/ntu120_xsub_val.toml" ;;
     rwf2000) echo "configs/ntu_transfer/eval/rwf2000_val.toml" ;;
-    ucf_crime) echo "configs/ntu_transfer/eval/ucf_crime_val.toml" ;;
+    ucf_crime) echo "configs/ntu_transfer/eval/ucf_crime_surveillance_val.toml" ;;
     *)
       echo "Unknown eval target: $target" >&2
       return 1
@@ -84,19 +106,42 @@ eval_config_for_target() {
 }
 
 eval_extra_args_for_target() {
-  local target="$1"
+  local train_dataset="$1"
+  local target="$2"
   case "$target" in
+    source)
+      case "$train_dataset" in
+        ntu60) printf '%s\n' "--root_dir" "$NTU_ROOT" ;;
+        ci3d_s02) printf '%s\n' "--root_dir" "$CI3D_S03_ROOT" ;;
+      esac
+      ;;
+    ntu60)
+      printf '%s\n' "--root_dir" "$NTU_ROOT"
+      ;;
     ci3d_s03)
       printf '%s\n' "--root_dir" "$CI3D_S03_ROOT"
       ;;
-    ntu120)
-      printf '%s\n' "--root_dir" "$NTU_ROOT"
-      ;;
     rwf2000)
       printf '%s\n' "--root_dir" "$RWF2000_ROOT"
+      case "$train_dataset" in
+        ntu60)
+          printf '%s\n' "--class_text_json" "tc-clip/labels/custom/rwf2000_ntu_class_texts.json"
+          ;;
+        ci3d_s02)
+          printf '%s\n' "--class_text_json" "tc-clip/labels/custom/rwf2000_ci3d_class_texts.json"
+          ;;
+      esac
       ;;
     ucf_crime)
       printf '%s\n' "--root_dir" "$UCF_CRIME_ROOT"
+      case "$train_dataset" in
+        ntu60)
+          printf '%s\n' "--class_text_json" "tc-clip/labels/custom/ucf_crime_surveillance_ntu_class_texts.json"
+          ;;
+        ci3d_s02)
+          printf '%s\n' "--class_text_json" "tc-clip/labels/custom/ucf_crime_surveillance_ci3d_class_texts.json"
+          ;;
+      esac
       ;;
     *)
       echo "Unknown eval target: $target" >&2
@@ -161,9 +206,7 @@ train_args_for_dataset() {
 }
 
 default_eval_targets_from_legacy_flags() {
-  local -a legacy_targets=("rwf2000")
-  [[ "$LEGACY_INCLUDE_NTU_VAL" == "1" ]] && legacy_targets+=("ntu120")
-  [[ "$LEGACY_INCLUDE_CI3D" == "1" ]] && legacy_targets+=("ci3d_s03")
+  local -a legacy_targets=("source" "rwf2000")
   [[ "$LEGACY_INCLUDE_UCF_CRIME" == "1" ]] && legacy_targets+=("ucf_crime")
   IFS=','; echo "${legacy_targets[*]}"
 }
@@ -180,7 +223,7 @@ if [[ -z "$EVAL_TARGETS_RAW" ]]; then
   if [[ "$LEGACY_INCLUDE_NTU_VAL" == "1" || "$LEGACY_INCLUDE_CI3D" == "1" || "$LEGACY_INCLUDE_UCF_CRIME" == "1" ]]; then
     EVAL_TARGETS_RAW="$(default_eval_targets_from_legacy_flags)"
   else
-    EVAL_TARGETS_RAW="ci3d_s03,ntu120,rwf2000,ucf_crime"
+    EVAL_TARGETS_RAW="source,rwf2000,ucf_crime"
   fi
 fi
 
@@ -236,16 +279,17 @@ for head_mode in "${HEAD_MODES[@]}"; do
         continue
       fi
 
-      eval_cfg="$(eval_config_for_target "$eval_target")"
-      mapfile -t eval_extra_args < <(eval_extra_args_for_target "$eval_target")
+      resolved_eval_target="$(resolved_eval_name "$train_dataset" "$eval_target")"
+      eval_cfg="$(eval_config_for_target "$train_dataset" "$eval_target")"
+      mapfile -t eval_extra_args < <(eval_extra_args_for_target "$train_dataset" "$eval_target")
 
       echo
-      echo "Evaluating ${run_tag} on ${eval_target} | head_mode=${head_mode}"
+      echo "Evaluating ${run_tag} on ${resolved_eval_target} | head_mode=${head_mode}"
       "$PYTHON_BIN" eval.py \
         --config configs/ntu_transfer/eval/common.toml \
         --config "$eval_cfg" \
         --ckpt "$ckpt" \
-        --out_dir "$out_dir/eval_${eval_target}" \
+        --out_dir "$out_dir/eval_${resolved_eval_target}" \
         "${eval_extra_args[@]}"
     done
   done

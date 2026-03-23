@@ -1,0 +1,10 @@
+[data]
+root_dir = "../../../Video_LLM_testing/datasets_AR/RWF2000"
+manifests = ["tc-clip/datasets_splits/custom/rwf2000_val.txt"]
+class_id_to_label_csv = "tc-clip/labels/custom/rwf2000_labels.csv"
+
+[text]
+class_text_json = "tc-clip/labels/custom/rwf2000_class_texts.json"
+
+[runtime]
+out_dir = "eval_out/rwf2000_direct_val"
