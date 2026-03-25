@@ -226,8 +226,13 @@ def _match_records_to_manifest(
 ) -> List[PrivacyVideoRecord]:
     by_rel = {record.rel_path: record for record in records}
     by_name: Dict[str, List[PrivacyVideoRecord]] = defaultdict(list)
+    by_stem: Dict[str, List[PrivacyVideoRecord]] = defaultdict(list)
+    by_action_stem: Dict[tuple, List[PrivacyVideoRecord]] = defaultdict(list)
     for record in records:
         by_name[record.video_name].append(record)
+        stem = Path(record.video_name).stem.lower()
+        by_stem[stem].append(record)
+        by_action_stem[(_normalize_action_name(record.action_class), stem)].append(record)
 
     matched: List[PrivacyVideoRecord] = []
     seen_rel_paths = set()
@@ -244,6 +249,28 @@ def _match_records_to_manifest(
                     f"Ambiguous basename-only split match for {rel_path!r}; "
                     f"expected a unique record, got {len(name_hits)}"
                 )
+        # Stem-based fallback: handles extension mismatches (e.g. .avi manifest vs .zst records)
+        if record is None:
+            norm_path = Path(rel_norm)
+            stem = norm_path.stem.lower()
+            action_norm = _normalize_action_name(norm_path.parts[0]) if norm_path.parts else ""
+            action_stem_hits = by_action_stem.get((action_norm, stem), [])
+            if len(action_stem_hits) == 1:
+                record = action_stem_hits[0]
+            elif len(action_stem_hits) > 1:
+                raise ValueError(
+                    f"Ambiguous action+stem split match for {rel_path!r}; "
+                    f"expected a unique record, got {len(action_stem_hits)}"
+                )
+            if record is None:
+                stem_hits = by_stem.get(stem, [])
+                if len(stem_hits) == 1:
+                    record = stem_hits[0]
+                elif len(stem_hits) > 1:
+                    raise ValueError(
+                        f"Ambiguous stem-only split match for {rel_path!r}; "
+                        f"expected a unique record, got {len(stem_hits)}"
+                    )
         if record is None:
             missing.append(rel_norm)
             continue

@@ -465,6 +465,27 @@ def iter_videos_manifest(manifest_path: str, base_dir: Optional[str] = None):
     return videos, labels
 
 
+def iter_videos_manifests(manifest_paths: List[str], base_dir: Optional[str] = None):
+    """
+    Load one or more manifests and merge them while preserving first-seen order.
+    Later manifests can add labels for videos not labeled earlier.
+    """
+    merged_videos: List[str] = []
+    merged_labels: Dict[str, int] = {}
+    seen = set()
+
+    for manifest_path in manifest_paths:
+        videos, labels = iter_videos_manifest(manifest_path, base_dir=base_dir)
+        for video in videos:
+            if video not in seen:
+                merged_videos.append(video)
+                seen.add(video)
+            if video in labels and video not in merged_labels:
+                merged_labels[video] = labels[video]
+
+    return merged_videos, merged_labels
+
+
 def _norm_path_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
@@ -702,13 +723,22 @@ def main():
     # input discovery
     p.add_argument("--root_dir", default=None, help="Root to walk recursively for videos")
     p.add_argument("--glob", nargs="*", default=None, help='Glob pattern(s), e.g. "data/**/*.mp4"')
-    p.add_argument("--manifest", default=None, help="Manifest file (.txt, .jsonl, .csv) listing videos")
+    p.add_argument(
+        "--manifest",
+        nargs="+",
+        default=None,
+        help="One or more manifest files (.txt, .jsonl, .csv) listing videos",
+    )
     p.add_argument("--exts", nargs="+", default=[".mp4", ".avi", ".mov", ".mkv", ".webm"], help="Video extensions for --root_dir mode")
     p.add_argument("--follow_symlinks", action="store_true", help="Follow symlinks when walking --root_dir")
 
     # output mapping
     p.add_argument("--out_root", default="motion_features", help="Output root dir")
-    p.add_argument("--rel_root", default=None, help="Root used to compute relative paths (default: root_dir or dirname(manifest))")
+    p.add_argument(
+        "--rel_root",
+        default=None,
+        help="Root used to compute relative paths (default: root_dir or dirname(first manifest))",
+    )
     p.add_argument("--out_layout", choices=["mirror", "flat", "by_label"], default="mirror")
     p.add_argument("--overwrite", action="store_true", help="Recompute even if .zst exists")
 
@@ -797,8 +827,8 @@ def main():
         videos = iter_videos_walk(root_dir, exts, follow_symlinks=bool(args.follow_symlinks))
         default_rel_root = root_dir
         if args.manifest:
-            manifest = os.path.abspath(args.manifest)
-            manifest_videos, manifest_labels = iter_videos_manifest(manifest, base_dir=root_dir)
+            manifest_paths = [os.path.abspath(manifest) for manifest in args.manifest]
+            manifest_videos, manifest_labels = iter_videos_manifests(manifest_paths, base_dir=root_dir)
             videos, manifest_label_by_video = select_manifest_videos_under_root(
                 root_dir=root_dir,
                 root_videos=videos,
@@ -811,9 +841,10 @@ def main():
         # for glob mode, rel_root defaults to common prefix if possible
         default_rel_root = os.path.commonpath([os.path.abspath(v) for v in videos]) if videos else os.getcwd()
     else:
-        manifest = os.path.abspath(args.manifest)
-        manifest_base = os.path.abspath(args.root_dir) if args.root_dir else os.path.dirname(manifest)
-        videos, manifest_label_by_video = iter_videos_manifest(manifest, base_dir=manifest_base)
+        manifest_paths = [os.path.abspath(manifest) for manifest in args.manifest]
+        first_manifest = manifest_paths[0]
+        manifest_base = os.path.abspath(args.root_dir) if args.root_dir else os.path.dirname(first_manifest)
+        videos, manifest_label_by_video = iter_videos_manifests(manifest_paths, base_dir=manifest_base)
         if args.root_dir:
             root_dir = os.path.abspath(args.root_dir)
             default_rel_root = root_dir

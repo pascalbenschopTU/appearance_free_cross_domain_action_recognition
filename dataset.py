@@ -336,7 +336,7 @@ class MotionTwoStreamZstdDataset(Dataset):
         return self._dctx
 
 
-    def __getitem__(self, idx: int):
+    def _load_item(self, idx: int, *, sample_offset: int = 0):
         video_path = self.paths[idx]
         label = self.labels[idx]
 
@@ -350,7 +350,9 @@ class MotionTwoStreamZstdDataset(Dataset):
             )
 
             # --- Temporal selection ---
-            rng = np.random.default_rng(self.seed + 1000003 * self.epoch + idx)
+            rng = np.random.default_rng(
+                self.seed + 1000003 * self.epoch + idx + 7919 * int(sample_offset)
+            )
             if mhi.numel() == 0 or mhi.ndim != 4:
                 C = len(self.mhi_windows)
                 mhi = torch.zeros(
@@ -402,6 +404,9 @@ class MotionTwoStreamZstdDataset(Dataset):
             second = torch.zeros((self.in_ch_second, self.flow_frames, self.flow_hw, self.flow_hw), dtype=self.out_dtype)
 
         return mhi, second, label, video_path
+
+    def __getitem__(self, idx: int):
+        return self._load_item(idx, sample_offset=0)
 
 def collate_motion(batch):
     mhi, flow, labels, sample_ids = zip(*batch)
@@ -515,6 +520,9 @@ class RGBVideoClipDataset(Dataset):
         out_dtype: torch.dtype = torch.float32,
         seed: int = 0,
         color_jitter_prob: float = 0.0,
+        blur_mode: str = "none",
+        blur_kernel_size: int = 31,
+        blur_sigma: float = 8.0,
     ):
         self.root_dir = os.path.abspath(root_dir)
         self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
@@ -535,11 +543,26 @@ class RGBVideoClipDataset(Dataset):
             if self._color_jitter_prob > 0
             else None
         )
+        self._blur_mode = str(blur_mode).lower()
+        self._blur_kernel_size = int(blur_kernel_size)
+        self._blur_sigma = float(blur_sigma)
+        self._blur = None
+        if self._blur_mode == "strong":
+            kernel_size = self._blur_kernel_size
+            if kernel_size <= 0:
+                raise ValueError(f"blur_kernel_size must be > 0 (got {blur_kernel_size})")
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            if self._blur_sigma <= 0:
+                raise ValueError(f"blur_sigma must be > 0 (got {blur_sigma})")
+            self._blur = T.GaussianBlur(kernel_size=kernel_size, sigma=self._blur_sigma)
 
         if self.sampling_mode not in ("uniform", "center", "random"):
             raise ValueError(f"sampling_mode must be one of: uniform, center, random (got {sampling_mode})")
         if self.rgb_norm not in ("i3d", "clip", "none"):
             raise ValueError(f"rgb_norm must be one of: i3d, clip, none (got {rgb_norm})")
+        if self._blur_mode not in ("none", "strong"):
+            raise ValueError(f"blur_mode must be one of: none, strong (got {blur_mode})")
 
     def __len__(self):
         return len(self.paths)
@@ -550,10 +573,10 @@ class RGBVideoClipDataset(Dataset):
     def _decode_clip_rgb(self, path: str, idxs: np.ndarray) -> torch.Tensor:
         return decode_clip_rgb(path, idxs, self.img_size)
 
-    def __getitem__(self, idx: int):
+    def _load_item(self, idx: int, *, sample_offset: int = 0):
         path = self.paths[idx]
         label = self.labels[idx]
-        rng = np.random.default_rng(self.seed + 1000003 * self.epoch + idx)
+        rng = np.random.default_rng(self.seed + 1000003 * self.epoch + idx + 7919 * int(sample_offset))
 
         try:
             vr = VideoReader(path, ctx=cpu(0), num_threads=1)
@@ -572,6 +595,9 @@ class RGBVideoClipDataset(Dataset):
             if self._color_jitter is not None and rng.random() < self._color_jitter_prob:
                 for t_idx in range(rgb.shape[1]):
                     rgb[:, t_idx] = self._color_jitter(rgb[:, t_idx])
+            if self._blur is not None:
+                for t_idx in range(rgb.shape[1]):
+                    rgb[:, t_idx] = self._blur(rgb[:, t_idx])
             rgb = _normalize_rgb_clip(rgb, self.rgb_norm).to(dtype=self.out_dtype)
         except Exception as e:
             print(f"Something went wrong, video: {path}, error: {e}", flush=True)
@@ -579,6 +605,9 @@ class RGBVideoClipDataset(Dataset):
 
         dummy_second = torch.zeros((2, 1, 1, 1), dtype=rgb.dtype)
         return rgb, dummy_second, label, path
+
+    def __getitem__(self, idx: int):
+        return self._load_item(idx, sample_offset=0)
 
 
 def collate_rgb_clip(batch):
@@ -1422,4 +1451,3 @@ def raft_flow_from_paired_frames_batched(
         flow_out[b] = flow.to(out_dtype).permute(1, 0, 2, 3).contiguous()
 
     return flow_out
-

@@ -6,8 +6,8 @@ val_root_dir = "../../datasets/NTU/nturgb+d_rgb"
 val_manifest = "tc-clip/datasets_splits/custom/ntu60_val.txt"
 val_class_id_to_label_csv = "tc-clip/labels/custom/ntu60_labels.csv"
 
-[text]
-class_text_json = "tc-clip/labels/custom/ntu60_class_texts.json"
+[# text]
+# class_text_json = "tc-clip/labels/custom/ntu60_class_texts.json"
 
 [pretrained]
 pretrained_ckpt = "out/checkpoint_epoch_027_loss0.6155.pt"

@@ -449,7 +449,6 @@ def main():
                 "--finetune_head_mode class/both requires a checkpoint trained with projection heads (--use_projection)."
             )
         args.freeze_backbone = True
-        args.unfreeze_modules = ""
         args.lambda_align = 0.0
         args.lambda_rep_mix = 0.0
         args.lambda_cls = 0.0
@@ -544,7 +543,6 @@ def main():
                 p_hflip=args.p_hflip,
                 p_affine=args.p_affine,
                 seed=args.seed,
-                motion_noise_std=getattr(args, "motion_noise_std", 0.0),
             )
             train_collate_fn = collate_video_motion
         else:
@@ -562,7 +560,6 @@ def main():
                 seed=args.seed,
                 dataset_split_txt=manifest_path,
                 class_id_to_label_csv=args.class_id_to_label_csv,
-                motion_noise_std=getattr(args, "motion_noise_std", 0.0),
             )
             train_collate_fn = collate_motion
 

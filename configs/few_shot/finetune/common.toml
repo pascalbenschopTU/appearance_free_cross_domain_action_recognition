@@ -41,17 +41,16 @@ lr = 2e-4
 weight_decay = 0.001
 warmup_steps = 100
 min_lr = 2e-6
+p_affine = 0.25
+p_hflip = 0.5
 mixup_prob = 0.25
 mixup_alpha = 0.2
-label_smoothing = 0.1
-temporal_mixup_prob = 0.0
-temporal_mixup_y_min = 0.35
-temporal_mixup_y_max = 0.65
+label_smoothing = 0.05
 lambda_rep_mix = 0.1
 rep_mix_alpha = 0.4
 rep_mix_semantic = true
 rep_mix_semantic_topk = 3
-unfreeze_modules = "mixed_4b,mixed_4c,mixed_4d,mixed_4e,mixed_4f,mixed_5b,mixed_5c"
+# unfreeze_modules = "mixed_5b,mixed_5c"
 
 [runtime]
 num_workers = 16

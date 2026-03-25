@@ -24,6 +24,8 @@ LR_OVERRIDE="${TC_CLIP_LR:-}"
 LR_MIN_OVERRIDE="${TC_CLIP_LR_MIN:-}"
 EARLY_STOP_OVERRIDE="${TC_CLIP_EARLY_STOP:-}"
 EARLY_STOP_PATIENCE_OVERRIDE="${TC_CLIP_EARLY_STOP_PATIENCE:-}"
+TEXT_PROMPT_MODE_OVERRIDE="${TC_CLIP_TEXT_PROMPT_MODE:-}"
+CLASS_TEXT_LABEL_WEIGHT_OVERRIDE="${TC_CLIP_CLASS_TEXT_LABEL_WEIGHT:-}"
 
 split_csv() {
   local raw="$1"
@@ -231,6 +233,8 @@ for raw_train_dataset in "${TRAIN_DATASETS[@]}"; do
   append_optional_override TRAIN_ARGS "lr_min" "$LR_MIN_OVERRIDE"
   append_optional_override TRAIN_ARGS "early_stop" "$EARLY_STOP_OVERRIDE"
   append_optional_override TRAIN_ARGS "early_stop_patience" "$EARLY_STOP_PATIENCE_OVERRIDE"
+  append_optional_override TRAIN_ARGS "text_prompt_mode" "$TEXT_PROMPT_MODE_OVERRIDE"
+  append_optional_override TRAIN_ARGS "class_text_label_weight" "$CLASS_TEXT_LABEL_WEIGHT_OVERRIDE"
 
   echo
   echo "=================================================================="
@@ -287,6 +291,8 @@ for raw_train_dataset in "${TRAIN_DATASETS[@]}"; do
     if [[ "${#prompt_override[@]}" -gt 0 && -n "${prompt_override[0]:-}" ]]; then
       EVAL_ARGS+=("${prompt_override[@]}")
     fi
+    append_optional_override EVAL_ARGS "text_prompt_mode" "$TEXT_PROMPT_MODE_OVERRIDE"
+    append_optional_override EVAL_ARGS "class_text_label_weight" "$CLASS_TEXT_LABEL_WEIGHT_OVERRIDE"
 
     echo
     echo "Evaluating TC-CLIP ${expr_name} on ${resolved_eval_target}"

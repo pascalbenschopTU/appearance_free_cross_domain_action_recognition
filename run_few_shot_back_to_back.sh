@@ -7,8 +7,11 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASETS=(hmdb51 ucf101 ssv2)
 HEAD_MODES_RAW="${FEWSHOT_HEAD_MODES:-both}"
-PRETRAINED_CKPT_OVERRIDE="${FEWSHOT_PRETRAINED_CKPT:-out/checkpoint_epoch_033_loss3.5884.pt}"
+PRETRAINED_CKPT_OVERRIDE="${FEWSHOT_PRETRAINED_CKPT:-out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss3.4912.pt}"
 OUT_ROOT="${FEWSHOT_OUT_ROOT:-out/few_shot_cfg2}"
+P_HFLIP="${FEWSHOT_P_HFLIP:-0.5}"
+P_AFFINE="${FEWSHOT_P_AFFINE:-0.25}"
+LANGUAGE_EVAL="${FEWSHOT_LANGUAGE_EVAL:-1}"
 
 if [[ "$#" -gt 0 ]]; then
   SHOTS=("$@")
@@ -33,6 +36,20 @@ train_manifest() {
   esac
 }
 
+eval_targets() {
+  local dataset="$1"
+  if [[ "$LANGUAGE_EVAL" != "1" ]]; then
+    echo "$dataset"
+    return 0
+  fi
+  case "$dataset" in
+    hmdb51) echo "hmdb51 ucf101" ;;
+    ucf101) echo "ucf101 hmdb51" ;;
+    ssv2) echo "ssv2" ;;
+    *) echo "Unknown dataset: $dataset" >&2; return 1 ;;
+  esac
+}
+
 for dataset in "${DATASETS[@]}"; do
   for shot in "${SHOTS[@]}"; do
     for head_mode in "${HEAD_MODES[@]}"; do
@@ -49,6 +66,8 @@ for dataset in "${DATASETS[@]}"; do
         --manifest "$manifest"
         --out_dir "$out_dir"
         --finetune_head_mode "$head_mode"
+        --p_hflip "$P_HFLIP"
+        --p_affine "$P_AFFINE"
       )
       if [[ -n "$PRETRAINED_CKPT_OVERRIDE" ]]; then
         FINETUNE_ARGS+=(--pretrained_ckpt "$PRETRAINED_CKPT_OVERRIDE")
@@ -66,14 +85,16 @@ for dataset in "${DATASETS[@]}"; do
         exit 1
       fi
 
-      echo
-      echo "Evaluating ${dataset} K=${shot} | head_mode=${head_mode}"
-      "$PYTHON_BIN" eval.py \
-        --config configs/few_shot/eval/common.toml \
-        --config "configs/few_shot/eval/${dataset}.toml" \
-        --ckpt "$ckpt" \
-        --no_clip \
-        --out_dir "$out_dir/eval_selected_ckpt"
+      for eval_dataset in $(eval_targets "$dataset"); do
+        echo
+        echo "Evaluating ${dataset} K=${shot} | head_mode=${head_mode} | target=${eval_dataset}"
+        "$PYTHON_BIN" eval.py \
+          --config configs/few_shot/eval/common.toml \
+          --config "configs/few_shot/eval/${eval_dataset}.toml" \
+          --ckpt "$ckpt" \
+          --no_clip \
+          --out_dir "$out_dir/eval_${eval_dataset}"
+      done
     done
   done
 done
