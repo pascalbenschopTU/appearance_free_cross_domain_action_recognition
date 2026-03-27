@@ -66,11 +66,9 @@ from dataset import (
     collate_rgb_clip,
     VideoMotionDataset,
     collate_video_motion,
-    VideoMHIFramesDataset,
     build_raft_large,
     decode_clip_rgb,
     normalize_rgb_clip,
-    raft_flow_from_paired_frames_batched,
 )
 
 
@@ -437,19 +435,7 @@ def evaluate_one_split(
 
             if mhi is not None:
                 mhi = mhi.to(device, non_blocking=True)
-            if getattr(args, "motion_data_source", "video") == "video" and flow_backend == "raft_large":
-                if raft_model is None:
-                    raise RuntimeError("flow_backend='raft_large' requires a loaded RAFT model.")
-                second = raft_flow_from_paired_frames_batched(
-                    pairs_u8=second,
-                    raft_model=raft_model,
-                    device=device.type if device.type == "cuda" else str(device),
-                    use_amp=bool(raft_amp),
-                    out_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-                )
-                if raft_flow_clip and raft_flow_clip > 0:
-                    second = torch.clamp(second, min=-float(raft_flow_clip), max=float(raft_flow_clip))
-            else:
+            if second is not None
                 second = second.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
@@ -959,6 +945,7 @@ def main():
             embed_dim=embed_dim,
             fuse=fuse,
             dropout=dropout,
+            x3d_variant=str(get_checkpoint_arg(ckpt_args, "x3d_variant", "XS")).upper(),
             use_projection=use_projection,
             dual_projection_heads=dual_projection_heads,
             num_classes=eval_num_classes,
@@ -1093,7 +1080,6 @@ def main():
                     motion_roi_min_area=int(args.motion_roi_min_area),
                     motion_img_resize=motion_img_resize,
                     motion_flow_resize=motion_flow_resize,
-                    motion_resize_mode=motion_resize_mode,
                     motion_crop_mode=motion_eval_crop_mode,
                     num_views=motion_eval_num_views,
                     yolo_model=args.yolo_model,

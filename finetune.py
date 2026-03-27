@@ -364,11 +364,6 @@ def main():
         if args.motion_flow_resize is not None
         else getattr(ckpt_cfg, "motion_flow_resize", None)
     )
-    motion_resize_mode = (
-        args.motion_resize_mode
-        if args.motion_resize_mode is not None
-        else getattr(ckpt_cfg, "motion_resize_mode", "square")
-    )
     motion_train_crop_mode = (
         args.motion_train_crop_mode
         if args.motion_train_crop_mode is not None
@@ -381,7 +376,6 @@ def main():
     )
     args.motion_img_resize = motion_img_resize
     args.motion_flow_resize = motion_flow_resize
-    args.motion_resize_mode = str(motion_resize_mode).lower()
     args.motion_train_crop_mode = str(motion_train_crop_mode).lower()
     args.motion_eval_crop_mode = str(motion_eval_crop_mode).lower()
     args.img_size = img_size
@@ -417,6 +411,7 @@ def main():
     args.use_projection = ckpt_cfg.use_projection
     args.dual_projection_heads = ckpt_cfg.dual_projection_heads
     args.use_nonlinear_projection = ckpt_cfg.use_projection
+    args.x3d_variant = ckpt_cfg.x3d_variant
     train_modality = str(args.train_modality).lower()
     val_modality = str(args.val_modality).lower()
     active_branch = args.active_branch if args.active_branch is not None else ckpt_cfg.active_branch
@@ -489,7 +484,6 @@ def main():
         f"motion_data_source={args.motion_data_source} p_hflip={args.p_hflip} p_affine={args.p_affine} "
         f"diff_threshold={diff_threshold} flow_max_disp={flow_max_disp} fb_params={fb_params} "
         f"motion_img_resize={args.motion_img_resize} motion_flow_resize={args.motion_flow_resize} "
-        f"motion_resize_mode={args.motion_resize_mode} "
         f"motion_train_crop_mode={args.motion_train_crop_mode} motion_eval_crop_mode={args.motion_eval_crop_mode} "
         f"head_mode={head_mode} lambda_clip_ce={getattr(args, 'lambda_clip_ce', 0.0)} "
         f"lambda_ce={getattr(args, 'lambda_ce', 0.0)} text_adapter={resolved_text_adapter_type} "
@@ -532,7 +526,6 @@ def main():
                 motion_roi_min_area=int(args.motion_roi_min_area),
                 motion_img_resize=args.motion_img_resize,
                 motion_flow_resize=args.motion_flow_resize,
-                motion_resize_mode=args.motion_resize_mode,
                 motion_crop_mode=args.motion_train_crop_mode,
                 yolo_model=args.yolo_model,
                 yolo_conf=float(args.yolo_conf),
@@ -611,7 +604,6 @@ def main():
                 motion_roi_min_area=int(args.motion_roi_min_area),
                 motion_img_resize=args.motion_img_resize,
                 motion_flow_resize=args.motion_flow_resize,
-                motion_resize_mode=args.motion_resize_mode,
                 motion_crop_mode=args.motion_eval_crop_mode,
                 yolo_model=args.yolo_model,
                 yolo_conf=float(args.yolo_conf),
@@ -746,6 +738,7 @@ def main():
             embed_dim=embed_dim,
             fuse=fuse,
             dropout=dropout,
+            x3d_variant=ckpt_cfg.x3d_variant,
             use_projection=ckpt_cfg.use_projection,
             dual_projection_heads=ckpt_cfg.dual_projection_heads,
             num_classes=(num_classes if needs_cls_head else 0),

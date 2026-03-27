@@ -250,7 +250,6 @@ def main():
                 flow_normalize=True,
                 motion_img_resize=args.motion_img_resize,
                 motion_flow_resize=args.motion_flow_resize,
-                motion_resize_mode=args.motion_resize_mode,
                 motion_crop_mode=val_motion_crop_mode,
                 num_views=int(args.motion_eval_num_views),
                 out_dtype=data_dtype,
@@ -407,7 +406,6 @@ def main():
     clip_text_bank_raw = None
     embed_target_text_bank_raw = None
     label_target_text_bank_raw = None
-    head_kl_text_bank_raw = None
     embed_target_desc_count = 0
     desc_text_bank = None
     class_multi_positive_targets = None
@@ -451,7 +449,6 @@ def main():
         )
         clip_text_bank_raw = desc_text_bank.text_bank.float().to(device).detach()
         embed_target_text_bank_raw = clip_text_bank_raw
-        head_kl_text_bank_raw = embed_target_text_bank_raw
         embed_target_desc_count = int(clip_text_bank_raw.shape[0])
         train_desc_match_resolver = build_description_match_resolver(
             csv_path=args.description_match_csv,
@@ -545,7 +542,6 @@ def main():
                 apply_templates_to_class_descriptions=args.apply_templates_to_class_descriptions,
             )
             embed_target_text_bank_raw = desc_text_bank.text_bank.float().to(device).detach()
-            head_kl_text_bank_raw = embed_target_text_bank_raw
             embed_target_desc_count = int(embed_target_text_bank_raw.shape[0])
             train_desc_match_resolver = build_description_match_resolver(
                 csv_path=args.description_match_csv,
@@ -566,8 +562,6 @@ def main():
     if embed_target_text_bank_raw is None:
         embed_target_text_bank_raw = class_proto_text_bank_raw if args.text_supervision_mode == "class_multi_positive" else clip_text_bank_raw
         embed_target_desc_count = int(embed_target_text_bank_raw.shape[0])
-    if head_kl_text_bank_raw is None:
-        head_kl_text_bank_raw = embed_target_text_bank_raw if embed_target_text_bank_raw is not None else class_proto_text_bank_raw
     if args.embed_target_label_mix_weight > 0:
         if args.text_bank_backend != "clip":
             raise ValueError("--embed_target_label_mix_weight requires --text_bank_backend clip.")
@@ -596,8 +590,6 @@ def main():
 
     if args.lambda_clip_ce < 0:
         raise ValueError("--lambda_clip_ce must be >= 0")
-    if args.lambda_embed_l2 < 0:
-        raise ValueError("--lambda_embed_l2 must be >= 0")
     if args.lambda_embed_cos < 0:
         raise ValueError("--lambda_embed_cos must be >= 0")
     if args.lambda_rep_mix < 0:
@@ -612,16 +604,10 @@ def main():
         raise ValueError("--rep_mix_alpha must be > 0 when --lambda_rep_mix > 0")
     if args.rep_mix_semantic_topk <= 0:
         raise ValueError("--rep_mix_semantic_topk must be >= 1")
-    if args.lambda_head_kl < 0:
-        raise ValueError("--lambda_head_kl must be >= 0")
-    if args.head_kl_temperature <= 0:
-        raise ValueError("--head_kl_temperature must be > 0")
     if not (0.0 <= args.embed_target_label_mix_weight <= 1.0):
         raise ValueError("--embed_target_label_mix_weight must be in [0, 1]")
     if args.lambda_ce > 0 and args.model in ("i3d", "x3d") and not args.use_projection:
         raise ValueError("--lambda_ce > 0 requires --use_projection to enable cls_head.")
-    if args.lambda_head_kl > 0 and not args.dual_projection_heads:
-        raise ValueError("--lambda_head_kl > 0 requires --dual_projection_heads.")
     if args.embed_target_label_mix_weight > 0 and not (
         args.text_supervision_mode == "desc_soft_margin" or args.embed_target_mode == "matched_desc"
     ):
@@ -631,15 +617,13 @@ def main():
         )
     if (
         args.lambda_clip_ce
-        + args.lambda_embed_l2
         + args.lambda_embed_cos
         + args.lambda_ce
         + args.lambda_rep_mix
-        + args.lambda_head_kl
     ) <= 0:
         raise ValueError(
             "At least one loss weight must be > 0 among "
-            "--lambda_clip_ce, --lambda_embed_l2, --lambda_embed_cos, --lambda_ce, --lambda_rep_mix, --lambda_head_kl."
+            "--lambda_clip_ce, --lambda_embed_cos, --lambda_clip_kd, --lambda_sem_rep, --lambda_ce, --lambda_rep_mix."
         )
 
     # Student model
@@ -667,6 +651,7 @@ def main():
             embed_dim=args.embed_dim,
             fuse=args.fuse,
             dropout=args.dropout,
+            x3d_variant=args.x3d_variant,
             active_branch=args.active_branch,
             use_projection=args.use_projection,
             dual_projection_heads=args.dual_projection_heads,
@@ -745,9 +730,7 @@ def main():
 
     global_running_total_loss = 0.0
     global_running_clip_loss = 0.0
-    global_running_embed_l2 = 0.0
     global_running_embed_cos = 0.0
-    global_running_head_kl = 0.0
     global_running_rep_mix = 0.0
     global_running_ce_loss = 0.0
     global_running_text_adapter_reg = 0.0
@@ -760,9 +743,7 @@ def main():
             text_adapter.train()
         running_total_loss = 0.0
         running_clip_loss = 0.0
-        running_embed_l2 = 0.0
         running_embed_cos = 0.0
-        running_head_kl = 0.0
         running_rep_mix = 0.0
         running_ce_loss = 0.0
         running_text_adapter_reg = 0.0
@@ -852,7 +833,6 @@ def main():
                 clip_text_bank = adapt_bank(clip_text_bank_raw)
                 class_proto_text_bank = adapt_bank(class_proto_text_bank_raw)
                 embed_target_text_bank_loss = adapt_bank(embed_target_text_bank_raw)
-                head_kl_text_bank_loss = adapt_bank(head_kl_text_bank_raw)
                 label_target_text_bank_loss = (
                     adapt_bank(label_target_text_bank_raw)
                     if label_target_text_bank_raw is not None
@@ -870,7 +850,6 @@ def main():
                         (clip_text_bank_raw, clip_text_bank),
                         (class_proto_text_bank_raw, class_proto_text_bank),
                         (embed_target_text_bank_raw, embed_target_text_bank_loss),
-                        (head_kl_text_bank_raw, head_kl_text_bank_loss),
                         (label_target_text_bank_raw, label_target_text_bank_loss),
                     ):
                         if raw_bank is None or adapted_bank is None:
@@ -918,7 +897,7 @@ def main():
                     loss_fuse = torch.zeros((), device=emb_fuse_clip.device, dtype=emb_fuse_clip.dtype)
                     loss_clip = loss_fuse
 
-                if args.lambda_embed_l2 > 0 or args.lambda_embed_cos > 0:
+                if args.lambda_embed_cos > 0:
                     if args.text_supervision_mode == "desc_soft_margin" or args.embed_target_mode == "matched_desc":
                         target_emb = matched_desc_onehot.to(dtype=embed_target_text_bank_loss.dtype) @ embed_target_text_bank_loss
                     elif labels_soft_class is None:
@@ -935,45 +914,11 @@ def main():
                             label_emb = labels_soft_class.to(dtype=label_target_text_bank_loss.dtype) @ label_target_text_bank_loss
                         mix_w = float(args.embed_target_label_mix_weight)
                         target_emb = (1.0 - mix_w) * target_emb + mix_w * label_emb
-                    pred_emb = emb_fuse_embed.float()
-                    pred_emb = F.normalize(pred_emb, dim=-1)
+                    pred_emb = F.normalize(emb_fuse_embed.float(), dim=-1)
                     target_emb = F.normalize(target_emb, dim=-1)
-                    
-                    if args.lambda_embed_l2 > 0:
-                        diff = pred_emb - target_emb
-                        loss_embed_l2 = (diff * diff).sum(dim=-1).mean()
-                    else:
-                        loss_embed_l2 = torch.zeros((), device=emb_fuse_embed.device, dtype=pred_emb.dtype)
-                    if args.lambda_embed_cos > 0:
-                        loss_embed_cos = (1.0 - F.cosine_similarity(pred_emb, target_emb, dim=-1)).mean()
-                    else:
-                        loss_embed_cos = torch.zeros((), device=emb_fuse_embed.device, dtype=pred_emb.dtype)
+                    loss_embed_cos = (1.0 - F.cosine_similarity(pred_emb, target_emb, dim=-1)).mean()
                 else:
-                    loss_embed_l2 = torch.zeros((), device=emb_fuse_embed.device, dtype=torch.float32)
                     loss_embed_cos = torch.zeros((), device=emb_fuse_embed.device, dtype=torch.float32)
-
-                if args.lambda_head_kl > 0:
-                    logits_head_clip_kl = logits_from_emb(
-                        emb_fuse_clip,
-                        head_kl_text_bank_loss,
-                        temperature=args.head_kl_temperature,
-                    )
-                    logits_head_embed_kl = logits_from_emb(
-                        emb_fuse_embed,
-                        head_kl_text_bank_loss,
-                        temperature=args.head_kl_temperature,
-                    )
-                    log_p = F.log_softmax(logits_head_clip_kl, dim=-1)
-                    log_q = F.log_softmax(logits_head_embed_kl, dim=-1)
-                    p = log_p.exp()
-                    q = log_q.exp()
-                    temp_sq = float(args.head_kl_temperature) ** 2
-                    loss_head_kl = 0.5 * temp_sq * (
-                        F.kl_div(log_p, q, reduction="batchmean") +
-                        F.kl_div(log_q, p, reduction="batchmean")
-                    )
-                else:
-                    loss_head_kl = torch.zeros((), device=emb_fuse_clip.device, dtype=torch.float32)
 
                 if args.lambda_ce > 0:
                     logits_ce = out.get("logits_cls", None)
@@ -1002,12 +947,10 @@ def main():
                     loss_rep_mix = torch.zeros((), device=emb_fuse.device, dtype=emb_fuse.dtype)
 
                 loss = (
-                    args.lambda_clip_ce * loss_clip
-                    + args.lambda_embed_l2 * loss_embed_l2
+                    args.lambda_clip_ce  * loss_clip
                     + args.lambda_embed_cos * loss_embed_cos
-                    + args.lambda_head_kl * loss_head_kl
-                    + args.lambda_rep_mix * loss_rep_mix
-                    + args.lambda_ce * loss_ce
+                    + args.lambda_rep_mix  * loss_rep_mix
+                    + args.lambda_ce       * loss_ce
                     + loss_text_adapter_reg
                 )
 
@@ -1032,9 +975,7 @@ def main():
                         writer.add_scalar("loss/total", float(loss.item()), global_step)
                         writer.add_scalar("loss/clip", float(loss_clip.item()), global_step)
                         writer.add_scalar("loss/fuse", float(loss_fuse.item()), global_step)
-                        writer.add_scalar("loss/embed_l2", float(loss_embed_l2.item()), global_step)
                         writer.add_scalar("loss/embed_cos", float(loss_embed_cos.item()), global_step)
-                        writer.add_scalar("loss/head_kl", float(loss_head_kl.item()), global_step)
                         writer.add_scalar("loss/rep_mix", float(loss_rep_mix.item()), global_step)
                         writer.add_scalar("loss/ce", float(loss_ce.item()), global_step)
                         writer.add_scalar("loss/text_adapter_reg", float(loss_text_adapter_reg.item()), global_step)
@@ -1045,18 +986,14 @@ def main():
 
                 running_total_loss += float(loss.item())
                 running_clip_loss += float(loss_clip.item())
-                running_embed_l2 += float(loss_embed_l2.item())
                 running_embed_cos += float(loss_embed_cos.item())
-                running_head_kl += float(loss_head_kl.item())
                 running_rep_mix += float(loss_rep_mix.item())
                 running_ce_loss += float(loss_ce.item())
                 running_text_adapter_reg += float(loss_text_adapter_reg.item())
                 n_logs += 1
                 global_running_total_loss += float(loss.item())
                 global_running_clip_loss += float(loss_clip.item())
-                global_running_embed_l2 += float(loss_embed_l2.item())
                 global_running_embed_cos += float(loss_embed_cos.item())
-                global_running_head_kl += float(loss_head_kl.item())
                 global_running_rep_mix += float(loss_rep_mix.item())
                 global_running_ce_loss += float(loss_ce.item())
                 global_running_text_adapter_reg += float(loss_text_adapter_reg.item())
@@ -1067,9 +1004,7 @@ def main():
                     elapsed = time.time() - start_time
                     running_avg_total = global_running_total_loss / max(global_n_logs, 1)
                     running_avg_clip = global_running_clip_loss / max(global_n_logs, 1)
-                    running_avg_embed_l2 = global_running_embed_l2 / max(global_n_logs, 1)
                     running_avg_embed_cos = global_running_embed_cos / max(global_n_logs, 1)
-                    running_avg_head_kl = global_running_head_kl / max(global_n_logs, 1)
                     running_avg_rep_mix = global_running_rep_mix / max(global_n_logs, 1)
                     running_avg_ce = global_running_ce_loss / max(global_n_logs, 1)
                     running_avg_text_adapter_reg = global_running_text_adapter_reg / max(global_n_logs, 1)
@@ -1077,9 +1012,7 @@ def main():
                         f"[ep {epoch:03d} {step_in_epoch:04d}/{steps_per_epoch:04d} step {global_step:06d} lr {learning_rate:.6f}] "
                         f"loss={running_avg_total:.4f} "
                         f"clip={running_avg_clip:.4f} "
-                        f"embed_l2={running_avg_embed_l2:.4f} "
                         f"embed_cos={running_avg_embed_cos:.4f} "
-                        f"head_kl={running_avg_head_kl:.4f} "
                         f"rep_mix={running_avg_rep_mix:.4f} "
                         f"ce={running_avg_ce:.4f} "
                         f"text_reg={running_avg_text_adapter_reg:.4f} "
@@ -1116,9 +1049,7 @@ def main():
                 f"[EPOCH {epoch:03d}] "
                 f"loss={running_total_loss/n_logs:.4f} "
                 f"clip={running_clip_loss/n_logs:.4f} "
-                f"embed_l2={running_embed_l2/n_logs:.4f} "
                 f"embed_cos={running_embed_cos/n_logs:.4f} "
-                f"head_kl={running_head_kl/n_logs:.4f} "
                 f"rep_mix={running_rep_mix/n_logs:.4f} "
                 f"ce={running_ce_loss/n_logs:.4f} "
                 f"text_reg={running_text_adapter_reg/n_logs:.4f}"

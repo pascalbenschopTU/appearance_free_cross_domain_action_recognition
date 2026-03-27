@@ -341,6 +341,7 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
     model.add_argument("--embed_dim", type=int, default=512)
     model.add_argument("--fuse", type=str, default="avg_then_proj", choices=["avg_then_proj", "concat"])
     model.add_argument("--model", type=str, default="i3d", choices=["i3d", "x3d"])
+    model.add_argument("--x3d_variant", type=str.upper, default="XS", choices=["XS", "S", "M", "L"])
     model.add_argument("--dropout", type=float, default=0.0)
     model.add_argument("--use_stems", action="store_true")
     model.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
@@ -478,12 +479,6 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
         help="Weight for CLIP-style CE over text bank similarities.",
     )
     text.add_argument(
-        "--lambda_embed_l2",
-        type=float,
-        default=0.0,
-        help="Weight for embedding regression using squared L2 distance against target class text embeddings.",
-    )
-    text.add_argument(
         "--lambda_embed_cos",
         type=float,
         default=0.0,
@@ -494,18 +489,6 @@ def build_train_parser(default_device: str) -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Weight for auxiliary CE loss using a linear head on fused embeddings.",
-    )
-    text.add_argument(
-        "--lambda_head_kl",
-        type=float,
-        default=0.0,
-        help="Weight for symmetric KL between dual projection-head description distributions.",
-    )
-    text.add_argument(
-        "--head_kl_temperature",
-        type=float,
-        default=1.0,
-        help="Softmax temperature for dual-head KL over the description bank.",
     )
     text.add_argument(
         "--unfreeze_logit_scale",
@@ -628,8 +611,8 @@ def build_privacy_pa_hmdb51_parser(default_device: str) -> argparse.ArgumentPars
     motion.add_argument("--fb_poly_n", type=int, default=5)
     motion.add_argument("--fb_poly_sigma", type=float, default=1.2)
     motion.add_argument("--fb_flags", type=int, default=0)
-    motion.add_argument("--motion_img_resize", type=int, default=224)
-    motion.add_argument("--motion_flow_resize", type=int, default=112)
+    motion.add_argument("--motion_img_resize", type=int, default=256)
+    motion.add_argument("--motion_flow_resize", type=int, default=128)
     motion.add_argument(
         "--motion_resize_mode",
         type=str,
@@ -658,6 +641,8 @@ def build_privacy_pa_hmdb51_parser(default_device: str) -> argparse.ArgumentPars
     model.add_argument("--use_stems", action="store_true")
     model.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
     model.add_argument("--class_weight_mode", type=str, default="effective_sample_count", choices=["none", "inverse_freq", "sqrt_inverse_freq", "effective_sample_count", "effective_num"])
+    model.add_argument("--class_aware_sampling", action="store_true", default=False,
+                       help="Use WeightedRandomSampler to oversample minority-class videos (overrides RepeatedVideoTemporalSampler).")
     model.add_argument("--resnet_imagenet_pretrained", action="store_true")
     model.add_argument("--no_resnet_imagenet_pretrained", dest="resnet_imagenet_pretrained", action="store_false")
     parser.set_defaults(resnet_imagenet_pretrained=True)

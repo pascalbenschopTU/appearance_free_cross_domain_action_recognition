@@ -219,7 +219,7 @@ def _crop_motion_streams(
     fallback_mode: str = "random",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     mode = str(mode).lower()
-    if mode not in ("random", "motion"):
+    if mode not in ("random", "motion", "center"):
         raise ValueError(f"Unsupported spatial crop mode: {mode}")
 
     mhi = _pad_spatial_min(mhi, target_mhi_hw, target_mhi_hw)
@@ -316,7 +316,7 @@ class MotionTwoStreamZstdDataset(Dataset):
         self.affine_scale = tuple(affine_scale)
         self.affine_shear = tuple(affine_shear)
         self.spatial_crop_mode = str(spatial_crop_mode).lower()
-        if self.spatial_crop_mode not in ("random", "motion"):
+        if self.spatial_crop_mode not in ("random", "motion", "center"):
             raise ValueError(
                 f"spatial_crop_mode must be one of: random, motion (got {spatial_crop_mode})"
             )
@@ -353,12 +353,7 @@ class MotionTwoStreamZstdDataset(Dataset):
             rng = np.random.default_rng(
                 self.seed + 1000003 * self.epoch + idx + 7919 * int(sample_offset)
             )
-            if mhi.numel() == 0 or mhi.ndim != 4:
-                C = len(self.mhi_windows)
-                mhi = torch.zeros(
-                    (C, self.mhi_frames, self.img_size, self.img_size),
-                    dtype=self.out_dtype,
-                )
+
             Tm = mhi.shape[1]
             Tf = second.shape[1]
             if Tm >= self.mhi_frames and Tf >= self.flow_frames:
@@ -369,6 +364,15 @@ class MotionTwoStreamZstdDataset(Dataset):
                 )
                 second = second[:, torch.as_tensor(second_sel, dtype=torch.long)]
                 mhi  = mhi[:,  torch.as_tensor(mhi_sel,  dtype=torch.long)]
+
+            mhi, second = _crop_motion_streams(
+                mhi,
+                second,
+                target_mhi_hw=self.img_size,
+                target_second_hw=self.flow_hw,
+                rng=rng,
+                mode=self.spatial_crop_mode,
+            )
 
             mhi, second = random_motion_augment(
                 mhi, second, rng,
@@ -386,14 +390,6 @@ class MotionTwoStreamZstdDataset(Dataset):
                 shear_range=self.affine_shear,
             )
 
-            mhi, second = _crop_motion_streams(
-                mhi,
-                second,
-                target_mhi_hw=self.img_size,
-                target_second_hw=self.flow_hw,
-                rng=rng,
-                mode=self.spatial_crop_mode,
-            )
             mhi = mhi.to(dtype=self.out_dtype)
             second = second.to(dtype=self.out_dtype)
 
@@ -649,29 +645,17 @@ def _multi_view_motion_crop_anchors(crop_mode: str, num_views: int) -> List[Opti
 
 def _resize_motion_frame(
     frame: np.ndarray,
-    *,
-    resize_hw: Optional[int],
     out_hw: int,
-    resize_mode: str,
 ) -> np.ndarray:
-    if resize_hw is None:
-        resize_hw = int(out_hw)
-    if resize_hw <= 0 or out_hw <= 0:
-        raise ValueError(f"resize/out sizes must be > 0, got resize={resize_hw}, out={out_hw}")
+    if out_hw <= 0:
+        raise ValueError(f"out sizes must be > 0, got out={out_hw}")
 
     h, w = frame.shape[:2]
-    if h <= 0 or w <= 0:
-        raise ValueError(f"Invalid frame shape for resize: {frame.shape}")
-
     min_side = min(h, w)
-    resize_hw_eff = int(resize_hw)
     if min_side >= out_hw:
-        resize_hw_eff = min(resize_hw_eff, min_side)
+        resize_hw_eff = min(out_hw, min_side)
     else:
         resize_hw_eff = out_hw
-
-    if resize_mode == "square":
-        return cv2.resize(frame, (resize_hw_eff, resize_hw_eff), interpolation=cv2.INTER_AREA)
 
     scale = float(resize_hw_eff) / float(min_side)
     new_h = max(1, int(round(h * scale)))
@@ -684,54 +668,14 @@ def _resize_and_crop_square(
     *,
     resize_hw: Optional[int],
     out_hw: int,
-    resize_mode: str,
-    crop_mode: str,
     crop_anchor: Optional[Tuple[float, float]],
 ) -> np.ndarray:
-    if resize_hw is None:
-        resize_hw = int(out_hw)
-    if resize_hw <= 0 or out_hw <= 0:
-        raise ValueError(f"resize/out sizes must be > 0, got resize={resize_hw}, out={out_hw}")
-
-    h, w = frame.shape[:2]
-    if h <= 0 or w <= 0:
-        raise ValueError(f"Invalid frame shape for resize: {frame.shape}")
-
-    # Avoid enlarging frames beyond their native spatial size just to crop back
-    # down again; only upscale when the source is smaller than the model input.
-    min_side = min(h, w)
-    resize_hw_eff = int(resize_hw)
-    if min_side >= out_hw:
-        resize_hw_eff = min(resize_hw_eff, min_side)
-    else:
-        resize_hw_eff = out_hw
-
-    if resize_mode == "square":
-        resized = cv2.resize(frame, (resize_hw_eff, resize_hw_eff), interpolation=cv2.INTER_AREA)
-        if resize_hw_eff == out_hw:
-            return resized
-        if crop_mode == "none":
-            return cv2.resize(resized, (out_hw, out_hw), interpolation=cv2.INTER_AREA)
-        if resize_hw_eff < out_hw:
-            raise ValueError(
-                f"motion crop mode '{crop_mode}' requires resize >= output, got resize={resize_hw_eff}, out={out_hw}"
-            )
-        max_offset_x = resize_hw_eff - out_hw
-        max_offset_y = resize_hw_eff - out_hw
-    else:
-        scale = float(resize_hw_eff) / float(min_side)
-        new_h = max(1, int(round(h * scale)))
-        new_w = max(1, int(round(w * scale)))
-        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        if crop_mode == "none":
-            crop_mode = "center"
-        if new_h < out_hw or new_w < out_hw:
-            raise ValueError(
-                f"motion resize mode '{resize_mode}' requires resized frame >= output. "
-                f"Got resized=({new_h},{new_w}), out={out_hw}"
-            )
-        max_offset_x = new_w - out_hw
-        max_offset_y = new_h - out_hw
+    # First resize to resize_hw which is larger than out_hw
+    resized = _resize_motion_frame(frame, out_hw=resize_hw)
+    new_h, new_w = resized.shape[:2]
+    
+    max_offset_x = new_w - out_hw
+    max_offset_y = new_h - out_hw
 
     anchor_x, anchor_y = (0.5, 0.5) if crop_anchor is None else crop_anchor
     anchor_x = float(np.clip(anchor_x, 0.0, 1.0))
@@ -759,8 +703,7 @@ def compute_mhi_and_flow_stream(
     roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
     motion_img_resize: Optional[int] = None,
     motion_flow_resize: Optional[int] = None,
-    motion_resize_mode: str = "square",
-    motion_crop_mode: str = "none",
+    motion_crop_mode = None,
     crop_anchor: Optional[Tuple[float, float]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -774,12 +717,6 @@ def compute_mhi_and_flow_stream(
         raise ValueError(f"Unsupported flow_backend: {flow_backend}")
     motion_crop_mode = str(motion_crop_mode).lower()
     crop_anchor = crop_anchor if crop_anchor is not None else _sample_motion_crop_anchor(motion_crop_mode)
-    motion_guided_crop = motion_crop_mode == "motion"
-    use_legacy_resize_path = (
-        motion_crop_mode == "none"
-        and motion_img_resize == img_size
-        and motion_flow_resize == flow_hw
-    )
 
     C = len(mhi_windows)
     dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
@@ -827,39 +764,18 @@ def compute_mhi_and_flow_stream(
             break
 
         frame_src = crop_frame_by_roi(frame_bgr, roi_xyxy)
-        if motion_guided_crop:
-            frame224 = _resize_motion_frame(
-                frame_src,
-                resize_hw=motion_img_resize,
-                out_hw=img_size,
-                resize_mode=motion_resize_mode,
-            )
-            frame112 = _resize_motion_frame(
-                frame_src,
-                resize_hw=motion_flow_resize,
-                out_hw=flow_hw,
-                resize_mode=motion_resize_mode,
-            )
-        elif use_legacy_resize_path:
-            frame224 = cv2.resize(frame_src, (img_size, img_size), interpolation=cv2.INTER_AREA)
-            frame112 = cv2.resize(frame224, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
-        else:
-            frame224 = _resize_and_crop_square(
-                frame_src,
-                resize_hw=motion_img_resize,
-                out_hw=img_size,
-                resize_mode=motion_resize_mode,
-                crop_mode=motion_crop_mode,
-                crop_anchor=crop_anchor,
-            )
-            frame112 = _resize_and_crop_square(
-                frame_src,
-                resize_hw=motion_flow_resize,
-                out_hw=flow_hw,
-                resize_mode=motion_resize_mode,
-                crop_mode=motion_crop_mode,
-                crop_anchor=crop_anchor,
-            )
+        frame224 = _resize_and_crop_square(
+            frame_src,
+            resize_hw=motion_img_resize,
+            out_hw=img_size,
+            crop_anchor=crop_anchor,
+        )
+        frame112 = _resize_and_crop_square(
+            frame_src,
+            resize_hw=motion_flow_resize,
+            out_hw=flow_hw,
+            crop_anchor=crop_anchor,
+        )
 
         gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
         gray112 = cv2.cvtColor(frame112, cv2.COLOR_BGR2GRAY)
@@ -891,7 +807,6 @@ def compute_mhi_and_flow_stream(
                 np.clip(flow, -flow_max_disp, flow_max_disp, out=flow)
                 if flow_normalize:
                     flow = flow / float(flow_max_disp)
-            # flow = cv2.resize(flow, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
             flows[:, i] = torch.from_numpy(flow).permute(2, 0, 1).float()
 
         prev_gray224 = gray224
@@ -900,17 +815,6 @@ def compute_mhi_and_flow_stream(
     cap.release()
     if mhi_out is None or flows is None:
         raise RuntimeError(f"Failed to decode frames for motion stream: {path}")
-    if motion_guided_crop:
-        mhi_out, flows = _crop_motion_streams(
-            mhi_out,
-            flows,
-            target_mhi_hw=img_size,
-            target_second_hw=flow_hw,
-            rng=np.random.default_rng(0),
-            mode="motion",
-            jitter_frac=0.0,
-            fallback_mode="center",
-        )
     return mhi_out.to(out_dtype), flows.to(out_dtype)
 
 class VideoMotionDataset(Dataset):
@@ -934,7 +838,6 @@ class VideoMotionDataset(Dataset):
         motion_roi_min_area: int = 64,
         motion_img_resize: Optional[int] = None,
         motion_flow_resize: Optional[int] = None,
-        motion_resize_mode: str = "square",
         motion_crop_mode: str = "none",
         num_views: int = 1,
         yolo_model: str = "yolo11n.pt",
@@ -968,7 +871,6 @@ class VideoMotionDataset(Dataset):
         self.motion_roi_min_area = int(motion_roi_min_area)
         self.motion_img_resize = motion_img_resize
         self.motion_flow_resize = motion_flow_resize
-        self.motion_resize_mode = motion_resize_mode
         self.motion_crop_mode = motion_crop_mode
         self.num_views = max(1, int(num_views))
         self.yolo_model = str(yolo_model)
@@ -1035,7 +937,6 @@ class VideoMotionDataset(Dataset):
                     roi_xyxy=roi_xyxy,
                     motion_img_resize=self.motion_img_resize,
                     motion_flow_resize=self.motion_flow_resize,
-                    motion_resize_mode=self.motion_resize_mode,
                     motion_crop_mode=self.motion_crop_mode,
                     crop_anchor=crop_anchor,
                     out_dtype=self.out_dtype,
@@ -1061,7 +962,8 @@ class VideoMotionDataset(Dataset):
             else:
                 mhi = torch.stack(mhi_views, dim=0)
                 flow = torch.stack(flow_views, dim=0)
-        except Exception:
+        except Exception as e:
+            print(f"Exception: {e}")
             C = len(self.mhi_windows)
             if self.num_views == 1:
                 mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_dtype)
@@ -1104,7 +1006,15 @@ def spaced_end_indices(num_frames: int, num_pairs: int) -> torch.Tensor:
 
 def aligned_indices_from_superset(flow_end_idx: torch.Tensor, mhi_frames: int) -> torch.Tensor:
     """
-    Select mhi_frames evenly from the flow endpoints so MHI snapshots align in time.
+    Select mhi_frames evenly from the flow endpoints so=torch.long)
+    pick = torch.linspace(0, n - 1, steps=mhi_frames)
+    pick   MHI snround(pick).apsh().clamp_(0, n - 1)
+    pick = torch.maximum(pick, torch.cat([pick[:1], pick[:-1]]))
+    return flow_end_idx.index_select(0, pick.cpu()ots align in time.
+    pick = torch.maximum(pick, torch.cat([pick[:1], pick[:-1]]))
+    return flow_end_idx.index_select(0, pick.cpu())
+    pick = torch.maximum(pick, torch.cat([pick[:1], pick[:-1]]))
+    return flow_end_idx.index_select(0, pick.cpu())
     """
     n = int(flow_end_idx.numel())
     if n <= 0 or mhi_frames <= 0:
@@ -1113,341 +1023,3 @@ def aligned_indices_from_superset(flow_end_idx: torch.Tensor, mhi_frames: int) -
     pick = torch.round(pick).long().clamp_(0, n - 1)
     pick = torch.maximum(pick, torch.cat([pick[:1], pick[:-1]]))
     return flow_end_idx.index_select(0, pick.cpu())
-
-
-# ----------------------------
-# CPU compute: MHI + paired frames (uint8)
-# ----------------------------
-
-def compute_mhi_and_paired_frames(
-    path: str,
-    *,
-    mhi_windows: List[int],
-    diff_threshold: float,
-    img_size: int,      # e.g. 224 (for MHI)
-    mhi_frames: int,    # number of MHI snapshots to output
-    flow_hw: int,       # e.g. 112 or 160; MUST be divisible by 8 for RAFT
-    flow_pairs: int,    # number of (t-1,t) pairs
-    motion_img_resize: Optional[int] = None,
-    motion_flow_resize: Optional[int] = None,
-    motion_resize_mode: str = "square",
-    motion_crop_mode: str = "none",
-    crop_anchor: Optional[Tuple[float, float]] = None,
-    out_mhi_dtype=torch.float16,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-      mhi_out:   (C, mhi_frames, img_size, img_size) float
-      pairs_u8:  (flow_pairs, 2, 3, flow_hw, flow_hw) uint8 RGB
-    All returned tensors are CPU.
-    """
-    assert flow_hw % 8 == 0, "flow_hw must be divisible by 8 to avoid padding in RAFT"
-    motion_crop_mode = str(motion_crop_mode).lower()
-    crop_anchor = crop_anchor if crop_anchor is not None else _sample_motion_crop_anchor(motion_crop_mode)
-    motion_guided_crop = motion_crop_mode == "motion"
-    use_legacy_resize_path = (
-        motion_crop_mode == "none"
-        and motion_img_resize == img_size
-        and motion_flow_resize == flow_hw
-    )
-
-    C = len(mhi_windows)
-    dur = torch.tensor([max(1, w) for w in mhi_windows], dtype=torch.float32)  # (C,)
-    mhi = None
-    mhi_out = None
-
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {path}")
-
-    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if num_frames <= 1:
-        cap.release()
-        raise RuntimeError(f"Video has <=1 frames: {path}")
-
-    flow_end = spaced_end_indices(num_frames, flow_pairs)             # (P,)
-    mhi_idx = aligned_indices_from_superset(flow_end, mhi_frames)     # (mhi_frames,)
-
-    # For each endpoint t, we need frames t-1 and t
-    flow_start = (flow_end - 1).clamp(min=0)
-    need_idx = torch.unique(torch.cat([flow_start, flow_end, mhi_idx]).cpu()).tolist()
-    need_set = set(int(x) for x in need_idx)
-
-    # Where to write MHI snapshots
-    mhi_set = set(int(x) for x in mhi_idx.tolist())
-    mhi_pos = {int(t): j for j, t in enumerate(mhi_idx.tolist())}
-
-    # Store resized RGB frames for RAFT in a dict: t -> CHW uint8
-    frame_store = {}
-
-    prev_gray224 = None
-    t = -1
-    last_needed = int(max(int(flow_end[-1].item()), int(mhi_idx[-1].item())))
-
-    while True:
-        ok, frame_bgr = cap.read()
-        if not ok:
-            break
-        t += 1
-        if t > last_needed:
-            break
-
-        if motion_guided_crop:
-            frame224 = _resize_motion_frame(
-                frame_bgr,
-                resize_hw=motion_img_resize,
-                out_hw=img_size,
-                resize_mode=motion_resize_mode,
-            )
-            frame_flow = _resize_motion_frame(
-                frame_bgr,
-                resize_hw=motion_flow_resize,
-                out_hw=flow_hw,
-                resize_mode=motion_resize_mode,
-            )
-        elif use_legacy_resize_path:
-            frame224 = cv2.resize(frame_bgr, (img_size, img_size), interpolation=cv2.INTER_AREA)
-            frame_flow = cv2.resize(frame_bgr, (flow_hw, flow_hw), interpolation=cv2.INTER_AREA)
-        else:
-            frame224 = _resize_and_crop_square(
-                frame_bgr,
-                resize_hw=motion_img_resize,
-                out_hw=img_size,
-                resize_mode=motion_resize_mode,
-                crop_mode=motion_crop_mode,
-                crop_anchor=crop_anchor,
-            )
-            frame_flow = _resize_and_crop_square(
-                frame_bgr,
-                resize_hw=motion_flow_resize,
-                out_hw=flow_hw,
-                resize_mode=motion_resize_mode,
-                crop_mode=motion_crop_mode,
-                crop_anchor=crop_anchor,
-            )
-        gray224 = cv2.cvtColor(frame224, cv2.COLOR_BGR2GRAY)
-        if mhi is None:
-            mhi_h, mhi_w = gray224.shape[:2]
-            mhi = torch.zeros((C, mhi_h, mhi_w), dtype=torch.float32)
-            mhi_out = torch.zeros((C, mhi_frames, mhi_h, mhi_w), dtype=torch.float32)
-
-        if prev_gray224 is not None:
-            g_cur = torch.from_numpy(gray224).float()
-            g_prev = torch.from_numpy(prev_gray224).float()
-            diff = (g_cur - g_prev).abs()
-            motion = (diff > diff_threshold).float().unsqueeze(0)  # (1,H,W)
-
-            mhi = (mhi - 1.0).clamp_(min=0.0)
-            mhi = torch.where(motion > 0, dur.view(C, 1, 1).expand_as(mhi), mhi)
-            mhi = torch.minimum(mhi, dur.view(C, 1, 1))
-
-        if t in mhi_set:
-            j = mhi_pos[t]
-            mhi_out[:, j] = mhi / dur.view(C, 1, 1)
-
-        # RAFT frames at flow_hw (RGB uint8, CHW)
-        if t in need_set:
-            fr = cv2.cvtColor(frame_flow, cv2.COLOR_BGR2RGB)
-            frame_store[t] = torch.from_numpy(fr).permute(2, 0, 1).contiguous()  # (3,H,W) u8
-
-        prev_gray224 = gray224
-
-    cap.release()
-    if mhi_out is None:
-        raise RuntimeError(f"Failed to decode frames for motion stream: {path}")
-
-    # Assemble pairs in order: (t-1, t) for each flow_end
-    if frame_store:
-        sample_frame = next(iter(frame_store.values()))
-        pair_h, pair_w = int(sample_frame.shape[-2]), int(sample_frame.shape[-1])
-    else:
-        pair_h = pair_w = flow_hw
-    pairs_u8 = torch.zeros((flow_pairs, 2, 3, pair_h, pair_w), dtype=torch.uint8)
-    for i, t_end in enumerate(flow_end.tolist()):
-        t_end = int(t_end)
-        t_start = int(t_end - 1)
-        if t_start in frame_store:
-            pairs_u8[i, 0] = frame_store[t_start]
-        if t_end in frame_store:
-            pairs_u8[i, 1] = frame_store[t_end]
-
-    if motion_guided_crop:
-        mhi_out = _pad_spatial_min(mhi_out, img_size, img_size)
-        pairs_u8 = _pad_spatial_min(pairs_u8, flow_hw, flow_hw)
-        motion_map = mhi_out.to(torch.float32).sum(dim=(0, 1)).cpu().numpy()
-        ref_h, ref_w = int(mhi_out.shape[-2]), int(mhi_out.shape[-1])
-        rng = np.random.default_rng(0)
-        top_mhi = _resolve_crop_start(
-            ref_h,
-            img_size,
-            rng,
-            "motion",
-            motion_map.sum(axis=1),
-            jitter_frac=0.0,
-            fallback_mode="center",
-        )
-        left_mhi = _resolve_crop_start(
-            ref_w,
-            img_size,
-            rng,
-            "motion",
-            motion_map.sum(axis=0),
-            jitter_frac=0.0,
-            fallback_mode="center",
-        )
-        mhi_out = mhi_out[:, :, top_mhi:top_mhi + img_size, left_mhi:left_mhi + img_size].contiguous()
-        pairs_u8 = _crop_aligned_spatial_tensor(
-            pairs_u8,
-            top_ref=top_mhi,
-            left_ref=left_mhi,
-            ref_h=ref_h,
-            ref_w=ref_w,
-            target_hw=flow_hw,
-        )
-
-    return mhi_out.to(out_mhi_dtype), pairs_u8
-
-
-# ----------------------------
-# Dataset + collate
-# ----------------------------
-
-class VideoMHIFramesDataset(Dataset):
-    """
-    Returns:
-      mhi:   (C, mhi_frames, img_size, img_size) float16 (or chosen dtype) CPU
-      pairs: (flow_pairs, 2, 3, flow_hw, flow_hw) uint8 RGB CPU
-      y:     int
-      path:  str
-    """
-    def __init__(
-        self,
-        root_dir: str,
-        *,
-        img_size: int,
-        flow_hw: int,
-        mhi_frames: int,
-        flow_pairs: int,
-        mhi_windows: List[int],
-        diff_threshold: float,
-        motion_img_resize: Optional[int] = None,
-        motion_flow_resize: Optional[int] = None,
-        motion_resize_mode: str = "square",
-        motion_crop_mode: str = "none",
-        num_views: int = 1,
-        out_mhi_dtype=torch.float16,
-        dataset_split_txt=None,
-        class_id_to_label_csv=None,
-    ):
-        self.paths, self.labels, self.classnames = list_videos(root_dir, dataset_split_txt)
-        if dataset_split_txt is not None and class_id_to_label_csv is not None:
-            self.classnames = classnames_from_id_csv(class_id_to_label_csv, self.labels)
-        self.img_size = img_size
-        self.flow_hw = flow_hw
-        self.mhi_frames = mhi_frames
-        self.flow_pairs = flow_pairs
-        self.mhi_windows = mhi_windows
-        self.diff_threshold = diff_threshold
-        self.motion_img_resize = motion_img_resize
-        self.motion_flow_resize = motion_flow_resize
-        self.motion_resize_mode = motion_resize_mode
-        self.motion_crop_mode = motion_crop_mode
-        self.num_views = max(1, int(num_views))
-        self.out_mhi_dtype = out_mhi_dtype
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, idx):
-        path = self.paths[idx]
-        y = self.labels[idx]
-        try:
-            crop_anchors = _multi_view_motion_crop_anchors(self.motion_crop_mode, self.num_views)
-            mhi_views = []
-            pairs_views = []
-            for crop_anchor in crop_anchors:
-                mhi, pairs = compute_mhi_and_paired_frames(
-                    path,
-                    mhi_windows=self.mhi_windows,
-                    diff_threshold=self.diff_threshold,
-                    img_size=self.img_size,
-                    mhi_frames=self.mhi_frames,
-                    flow_hw=self.flow_hw,
-                    flow_pairs=self.flow_pairs,
-                    motion_img_resize=self.motion_img_resize,
-                    motion_flow_resize=self.motion_flow_resize,
-                    motion_resize_mode=self.motion_resize_mode,
-                    motion_crop_mode=self.motion_crop_mode,
-                    crop_anchor=crop_anchor,
-                    out_mhi_dtype=self.out_mhi_dtype,
-                )
-                mhi_views.append(mhi)
-                pairs_views.append(pairs)
-            if self.num_views == 1:
-                mhi = mhi_views[0]
-                pairs = pairs_views[0]
-            else:
-                mhi = torch.stack(mhi_views, dim=0)
-                pairs = torch.stack(pairs_views, dim=0)
-        except Exception:
-            C = len(self.mhi_windows)
-            if self.num_views == 1:
-                mhi = torch.zeros((C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_mhi_dtype)
-                pairs = torch.zeros((self.flow_pairs, 2, 3, self.flow_hw, self.flow_hw), dtype=torch.uint8)
-            else:
-                mhi = torch.zeros((self.num_views, C, self.mhi_frames, self.img_size, self.img_size), dtype=self.out_mhi_dtype)
-                pairs = torch.zeros((self.num_views, self.flow_pairs, 2, 3, self.flow_hw, self.flow_hw), dtype=torch.uint8)
-
-        return mhi, pairs, y, path
-
-
-def collate_video_motion(batch):
-    mhi, pairs, y, paths = zip(*batch)
-    return (
-        torch.stack(mhi, 0),         # (B,C,Tm,224,224)
-        torch.stack(pairs, 0),       # (B,P,2,3,H,W)
-        torch.tensor(y, dtype=torch.long),
-        list(paths),
-    )
-
-
-@torch.no_grad()
-def raft_flow_from_paired_frames_batched(
-    pairs_u8: torch.Tensor,          # (B,P,2,3,H,W) uint8 CPU
-    raft_model: torch.nn.Module,
-    device: str,
-    *,
-    use_amp: bool = True,
-    out_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    """
-    Returns:
-      flow: (B,2,P,H,W) on GPU
-    """
-    B, P, two, C, H, W = pairs_u8.shape
-    assert two == 2 and C == 3
-    assert H % 8 == 0 and W % 8 == 0 and H >= 128 and W >= 128
-
-    flow_out = torch.empty((B, 2, P, H, W), device=device, dtype=out_dtype)
-
-    for b in range(B):
-        # extract pairs for a single video
-        pairs_b = pairs_u8[b].contiguous()         # (P,2,3,H,W)
-
-        img1 = pairs_b[:, 0]                        # (P,3,H,W)
-        img2 = pairs_b[:, 1]
-
-        img1 = _RAFT_PRE(img1).to(device, non_blocking=True).contiguous()
-        img2 = _RAFT_PRE(img2).to(device, non_blocking=True).contiguous()
-
-        if use_amp and device == "cuda":
-            with torch.amp.autocast("cuda", dtype=torch.float16):
-                pred = raft_model(img1, img2)
-                flow = pred[-1]                     # (P,2,H,W)
-        else:
-            pred = raft_model(img1, img2)
-            flow = pred[-1]
-
-        flow_out[b] = flow.to(out_dtype).permute(1, 0, 2, 3).contiguous()
-
-    return flow_out

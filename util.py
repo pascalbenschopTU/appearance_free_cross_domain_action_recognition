@@ -1836,6 +1836,7 @@ def parse_floats(value: str) -> List[float]:
 class MotionCkptConfig:
     # Core
     model: str = "i3d"
+    x3d_variant: str = "XS"
     embed_dim: int = 512
     fuse: str = "avg_then_proj"
     dropout: float = 0.0
@@ -1920,6 +1921,7 @@ def extract_motion_config_from_ckpt(
 
     cfg = MotionCkptConfig(
         model=str(get_checkpoint_arg(ckpt, "model", base.model)),
+        x3d_variant=str(get_checkpoint_arg(ckpt, "x3d_variant", base.x3d_variant)).upper(),
         embed_dim=int(get_checkpoint_arg(ckpt, "embed_dim", base.embed_dim)),
         fuse=str(get_checkpoint_arg(ckpt, "fuse", base.fuse)),
         dropout=float(get_checkpoint_arg(ckpt, "dropout", base.dropout)),

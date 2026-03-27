@@ -8,6 +8,28 @@ try:
 except Exception:
     _HAS_PYTORCHVIDEO = False
 
+
+_X3D_VARIANT_PRESETS = {
+    # Keep the family naming aligned with the paper / PyTorchVideo hub variants.
+    "xs": {"width_factor": 1.0, "depth_factor": 2.2, "head_dim_out": 1024},
+    "s": {"width_factor": 1.0, "depth_factor": 2.2, "head_dim_out": 2048},
+    "m": {"width_factor": 2.0, "depth_factor": 2.2, "head_dim_out": 2048},
+    "l": {"width_factor": 2.0, "depth_factor": 5.0, "head_dim_out": 2048},
+}
+
+
+def normalize_x3d_variant(variant: str) -> str:
+    key = str(variant).strip().lower()
+    if key not in _X3D_VARIANT_PRESETS:
+        choices = ", ".join(name.upper() for name in _X3D_VARIANT_PRESETS)
+        raise ValueError(f"Unsupported X3D variant '{variant}'. Expected one of: {choices}.")
+    return key
+
+
+def resolve_x3d_variant(variant: str) -> dict:
+    key = normalize_x3d_variant(variant)
+    return dict(_X3D_VARIANT_PRESETS[key])
+
 class MLPProjector(nn.Module):
     def __init__(self, in_dim=2048, hidden_dim=2048, out_dim=512, dropout=0.1):
         super().__init__()
@@ -75,13 +97,7 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
         embed_dim: int = 512,
         fuse: str = "concat",   # "avg_then_proj" or "concat"
         dropout: float = 0.0,
-        # X3D knobs (use S-ish defaults; tune as you like)
-        top_width_factor: float = 2.0,
-        top_depth_factor: float = 2.2,
-        bot_width_factor: float = 2.0,
-        bot_depth_factor: float = 2.2,
-        top_head_dim_out: int = 2048,
-        bot_head_dim_out: int = 2048,
+        x3d_variant: str = "XS",
         compute_second_only: bool = False,
         use_projection: bool = False,
         dual_projection_heads: bool = False,
@@ -107,6 +123,8 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
         self.fuse = fuse
         self.use_projection = bool(use_projection)
         self.dual_projection_heads = bool(self.use_projection and dual_projection_heads)
+        self.x3d_variant = normalize_x3d_variant(x3d_variant).upper()
+        variant_cfg = resolve_x3d_variant(self.x3d_variant)
 
         self.top = None
         self.bot = None
@@ -120,9 +138,9 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
                 crop=img_size,
                 output_dim=embed_dim*2,
                 dropout=dropout,
-                width_factor=top_width_factor,
-                depth_factor=top_depth_factor,
-                head_dim_out=top_head_dim_out,
+                width_factor=variant_cfg["width_factor"],
+                depth_factor=variant_cfg["depth_factor"],
+                head_dim_out=variant_cfg["head_dim_out"],
             )
         if self.has_bot:
             self.bot = build_x3d_embedder(
@@ -131,9 +149,9 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
                 crop=flow_hw,
                 output_dim=embed_dim*2,
                 dropout=dropout,
-                width_factor=bot_width_factor,
-                depth_factor=bot_depth_factor,
-                head_dim_out=bot_head_dim_out,
+                width_factor=variant_cfg["width_factor"],
+                depth_factor=variant_cfg["depth_factor"],
+                head_dim_out=variant_cfg["head_dim_out"],
             )
 
         if self.has_top:
@@ -166,6 +184,13 @@ class TwoStreamE2S_X3D_CLIP(nn.Module):
                     nn.Dropout(float(projection_dropout)),
                     nn.Linear(embed_dim, int(num_classes)),
                 )
+
+        print(
+            "[X3D] variant="
+            f"{self.x3d_variant} width_factor={variant_cfg['width_factor']} "
+            f"depth_factor={variant_cfg['depth_factor']} head_dim_out={variant_cfg['head_dim_out']}",
+            flush=True,
+        )
 
     def forward(self, mhi_bcthw: torch.Tensor, flow_bcthw: torch.Tensor):
         et = None
