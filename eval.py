@@ -435,7 +435,7 @@ def evaluate_one_split(
 
             if mhi is not None:
                 mhi = mhi.to(device, non_blocking=True)
-            if second is not None
+            if second is not None:
                 second = second.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
