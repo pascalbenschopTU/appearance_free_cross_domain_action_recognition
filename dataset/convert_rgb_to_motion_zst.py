@@ -40,6 +40,7 @@ from typing import Dict, List, Tuple, Optional
 import cv2
 import numpy as np
 import torch
+import torchvision.transforms as T
 import zstandard as zstd
 from multiprocessing import get_context
 
@@ -47,11 +48,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
-from dataset import _resize_and_crop_square, build_raft_large, raft_flow_from_paired_frames_batched
+from dataset import _resize_motion_frame, build_raft_large
 from cropping_util import (
     detect_square_roi_largest_motion,
     detect_square_roi_yolo_person,
-    resize_frame_preserve_height,
     yolo_import_error_repr,
     yolo_is_available,
 )
@@ -193,6 +193,52 @@ def _count_frames_fallback(path: str, max_frames: Optional[int] = None) -> int:
     cap.release()
     return n
 
+_RAFT_PRE = T.Compose([
+    T.ConvertImageDtype(torch.float32),  # uint8 -> float in [0,1]
+    T.Normalize(mean=0.5, std=0.5),      # -> [-1,1]
+])
+@torch.no_grad()
+def raft_flow_from_paired_frames_batched(
+    pairs_u8: torch.Tensor,          # (B,P,2,3,H,W) uint8 CPU
+    raft_model: torch.nn.Module,
+    device: str,
+    *,
+    use_amp: bool = True,
+    out_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """
+    Returns:
+      flow: (B,2,P,H,W) on GPU
+    """
+    B, P, two, C, H, W = pairs_u8.shape
+    assert two == 2 and C == 3
+    assert H % 8 == 0 and W % 8 == 0 and H >= 128 and W >= 128
+
+    flow_out = torch.empty((B, 2, P, H, W), device=device, dtype=out_dtype)
+
+    for b in range(B):
+        # extract pairs for a single video
+        pairs_b = pairs_u8[b].contiguous()         # (P,2,3,H,W)
+
+        img1 = pairs_b[:, 0]                        # (P,3,H,W)
+        img2 = pairs_b[:, 1]
+
+        img1 = _RAFT_PRE(img1).to(device, non_blocking=True).contiguous()
+        img2 = _RAFT_PRE(img2).to(device, non_blocking=True).contiguous()
+
+        if use_amp and device == "cuda":
+            with torch.amp.autocast("cuda", dtype=torch.float16):
+                pred = raft_model(img1, img2)
+                flow = pred[-1]                     # (P,2,H,W)
+        else:
+            pred = raft_model(img1, img2)
+            flow = pred[-1]
+
+        flow_out[b] = flow.to(out_dtype).permute(1, 0, 2, 3).contiguous()
+
+    return flow_out
+
+
 @torch.inference_mode()
 def compute_mhi_and_flow_stream_cpu(
     path: str,
@@ -208,15 +254,12 @@ def compute_mhi_and_flow_stream_cpu(
     flow_normalize: bool = True,
     out_dtype: torch.dtype = torch.float16,
     roi_xyxy: Optional[Tuple[int, int, int, int]] = None,
-    motion_img_resize: Optional[int] = None,
-    motion_flow_resize: Optional[int] = None,
-    motion_resize_mode: str = "short_side",
-    motion_crop_mode: str = "center",
     crop_anchor: Optional[Tuple[float, float]] = None,
     raft_model=None,
     raft_device: str = "cuda",
     raft_flow_clip: float = 1.0,
     raft_amp: bool = True,
+    blur_mhi_input: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     flow_backend = str(flow_backend).lower()
     if flow_backend not in ("farneback", "raft_large"):
@@ -272,27 +315,24 @@ def compute_mhi_and_flow_stream_cpu(
             if cropped.shape[0] > 1 and cropped.shape[1] > 1:
                 frame_src = cropped
 
-        frame_mhi = _resize_and_crop_square(
+        frame_mhi = _resize_motion_frame(
             frame_src,
-            resize_hw=motion_img_resize,
-            out_hw=img_size,
-            resize_mode=motion_resize_mode,
-            crop_mode=motion_crop_mode,
-            crop_anchor=crop_anchor,
+            out_hw=img_size
         )
-        frame_flow = _resize_and_crop_square(
-            frame_src,
-            resize_hw=motion_flow_resize,
-            out_hw=flow_hw,
-            resize_mode=motion_resize_mode,
-            crop_mode=motion_crop_mode,
-            crop_anchor=crop_anchor,
+        frame_flow = _resize_motion_frame(
+            frame_mhi,
+            out_hw=flow_hw
         )
+        if blur_mhi_input:
+            frame_mhi = cv2.GaussianBlur(frame_mhi, (5, 5), 1.0)
+
+        mhi_h, mhi_w = frame_mhi.shape[:2]
+        flow_h, flow_w = frame_flow.shape[:2]
 
         if mhi is None:
-            mhi = torch.zeros((C, img_size, img_size), dtype=torch.float32)
-            flows = torch.zeros((2, flow_frames, flow_hw, flow_hw), dtype=torch.float32)
-            mhi_out = torch.zeros((C, mhi_frames, img_size, img_size), dtype=torch.float32)
+            mhi = torch.zeros((C, mhi_h, mhi_w), dtype=torch.float32)
+            flows = torch.zeros((2, flow_frames, flow_h, flow_w), dtype=torch.float32)
+            mhi_out = torch.zeros((C, mhi_frames, mhi_h, mhi_w), dtype=torch.float32)
 
         gray_mhi = cv2.cvtColor(frame_mhi, cv2.COLOR_BGR2GRAY)
 
@@ -684,16 +724,16 @@ def _run_one(task, *, raft_model=None, raft_device: str = "cuda", raft_amp: bool
             flow_normalize=cfg["flow_normalize"],
             out_dtype=cfg["out_dtype"],
             roi_xyxy=roi_xyxy,
-            motion_img_resize=cfg["motion_img_resize"],
-            motion_flow_resize=cfg["motion_flow_resize"],
-            motion_resize_mode=cfg["motion_resize_mode"],
-            motion_crop_mode=cfg["motion_crop_mode"],
             crop_anchor=cfg["crop_anchor"],
             raft_model=raft_model,
             raft_device=raft_device,
             raft_flow_clip=cfg["raft_flow_clip"],
             raft_amp=raft_amp,
         )
+        for tensor_name, tensor_value in (("mhi_out", mhi_out), ("flows", flows)):
+            tensor_shape = tuple(tensor_value.shape)
+            if len(tensor_shape) >= 2 and tensor_shape[-1] == tensor_shape[-2]:
+                print(f"[square-shape] {os.path.basename(vp)} {tensor_name}: {tensor_shape}")
 
         save_zstd_features(
             out_zst_path=op,
@@ -761,7 +801,7 @@ def main():
     p.add_argument("--diff_threshold", type=float, default=15.0)
     p.add_argument("--img_size", type=int, default=256, help="MHI pre-resize height while preserving aspect ratio")
     p.add_argument("--mhi_frames", type=int, default=32)
-    p.add_argument("--flow_hw", type=int, default=124, help="Flow pre-resize height while preserving aspect ratio")
+    p.add_argument("--flow_hw", type=int, default=128, help="Flow pre-resize height while preserving aspect ratio")
     p.add_argument("--flow_frames", type=int, default=128)
     p.add_argument("--flow_max_disp", type=float, default=20.0)
     p.add_argument("--flow_backend", type=str, default="farneback", choices=["farneback", "raft_large"])
@@ -777,10 +817,9 @@ def main():
     p.set_defaults(flow_normalize=True)
 
     p.add_argument("--flow_clip", type=float, default=1.0, help="Quant clip for stored flow (default 1.0)")
-    p.add_argument("--motion_img_resize", type=int, default=256, help="Resize short side before MHI crop.")
-    p.add_argument("--motion_flow_resize", type=int, default=128, help="Resize short side before flow crop.")
     p.add_argument("--motion_resize_mode", type=str, default="short_side", choices=["square", "short_side"], help="Spatial resize policy.")
     p.add_argument("--motion_crop_mode", type=str, default="center", choices=["none", "random", "center"], help="Crop mode applied after resize.")
+    p.add_argument("--blur_mhi_input", action="store_true", help="Apply Gaussian blur (kernel=5, sigma=1) before motion extraction.")
 
     # optional pre-crop ROI (does not change default behavior)
     p.add_argument("--roi_mode", choices=["none", "yolo_person", "largest_motion"],default="none",help="Optional crop ROI before MHI/flow extraction")
@@ -887,10 +926,7 @@ def main():
         flow_clip=float(args.flow_clip),
         raft_flow_clip=float(args.raft_flow_clip),
         fb_params=fb_params,
-        motion_img_resize=int(args.motion_img_resize),
-        motion_flow_resize=int(args.motion_flow_resize),
-        motion_resize_mode=str(args.motion_resize_mode),
-        motion_crop_mode=str(args.motion_crop_mode),
+        blur_mhi_input=bool(args.blur_mhi_input),
         crop_anchor=(0.5, 0.5) if str(args.motion_crop_mode).lower() == "center" else None,
         roi_mode=str(args.roi_mode),
         roi_stride=max(1, int(args.roi_stride)),
