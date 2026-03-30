@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -16,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler, WeightedRandomSampler
 
 try:
     import matplotlib.pyplot as plt
@@ -334,6 +335,14 @@ def count_parameters(module: nn.Module) -> tuple[int, int]:
     return total, trainable
 
 
+def configure_torch_hub_dir(out_dir: Path) -> Path:
+    hub_dir = (out_dir / "resnet").resolve()
+    hub_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TORCH_HOME"] = str(hub_dir)
+    torch.hub.set_dir(str(hub_dir))
+    return hub_dir
+
+
 def find_latest_ckpt(ckpt_dir: Path | str) -> Path | None:
     candidates = sorted(Path(ckpt_dir).glob("*epoch_*.pt"))
     return candidates[-1] if candidates else None
@@ -578,13 +587,20 @@ def make_dataloader(
     shuffle: bool,
     seed: int,
     num_workers: int,
+    *,
+    sample_weights: torch.Tensor | None = None,
 ) -> DataLoader:
     from dataset import collate_rgb_clip, collate_video_motion
 
     generator = torch.Generator()
     generator.manual_seed(seed)
     collate_fn = collate_rgb_clip if hasattr(dataset, "rgb_frames") else collate_video_motion
-    sampler = dataset.build_sampler(seed) if shuffle and hasattr(dataset, 'build_sampler') else None
+    if sample_weights is not None:
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(dataset), replacement=True)
+    elif shuffle and hasattr(dataset, 'build_sampler'):
+        sampler = dataset.build_sampler(seed)
+    else:
+        sampler = None
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -1061,12 +1077,18 @@ def train_attribute_fold(
         )
     test_dataset = make_dataset(args, artifacts.test_manifest, artifacts.label_csv)
 
+    class_weights = compute_class_weights(train_dataset.labels, len(class_names), args.class_weight_mode)
+    train_sample_weights = None
+    if getattr(args, "class_aware_sampling", False) and class_weights is not None:
+        train_sample_weights = class_weights[torch.tensor(train_dataset.labels, dtype=torch.long)]
+
     train_loader = make_dataloader(
         dataset=train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         seed=args.seed + fold.fold_id,
         num_workers=args.num_workers,
+        sample_weights=train_sample_weights,
     )
     test_loader = make_dataloader(
         dataset=test_dataset,
@@ -1118,7 +1140,7 @@ def train_attribute_fold(
     except AttributeError:
         scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
-    loss_weight = compute_class_weights(train_dataset.labels, len(class_names), args.class_weight_mode)
+    loss_weight = class_weights
     if loss_weight is not None:
         loss_weight = loss_weight.to(device)
 
@@ -1208,6 +1230,9 @@ def main() -> None:
     device = torch.device(args.device)
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.model_backbone in ("resnet18", "resnet50") and bool(args.resnet_imagenet_pretrained):
+        torch_hub_dir = configure_torch_hub_dir(out_dir)
+        print(f"[CACHE] torchvision ResNet weights will use TORCH_HOME={torch_hub_dir}", flush=True)
     save_json(out_dir / "run_config.json", vars(args))
     if plt is None:
         print("[WARN] matplotlib is not available. CSV/JSON outputs will be written, but SVG/PDF plots will be skipped.", flush=True)

@@ -454,6 +454,25 @@ def _sample_rgb_indices(
     return np.rint(idx).astype(np.int64)
 
 
+def _sample_single_uniform_rgb_index(
+    num_frames: int,
+    *,
+    view_idx: int,
+    num_views: int,
+) -> np.ndarray:
+    num_frames = max(1, int(num_frames))
+    num_views = max(1, int(num_views))
+    if num_frames == 1:
+        return np.array([0], dtype=np.int64)
+    clipped_view_idx = int(np.clip(int(view_idx), 0, num_views - 1))
+    # Use evenly spaced midpoints so repeated single-frame views sweep through
+    # the full video rather than repeatedly selecting frame 0.
+    position = (clipped_view_idx + 0.5) / float(num_views)
+    index = int(round(position * (num_frames - 1)))
+    index = int(np.clip(index, 0, num_frames - 1))
+    return np.array([index], dtype=np.int64)
+
+
 def normalize_rgb_clip(clip_cthw: torch.Tensor, rgb_norm: str) -> torch.Tensor:
     x = clip_cthw.to(torch.float32).div_(255.0)
     norm = str(rgb_norm).lower()
@@ -532,6 +551,7 @@ class RGBVideoClipDataset(Dataset):
         self.out_dtype = out_dtype
         self.seed = int(seed)
         self.epoch = 0
+        self.uniform_single_frame_views = 1
 
         self._color_jitter_prob = float(color_jitter_prob)
         self._color_jitter = (
@@ -580,12 +600,19 @@ class RGBVideoClipDataset(Dataset):
             if num_frames <= 0:
                 raise RuntimeError(f"Video has 0 frames: {path}")
 
-            idxs = _sample_rgb_indices(
-                num_frames=num_frames,
-                target_frames=self.rgb_frames,
-                mode=self.sampling_mode,
-                rng=rng,
-            )
+            if self.sampling_mode == "uniform" and self.rgb_frames == 1 and int(self.uniform_single_frame_views) > 1:
+                idxs = _sample_single_uniform_rgb_index(
+                    num_frames=num_frames,
+                    view_idx=int(sample_offset),
+                    num_views=int(self.uniform_single_frame_views),
+                )
+            else:
+                idxs = _sample_rgb_indices(
+                    num_frames=num_frames,
+                    target_frames=self.rgb_frames,
+                    mode=self.sampling_mode,
+                    rng=rng,
+                )
             rgb = self._decode_clip_rgb(path, idxs)
             # Apply color jitter per-frame before normalization (rgb is uint8 C,T,H,W)
             if self._color_jitter is not None and rng.random() < self._color_jitter_prob:

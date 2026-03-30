@@ -104,6 +104,8 @@ class RepeatedSampleDataset(Dataset):
         self.classnames = list(getattr(base_dataset, "classnames", []))
         base_labels = list(getattr(base_dataset, "labels", []))
         self.labels = base_labels * self.repeats
+        if hasattr(self.base_dataset, "uniform_single_frame_views"):
+            self.base_dataset.uniform_single_frame_views = self.repeats
 
     def __len__(self) -> int:
         return len(self.base_dataset) * self.repeats
@@ -501,6 +503,15 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(imagenet_pretrained=True)
     parser.add_argument("--temporal_samples", type=int, default=8, help="Number of times each video is repeated per epoch.")
     parser.add_argument("--temporal_pool", type=str, default="avg", choices=["avg", "max"])
+    parser.add_argument(
+        "--privacy_frame_protocol",
+        type=str,
+        default="legacy_clip",
+        choices=["legacy_clip", "single_frame"],
+    )
+    parser.add_argument("--train_views_per_video", type=int, default=4)
+    parser.add_argument("--eval_views_per_video", type=int, default=8)
+    parser.add_argument("--eval_view_sampling", type=str, default="uniform", choices=["uniform"])
     parser.add_argument("--class_weight_mode", type=str, default="effective_sample_count",
                         choices=["none", "inverse_freq", "sqrt_inverse_freq", "effective_sample_count", "effective_num"])
 
@@ -551,6 +562,55 @@ def seed_worker(worker_id: int) -> None:
     worker_seed = (torch.initial_seed() + worker_id) % (2**32)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+def is_single_frame_protocol(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "privacy_frame_protocol", "legacy_clip")).lower() == "single_frame"
+
+
+def protocol_train_repeats(args: argparse.Namespace) -> int:
+    if is_single_frame_protocol(args):
+        return max(1, int(args.train_views_per_video))
+    return max(1, int(args.temporal_samples))
+
+
+def protocol_eval_repeats(args: argparse.Namespace) -> int:
+    if is_single_frame_protocol(args):
+        return max(1, int(args.eval_views_per_video))
+    return 1
+
+
+def maybe_repeat_single_motion_view(inputs: torch.Tensor, second: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    return ((inputs.repeat(1, 1, 8, 1, 1) if inputs.ndim == 5 and inputs.shape[2] == 1 else inputs), (second.repeat(1, 1, 8, 1, 1) if second.ndim == 5 and second.shape[2] == 1 else second))
+
+
+def group_probabilities_by_path(
+    rel_paths: Sequence[str],
+    y_true: Sequence[int],
+    y_score: np.ndarray,
+) -> tuple[List[str], List[int], np.ndarray]:
+    groups: Dict[str, Dict[str, object]] = {}
+    order: List[str] = []
+    for rel_path, true_id, score in zip(rel_paths, y_true, y_score):
+        key = str(rel_path)
+        if key not in groups:
+            groups[key] = {"true_id": int(true_id), "scores": []}
+            order.append(key)
+        else:
+            stored = int(groups[key]["true_id"])
+            if stored != int(true_id):
+                raise ValueError(f"Inconsistent labels across repeated views for {key!r}: {stored} vs {int(true_id)}")
+        groups[key]["scores"].append(np.asarray(score, dtype=np.float64))
+
+    grouped_paths: List[str] = []
+    grouped_true: List[int] = []
+    grouped_scores: List[np.ndarray] = []
+    for key in order:
+        entry = groups[key]
+        grouped_paths.append(key)
+        grouped_true.append(int(entry["true_id"]))
+        grouped_scores.append(np.mean(np.stack(entry["scores"], axis=0), axis=0))
+    return grouped_paths, grouped_true, np.asarray(grouped_scores, dtype=np.float64)
 
 
 def count_parameters(module: nn.Module) -> tuple[int, int]:
@@ -805,12 +865,19 @@ def make_fold_artifacts(out_dir: Path, attribute: str, fold: PrivacyFold) -> Fol
 def make_dataset(args: argparse.Namespace, manifest_path: Path, label_csv: Path, *, is_train: bool = True):
     from dataset import RGBVideoClipDataset, MotionTwoStreamZstdDataset
 
+    num_frames = int(args.num_frames)
+    rgb_sampling = str(args.rgb_sampling)
+    if is_single_frame_protocol(args):
+        num_frames = 1
+        if args.input_modality == "rgb":
+            rgb_sampling = "random" if is_train else str(args.eval_view_sampling)
+
     if args.input_modality == "rgb":
         return RGBVideoClipDataset(
             root_dir=args.root_dir,
-            rgb_frames=args.num_frames,
+            rgb_frames=num_frames,
             img_size=args.img_size,
-            sampling_mode=args.rgb_sampling,
+            sampling_mode=rgb_sampling,
             dataset_split_txt=str(manifest_path),
             class_id_to_label_csv=str(label_csv),
             rgb_norm=args.rgb_norm,
@@ -825,8 +892,8 @@ def make_dataset(args: argparse.Namespace, manifest_path: Path, label_csv: Path,
         root_dir=args.root_dir,
         img_size=args.img_size,
         flow_hw=args.flow_hw,
-        mhi_frames=args.num_frames,
-        flow_frames=args.num_frames,
+        mhi_frames=num_frames,
+        flow_frames=num_frames,
         mhi_windows=mhi_windows,
         out_dtype=torch.float16,
         p_hflip=0.5 if is_train else 0.0,
@@ -1009,10 +1076,10 @@ def forward_privacy_model(
     if input_modality == "rgb":
         return model(inputs, None, rgb_norm=rgb_norm)
     if input_modality == "mhi":
-        return model(inputs, None)
+        return model(maybe_repeat_single_motion_view(inputs, second)[0], None)
     if input_modality == "flow":
-        return model(second, None)
-    return model(inputs, second)
+        return model(maybe_repeat_single_motion_view(inputs, second)[1], None)
+    return model(*maybe_repeat_single_motion_view(inputs, second))
 
 
 def aggregate_probabilities(outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -1196,6 +1263,7 @@ def evaluate(
     root_dir: Path,
     input_modality: str,
     rgb_norm: str,
+    aggregate_by_video: bool = False,
 ) -> Dict[str, object]:
     model.eval()
     all_true: List[int] = []
@@ -1224,14 +1292,26 @@ def evaluate(
                 except ValueError:
                     all_paths.append(str(p))
 
+    score_array = np.asarray(all_probabilities, dtype=np.float64)
+    rel_paths_for_metrics = list(all_paths)
+    true_for_metrics = list(all_true)
+    if aggregate_by_video:
+        rel_paths_for_metrics, true_for_metrics, score_array = group_probabilities_by_path(
+            all_paths,
+            all_true,
+            score_array,
+        )
+        all_pred = score_array.argmax(axis=1).tolist()
+        all_confidence = score_array.max(axis=1).tolist()
+
     metrics = compute_metrics(
-        all_true,
+        true_for_metrics,
         all_pred,
         class_names,
-        y_score=np.asarray(all_probabilities, dtype=np.float64),
+        y_score=score_array,
     )
     predictions = []
-    for rel_path, true_id, pred_id, confidence in zip(all_paths, all_true, all_pred, all_confidence):
+    for rel_path, true_id, pred_id, confidence in zip(rel_paths_for_metrics, true_for_metrics, all_pred, all_confidence):
         predictions.append({
             "rel_path": rel_path,
             "true_id": int(true_id),
@@ -1263,10 +1343,16 @@ def train_attribute_fold(
     train_dataset = make_dataset(args, artifacts.train_manifest, artifacts.label_csv, is_train=True)
     train_dataset = RepeatedSampleDataset(
         train_dataset,
-        repeats=max(1, int(args.temporal_samples)),
+        repeats=protocol_train_repeats(args),
         seed=int(args.seed),
     )
     test_dataset = make_dataset(args, artifacts.test_manifest, artifacts.label_csv, is_train=False)
+    if is_single_frame_protocol(args):
+        test_dataset = RepeatedSampleDataset(
+            test_dataset,
+            repeats=protocol_eval_repeats(args),
+            seed=int(args.seed) + 50000,
+        )
 
     train_loader = make_dataloader(
         dataset=train_dataset,
@@ -1297,7 +1383,7 @@ def train_attribute_fold(
         embed_dim=args.embed_dim,
         img_size=args.img_size,
         imagenet_pretrained=args.imagenet_pretrained,
-        num_frames=args.num_frames,
+        num_frames=(1 if is_single_frame_protocol(args) else args.num_frames),
         temporal_pool=args.temporal_pool,
         hf_cache_dir=args.hf_cache_dir,
     ).to(device)
@@ -1404,6 +1490,7 @@ def train_attribute_fold(
             root_dir=Path(args.root_dir),
             input_modality=args.input_modality,
             rgb_norm=args.rgb_norm,
+            aggregate_by_video=is_single_frame_protocol(args),
         )
         eval_score = float(eval_metrics[selection_metric])
         epoch_stats[f"test_{selection_metric}"] = eval_score
@@ -1426,6 +1513,7 @@ def train_attribute_fold(
             root_dir=Path(args.root_dir),
             input_modality=args.input_modality,
             rgb_norm=args.rgb_norm,
+            aggregate_by_video=is_single_frame_protocol(args),
         )
 
     save_rows_csv(
@@ -1546,11 +1634,17 @@ def train_fold_multi_attribute(
     base_train = make_dataset(args, first_artifacts.train_manifest, first_artifacts.label_csv, is_train=True)
     base_train = RepeatedSampleDataset(
         base_train,
-        repeats=max(1, int(args.temporal_samples)),
+        repeats=protocol_train_repeats(args),
         seed=int(args.seed),
     )
     train_dataset = MultiAttributeLabelDataset(base_train, fold.train_records, attributes)
     base_test = make_dataset(args, first_artifacts.test_manifest, first_artifacts.label_csv, is_train=False)
+    if is_single_frame_protocol(args):
+        base_test = RepeatedSampleDataset(
+            base_test,
+            repeats=protocol_eval_repeats(args),
+            seed=int(args.seed) + 50000,
+        )
     test_dataset = MultiAttributeLabelDataset(base_test, fold.test_records, attributes)
 
     train_loader = make_dataloader(
@@ -1574,7 +1668,7 @@ def train_fold_multi_attribute(
         input_modality=args.input_modality, in_channels=in_channels,
         embed_dim=args.embed_dim, img_size=args.img_size,
         imagenet_pretrained=args.imagenet_pretrained,
-        num_frames=args.num_frames, temporal_pool=args.temporal_pool,
+        num_frames=(1 if is_single_frame_protocol(args) else args.num_frames), temporal_pool=args.temporal_pool,
         hf_cache_dir=args.hf_cache_dir,
     ).to(device)
 
@@ -1678,7 +1772,17 @@ def train_fold_multi_attribute(
             "lr": float(optimizer.param_groups[0]["lr"]),
         }
 
-        eval_per_attr = _eval_multi_attribute(model, test_loader, device, attributes, attributes_num_classes, Path(args.root_dir), args.input_modality, rgb_norm)
+        eval_per_attr = _eval_multi_attribute(
+            model,
+            test_loader,
+            device,
+            attributes,
+            attributes_num_classes,
+            Path(args.root_dir),
+            args.input_modality,
+            rgb_norm,
+            aggregate_by_video=is_single_frame_protocol(args),
+        )
         mean_score = float(np.mean([float(m[selection_metric]) for m in eval_per_attr.values()]))
         epoch_stats[f"test_mean_{selection_metric}"] = mean_score
         if mean_score > (best_score + float(args.selection_min_delta)):
@@ -1693,7 +1797,17 @@ def train_fold_multi_attribute(
         eval_per_attr = best_eval_metrics_per_attr
     else:
         rgb_norm = getattr(args, "rgb_norm", "i3d")
-        eval_per_attr = _eval_multi_attribute(model, test_loader, device, attributes, attributes_num_classes, Path(args.root_dir), args.input_modality, rgb_norm)
+        eval_per_attr = _eval_multi_attribute(
+            model,
+            test_loader,
+            device,
+            attributes,
+            attributes_num_classes,
+            Path(args.root_dir),
+            args.input_modality,
+            rgb_norm,
+            aggregate_by_video=is_single_frame_protocol(args),
+        )
 
     history_fieldnames = ["epoch", "loss", "lr"]
     history_fieldnames.append(f"test_mean_{selection_metric}")
@@ -1754,6 +1868,7 @@ def _eval_multi_attribute(
     root_dir: Path,
     input_modality: str,
     rgb_norm: str,
+    aggregate_by_video: bool = False,
 ) -> Dict[str, Dict[str, object]]:
     model.eval()
     all_true: Dict[str, List[int]] = {attr: [] for attr in attributes}
@@ -1795,12 +1910,20 @@ def _eval_multi_attribute(
     for attr in attributes:
         class_names = attribute_class_names(attr)
         probs_arr = np.asarray(all_probs[attr], dtype=np.float64)
+        rel_paths_for_metrics = list(all_paths)
+        true_for_metrics = list(all_true[attr])
+        if aggregate_by_video:
+            rel_paths_for_metrics, true_for_metrics, probs_arr = group_probabilities_by_path(
+                all_paths,
+                all_true[attr],
+                probs_arr,
+            )
         preds = probs_arr.argmax(axis=1).tolist()
-        metrics = compute_metrics(all_true[attr], preds, class_names, y_score=probs_arr)
+        metrics = compute_metrics(true_for_metrics, preds, class_names, y_score=probs_arr)
         predictions = [
             {"rel_path": p, "true_id": int(t), "pred_id": int(pr),
              "true_name": class_names[int(t)], "pred_name": class_names[int(pr)]}
-            for p, t, pr in zip(all_paths, all_true[attr], preds)
+            for p, t, pr in zip(rel_paths_for_metrics, true_for_metrics, preds)
         ]
         metrics["predictions"] = predictions
         results[attr] = metrics
@@ -1873,7 +1996,10 @@ def main() -> None:
         f"[CONFIG] dataset={args.dataset_name} modality={args.input_modality} "
         f"backbone=deit_small_patch16_224 pretrained={args.imagenet_pretrained} "
         f"lr={args.lr} wd={args.weight_decay} epochs={args.epochs} bs={args.batch_size} "
-        f"warmup_epochs={args.warmup_epochs} num_frames={args.num_frames} temporal_samples={args.temporal_samples}",
+        f"warmup_epochs={args.warmup_epochs} num_frames={(1 if is_single_frame_protocol(args) else args.num_frames)} "
+        f"temporal_samples={args.temporal_samples} "
+        f"privacy_frame_protocol={args.privacy_frame_protocol} "
+        f"train_views={args.train_views_per_video} eval_views={args.eval_views_per_video}",
         flush=True,
     )
 
@@ -2003,6 +2129,9 @@ def main() -> None:
             }
             save_rows_csv(attribute_dir / "summary_metrics.csv", [summary_row])
             save_json(attribute_dir / "summary_metrics.json", summary_row)
+            _means = {k: v for k, v in summary_row.items() if k.endswith("_mean")}
+            summary_line = " ".join(f"{k}={v:.4f}" for k, v in sorted(_means.items()))
+            print(f"[ATTR SUMMARY] {attribute} {summary_line}", flush=True)
 
     plot_overall_attribute_summary(
         all_fold_rows,
@@ -2013,6 +2142,15 @@ def main() -> None:
 
     save_rows_csv(out_dir / "all_fold_metrics.csv", all_fold_rows)
     save_json(out_dir / "all_fold_metrics.json", all_fold_rows)
+
+    all_cmaps: Dict[str, list] = {}
+    for _row in all_fold_rows:
+        _attr = str(_row["attribute"])
+        all_cmaps.setdefault(_attr, []).append(float(_row["cmap"]))
+    cmap_per_attr = {_attr: float(np.mean(_vals)) for _attr, _vals in all_cmaps.items()}
+    overall_cmap = float(np.mean(list(cmap_per_attr.values()))) if cmap_per_attr else 0.0
+    cmap_line = " ".join(f"cmap/{_attr}={_v:.4f}" for _attr, _v in sorted(cmap_per_attr.items()))
+    print(f"[FINAL SUMMARY] {cmap_line} privacy_cmap={overall_cmap:.4f}", flush=True)
 
     elapsed = time.time() - start_time
     print(

@@ -35,7 +35,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler, WeightedRandomSampler
 
 try:
     import matplotlib.pyplot as plt
@@ -62,6 +62,7 @@ from privacy.pa_hmdb51 import (
     write_attribute_label_csv,
     write_attribute_manifest,
 )
+from model import TwoStreamI3D_CLIP
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +373,56 @@ class ViTSEncoder(nn.Module):
         }
 
 
+def infer_encoder_channels(args: argparse.Namespace) -> tuple[int, int]:
+    backbone = str(args.model_backbone).lower()
+    modality = str(args.input_modality).lower()
+    if backbone == "vit":
+        return 3, 0
+    if modality != "motion":
+        raise ValueError(f"model_backbone={backbone} currently supports input_modality=motion only (got {modality}).")
+    mhi_windows = [int(part.strip()) for part in args.mhi_windows.split(",") if part.strip()]
+    return len(mhi_windows), 2
+
+
+def build_encoder(args: argparse.Namespace) -> nn.Module:
+    backbone = str(args.model_backbone).lower()
+    num_mhi_channels, num_second_channels = infer_encoder_channels(args)
+    if backbone == "vit":
+        return ViTSEncoder(
+            input_modality=args.input_modality,
+            in_channels=num_mhi_channels,
+            embed_dim=args.embed_dim,
+            img_size=args.img_size,
+            imagenet_pretrained=args.imagenet_pretrained,
+            num_frames=args.num_frames,
+            temporal_pool=args.temporal_pool,
+            hf_cache_dir=args.hf_cache_dir,
+        )
+
+    return TwoStreamI3D_CLIP(
+        mhi_channels=num_mhi_channels,
+        second_channels=num_second_channels,
+        embed_dim=512,
+        fuse=args.fuse,
+        dropout=args.dropout,
+        init_scratch=(not args.pretrained_ckpt),
+        use_stems=args.use_stems,
+        use_projection=False,
+        active_branch=args.active_branch,
+    )
+
+
+def load_pretrained_weights(model: nn.Module, ckpt_path: Path, device: torch.device) -> None:
+    ckpt = torch.load(str(ckpt_path), map_location=device)
+    state = ckpt.get("model_state", ckpt)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    print(f"[PRETRAIN] loaded model weights from {ckpt_path}", flush=True)
+    if missing:
+        print(f"[PRETRAIN] missing keys: {missing}", flush=True)
+    if unexpected:
+        print(f"[PRETRAIN] unexpected keys: {unexpected}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Attack model
 # ---------------------------------------------------------------------------
@@ -461,8 +512,8 @@ def parse_args() -> argparse.Namespace:
         "--input_modality",
         type=str,
         default="rgb",
-        choices=["mhi", "flow", "rgb"],
-        help="Input modality for the ViT-S attacker.",
+        choices=["mhi", "flow", "rgb", "motion"],
+        help="Input modality for the privacy attacker.",
     )
     parser.add_argument("--out_dir", type=str, default=str(THIS_DIR / "out" / "pa_hmdb51_vit_attacker"))
     parser.add_argument(
@@ -494,8 +545,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rgb_blur_kernel_size", type=int, default=31)
     parser.add_argument("--rgb_blur_sigma", type=float, default=8.0)
 
+    parser.add_argument("--model_backbone", type=str, default="vit", choices=["vit", "i3d"])
+    parser.add_argument("--embed_dim", type=int, default=384, help="Backbone embedding dim.")
+    parser.add_argument("--fuse", type=str, default="avg_then_proj", choices=["avg_then_proj", "concat"])
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--use_stems", action="store_true")
+    parser.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
+
     # ViT-S / DeiT-S
-    parser.add_argument("--embed_dim", type=int, default=384, help="DeiT-S embed dim (384)")
     parser.add_argument("--hf_cache_dir", type=str, default="",
                         help="Override HuggingFace cache directory (e.g. to avoid home-dir quota).")
     parser.add_argument("--head_dropout", type=float, default=0.0)
@@ -507,6 +564,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal_pool", type=str, default="avg", choices=["avg", "max"])
     parser.add_argument("--class_weight_mode", type=str, default="effective_sample_count",
                         choices=["none", "inverse_freq", "sqrt_inverse_freq", "effective_sample_count", "effective_num"])
+    parser.add_argument(
+        "--class_aware_sampling", action="store_true", default=False,
+        help="Use WeightedRandomSampler to oversample minority-class videos (overrides RepeatedVideoTemporalSampler).",
+    )
 
     # Training
     parser.add_argument("--batch_size", type=int, default=32)
@@ -576,6 +637,31 @@ def resolve_ckpt_path(path_or_dir: str) -> Path:
             raise FileNotFoundError(f"No checkpoints found in directory: {path}")
         return latest
     return path
+
+
+def resolve_backbone_args(args: argparse.Namespace) -> None:
+    args.input_modality = str(args.input_modality).lower()
+    args.model_backbone = str(args.model_backbone).lower()
+    args.active_branch = str(args.active_branch).lower()
+    if args.model_backbone == "vit":
+        if args.input_modality == "motion":
+            raise ValueError("input_modality=motion requires --model_backbone i3d.")
+        return
+
+    if args.input_modality != "motion":
+        raise ValueError(
+            f"model_backbone={args.model_backbone} currently supports input_modality=motion only "
+            f"(got {args.input_modality})."
+        )
+    if args.embed_dim == 384:
+        args.embed_dim = 512
+        print("[CONFIG] overriding embed_dim -> 512 for I3D motion model", flush=True)
+    if args.num_frames == 8:
+        args.num_frames = 16
+        print("[CONFIG] overriding num_frames -> 16 for I3D motion model", flush=True)
+    if args.flow_hw == 224:
+        args.flow_hw = 112
+        print("[CONFIG] overriding flow_hw -> 112 for I3D motion model", flush=True)
 
 
 def build_warmup_cosine_scheduler(
@@ -680,7 +766,7 @@ def make_dataset(args: argparse.Namespace, manifest_path: Path, label_csv: Path,
         p_scl=0.0,
         p_shr=0.0,
         p_trn=0.0,
-        spatial_crop_mode="random",
+        spatial_crop_mode="random" if is_train else "center",
         seed=args.seed,
         dataset_split_txt=str(manifest_path),
         class_id_to_label_csv=str(label_csv),
@@ -694,6 +780,7 @@ def make_dataloader(
     seed: int,
     num_workers: int,
     *,
+    sample_weights: torch.Tensor | None = None,
     multi_attribute: bool = False,
 ) -> DataLoader:
     from dataset import collate_rgb_clip, collate_motion, collate_video_motion, MotionTwoStreamZstdDataset
@@ -710,7 +797,12 @@ def make_dataloader(
     else:
         base_collate = collate_video_motion
     collate_fn = make_multi_attribute_collate(base_collate) if multi_attribute else base_collate
-    sampler = dataset.build_sampler(seed) if shuffle and hasattr(dataset, "build_sampler") else None
+    if sample_weights is not None:
+        sampler = WeightedRandomSampler(sample_weights, num_samples=len(dataset), replacement=True)
+    elif shuffle and hasattr(dataset, "build_sampler"):
+        sampler = dataset.build_sampler(seed)
+    else:
+        sampler = None
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -1162,13 +1254,10 @@ def train_fold_multi_attribute(
         seed=args.seed + 100 + fold.fold_id, num_workers=args.num_workers, multi_attribute=True,
     )
 
-    encoder = ViTSEncoder(
-        input_modality=args.input_modality, in_channels=3,
-        embed_dim=args.embed_dim, img_size=args.img_size,
-        imagenet_pretrained=args.imagenet_pretrained,
-        num_frames=args.num_frames, temporal_pool=args.temporal_pool,
-        hf_cache_dir=args.hf_cache_dir,
-    ).to(device)
+    encoder = build_encoder(args).to(device)
+
+    if args.pretrained_ckpt:
+        load_pretrained_weights(encoder, resolve_ckpt_path(args.pretrained_ckpt), device)
 
     attributes_num_classes = {attr: len(attribute_class_names(attr)) for attr in attributes}
     model = MultiAttributePrivacyAttackModel(
@@ -1179,7 +1268,7 @@ def train_fold_multi_attribute(
 
     total_params, trainable_params = count_parameters(model)
     print(
-        f"[MODEL] MultiAttr ViT-S  trainable={trainable_params}/{total_params} "
+        f"[MODEL] MultiAttr {args.model_backbone.upper()}  trainable={trainable_params}/{total_params} "
         f"({100.0 * trainable_params / max(1, total_params):.2f}%)",
         flush=True,
     )
@@ -1467,12 +1556,18 @@ def train_attribute_fold(
     )
     test_dataset = make_dataset(args, artifacts.test_manifest, artifacts.label_csv, is_train=False)
 
+    class_weights = compute_class_weights(train_dataset.labels, len(class_names), args.class_weight_mode)
+    train_sample_weights = None
+    if getattr(args, "class_aware_sampling", False) and class_weights is not None:
+        train_sample_weights = class_weights[torch.tensor(train_dataset.labels, dtype=torch.long)]
+
     train_loader = make_dataloader(
         dataset=train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         seed=args.seed + fold.fold_id,
         num_workers=args.num_workers,
+        sample_weights=train_sample_weights,
     )
     test_loader = make_dataloader(
         dataset=test_dataset,
@@ -1489,27 +1584,10 @@ def train_attribute_fold(
         flush=True,
     )
 
-    encoder = ViTSEncoder(
-        input_modality=args.input_modality,
-        in_channels=3,  # always 3ch: mhi repeated, flow padded with magnitude, rgb as-is
-        embed_dim=args.embed_dim,
-        img_size=args.img_size,
-        imagenet_pretrained=args.imagenet_pretrained,
-        num_frames=args.num_frames,
-        temporal_pool=args.temporal_pool,
-        hf_cache_dir=args.hf_cache_dir,
-    ).to(device)
+    encoder = build_encoder(args).to(device)
 
     if args.pretrained_ckpt:
-        ckpt_path = resolve_ckpt_path(args.pretrained_ckpt)
-        ckpt = torch.load(str(ckpt_path), map_location=device)
-        state = ckpt.get("model_state", ckpt)
-        missing, unexpected = encoder.load_state_dict(state, strict=False)
-        print(f"[PRETRAIN] loaded encoder weights from {ckpt_path}")
-        if missing:
-            print(f"[PRETRAIN] missing keys: {missing}")
-        if unexpected:
-            print(f"[PRETRAIN] unexpected keys: {unexpected}")
+        load_pretrained_weights(encoder, resolve_ckpt_path(args.pretrained_ckpt), device)
 
     model = PrivacyAttackModel(
         encoder=encoder,
@@ -1541,7 +1619,7 @@ def train_attribute_fold(
         "trainable_fraction": float(trainable_params / max(1, total_params)),
     }
     print(
-        f"[MODEL] ViT-S  trainable={trainable_params}/{total_params} "
+        f"[MODEL] {args.model_backbone.upper()}  trainable={trainable_params}/{total_params} "
         f"({100.0 * model_summary['trainable_fraction']:.2f}%)",
         flush=True,
     )
@@ -1566,7 +1644,7 @@ def train_attribute_fold(
     except AttributeError:
         scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
-    loss_weight = compute_class_weights(train_dataset.labels, len(class_names), args.class_weight_mode)
+    loss_weight = class_weights
     if loss_weight is not None:
         loss_weight = loss_weight.to(device)
 
@@ -1715,11 +1793,12 @@ def resolve_holdout_manifests(hmdb_val_manifest_dir: str) -> List[Path]:
 
 def main() -> None:
     args = parse_args()
+    resolve_backbone_args(args)
 
     attributes = parse_attributes(args.attributes)
     device = torch.device(args.device)
 
-    modality_tag = args.input_modality
+    modality_tag = args.input_modality if args.model_backbone == "vit" else f"{args.input_modality}_{args.model_backbone}"
     out_dir = Path(args.out_dir).resolve() / modality_tag
     out_dir.mkdir(parents=True, exist_ok=True)
     save_json(out_dir / "run_config.json", vars(args))
@@ -1730,9 +1809,10 @@ def main() -> None:
 
     print(
         f"[CONFIG] dataset=pa_hmdb51 modality={args.input_modality} "
-        f"backbone=deit_small_patch16_224 pretrained={args.imagenet_pretrained} "
+        f"backbone={args.model_backbone} pretrained={args.imagenet_pretrained if args.model_backbone == 'vit' else bool(args.pretrained_ckpt)} "
         f"lr={args.lr} wd={args.weight_decay} epochs={args.epochs} bs={args.batch_size} "
-        f"warmup_epochs={args.warmup_epochs} num_frames={args.num_frames} temporal_samples={args.temporal_samples}",
+        f"warmup_epochs={args.warmup_epochs} num_frames={args.num_frames} flow_hw={args.flow_hw} "
+        f"temporal_samples={args.temporal_samples}",
         flush=True,
     )
 
@@ -1768,7 +1848,7 @@ def main() -> None:
     start_time = time.time()
 
     if args.multi_attribute:
-        print(f"\n=== Multi-attribute training ({args.input_modality}) ===", flush=True)
+        print(f"\n=== Multi-attribute training ({args.input_modality}, {args.model_backbone}) ===", flush=True)
         for fold in folds:
             print(f"[FOLD {fold.fold_id}] train={len(fold.train_records)} test={len(fold.test_records)}", flush=True)
             fold_rows = train_fold_multi_attribute(
@@ -1830,7 +1910,11 @@ def main() -> None:
     plot_overall_attribute_summary(all_fold_rows, out_prefix=out_dir / "overall_summary", input_modality=modality_tag)
 
     elapsed = time.time() - start_time
-    print(f"\n[OK] finished PA-HMDB51 ViT-S privacy cross-validation in {elapsed / 60.0:.1f} minutes", flush=True)
+    print(
+        f"\n[OK] finished PA-HMDB51 {args.model_backbone.upper()} privacy cross-validation "
+        f"in {elapsed / 60.0:.1f} minutes",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

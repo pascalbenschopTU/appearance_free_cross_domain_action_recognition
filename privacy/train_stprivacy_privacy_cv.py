@@ -10,13 +10,18 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Sampler
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
 
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -47,6 +52,61 @@ class FoldArtifacts:
     train_manifest: Path
     test_manifest: Path
     label_csv: Path | None
+
+
+class RepeatedVideoTemporalSampler(Sampler[int]):
+    def __init__(self, base_len: int, repeats: int, seed: int):
+        self.base_len = int(base_len)
+        self.repeats = max(1, int(repeats))
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + 1000003 * self.epoch)
+        for repeat_idx in range(self.repeats):
+            offset = repeat_idx * self.base_len
+            for video_idx in torch.randperm(self.base_len, generator=generator).tolist():
+                yield offset + video_idx
+
+    def __len__(self) -> int:
+        return self.base_len * self.repeats
+
+
+class RepeatedSampleDataset(Dataset):
+    def __init__(self, base_dataset, *, repeats: int, seed: int):
+        self.base_dataset = base_dataset
+        self.repeats = max(1, int(repeats))
+        self.seed = int(seed)
+        self.epoch = 0
+        self.paths = list(getattr(base_dataset, "paths", []))
+        self.classnames = list(getattr(base_dataset, "classnames", []))
+        base_labels = list(getattr(base_dataset, "labels", []))
+        self.labels = base_labels * self.repeats
+        if hasattr(self.base_dataset, "uniform_single_frame_views"):
+            self.base_dataset.uniform_single_frame_views = self.repeats
+
+    def __len__(self) -> int:
+        return len(self.base_dataset) * self.repeats
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        if hasattr(self.base_dataset, "set_epoch"):
+            self.base_dataset.set_epoch(epoch)
+
+    def build_sampler(self, seed: int) -> RepeatedVideoTemporalSampler:
+        return RepeatedVideoTemporalSampler(len(self.base_dataset), self.repeats, seed)
+
+    def __getitem__(self, idx: int):
+        base_len = len(self.base_dataset)
+        repeat_idx = int(idx // base_len)
+        video_idx = int(idx % base_len)
+        if hasattr(self.base_dataset, "_load_item"):
+            return self.base_dataset._load_item(video_idx, sample_offset=repeat_idx)
+        return self.base_dataset[video_idx]
 
 
 class JointActionPrivacyModel(nn.Module):
@@ -185,6 +245,87 @@ class PrivacyAttackModel(nn.Module):
         return outputs
 
 
+# ---------------------------------------------------------------------------
+# Multi-attribute model (BCEWithLogitsLoss, matching motion posthoc attacker)
+# ---------------------------------------------------------------------------
+
+class MultiAttributePrivacyModel(nn.Module):
+    """Shared encoder with a single linear head producing one logit per
+    attribute.  Loss: BCEWithLogitsLoss (same as the motion posthoc attacker
+    in train_domain_adaptation.py)."""
+
+    def __init__(self, encoder: nn.Module, embed_dim: int, attributes: List[str], head_dropout: float = 0.0):
+        super().__init__()
+        self.encoder = encoder
+        self.attributes = list(attributes)
+        self.head = nn.Sequential(
+            nn.Dropout(float(head_dropout)),
+            nn.Linear(int(embed_dim), len(attributes)),
+        )
+
+    def forward(self, mhi: torch.Tensor, flow: torch.Tensor | None) -> Dict[str, torch.Tensor]:
+        outputs = self.encoder(mhi, flow)
+        outputs["privacy_logits"] = self.head(outputs["emb_fuse_raw"])
+        return outputs
+
+
+class MultiAttributeLabelDataset:
+    """Wraps a single-label dataset and replaces its scalar label with a dict
+    of per-attribute labels looked up from PrivacyVideoRecord objects."""
+
+    def __init__(self, base_dataset, records: List[PrivacyVideoRecord], attributes: List[str]):
+        self.base_dataset = base_dataset
+        self.attributes = list(attributes)
+        self._label_map: Dict[str, Dict[str, int]] = {
+            Path(r.rel_path).stem.lower(): {attr: int(r.labels[attr]) for attr in attributes}
+            for r in records
+        }
+        self._default: Dict[str, int] = {attr: 0 for attr in attributes}
+
+        base_paths: List[str] = list(getattr(base_dataset, "paths", []))
+        n = len(base_dataset)
+        nv = len(base_paths) if base_paths else n
+
+        self.labels_per_attr: Dict[str, List[int]] = {attr: [] for attr in attributes}
+        for i in range(n):
+            path = base_paths[i % nv] if base_paths else ""
+            stem = Path(path).stem.lower() if path else ""
+            entry = self._label_map.get(stem, self._default)
+            for attr in attributes:
+                self.labels_per_attr[attr].append(entry[attr])
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def set_epoch(self, epoch: int) -> None:
+        if hasattr(self.base_dataset, "set_epoch"):
+            self.base_dataset.set_epoch(epoch)
+
+    def build_sampler(self, seed: int):
+        if hasattr(self.base_dataset, "build_sampler"):
+            return self.base_dataset.build_sampler(seed)
+        return None
+
+    def __getitem__(self, idx: int):
+        primary, secondary, _, path = self.base_dataset[idx]
+        stem = Path(path).stem.lower()
+        labels_dict = {attr: self._label_map.get(stem, self._default)[attr] for attr in self.attributes}
+        return primary, secondary, labels_dict, path
+
+
+def _make_multi_attribute_collate(base_collate_fn):
+    def collate(batch):
+        attrs = list(batch[0][2].keys())
+        proxy = [(inp, sec, 0, path) for inp, sec, _, path in batch]
+        inputs, second, _, paths = base_collate_fn(proxy)
+        labels = {
+            attr: torch.tensor([item[2][attr] for item in batch], dtype=torch.long)
+            for attr in attrs
+        }
+        return inputs, second, labels, paths
+    return collate
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_name", type=str, default="hmdb51", choices=["hmdb51", "ucf101"])
@@ -206,6 +347,18 @@ def parse_args() -> argparse.Namespace:
         "--split_manifest_dir",
         type=str,
         default="",
+    )
+    parser.add_argument(
+        "--train_manifests",
+        type=str,
+        default="",
+        help="Optional comma-separated explicit train manifest path(s). Overrides --split_manifest_dir/--splits.",
+    )
+    parser.add_argument(
+        "--test_manifests",
+        type=str,
+        default="",
+        help="Optional comma-separated explicit test manifest path(s). Overrides --split_manifest_dir/--splits.",
     )
     parser.add_argument(
         "--action_label_csv",
@@ -240,6 +393,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rgb_frames", type=int, default=64)
     parser.add_argument("--rgb_sampling", type=str, default="uniform", choices=["uniform", "center", "random"])
     parser.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
+    parser.add_argument(
+        "--privacy_frame_protocol",
+        type=str,
+        default="legacy_clip",
+        choices=["legacy_clip", "single_frame"],
+    )
+    parser.add_argument("--train_views_per_video", type=int, default=4)
+    parser.add_argument("--eval_views_per_video", type=int, default=8)
+    parser.add_argument("--eval_view_sampling", type=str, default="uniform", choices=["uniform"])
     parser.add_argument("--diff_threshold", type=float, default=15.0)
     parser.add_argument("--flow_max_disp", type=float, default=20.0)
     parser.add_argument("--flow_normalize", action="store_true")
@@ -265,6 +427,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use_stems", action="store_true")
     parser.add_argument("--active_branch", type=str, default="both", choices=["both", "first", "second"])
     parser.add_argument("--class_weight_mode", type=str, default="effective_sample_count", choices=["none", "inverse_freq", "sqrt_inverse_freq", "effective_sample_count", "effective_num"])
+    parser.add_argument(
+        "--multi_attribute",
+        action="store_true",
+        help=(
+            "Train all attributes simultaneously with BCEWithLogitsLoss "
+            "(matching the motion posthoc attacker).  Requires --model_backbone resnet50/resnet18."
+        ),
+    )
+    parser.add_argument(
+        "--privacy_metric_mode",
+        type=str,
+        default="classwise",
+        choices=["classwise", "positive_only"],
+        help=(
+            "How to report privacy AP/F1 metrics. "
+            "'classwise' averages over both classes per attribute; "
+            "'positive_only' reports only the positive-class AP and F1."
+        ),
+    )
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=10)
@@ -304,6 +485,55 @@ def seed_worker(worker_id: int) -> None:
     worker_seed = (torch.initial_seed() + worker_id) % (2**32)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+def is_single_frame_protocol(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "privacy_frame_protocol", "legacy_clip")).lower() == "single_frame"
+
+
+def protocol_train_repeats(args: argparse.Namespace) -> int:
+    if is_single_frame_protocol(args):
+        return max(1, int(args.train_views_per_video))
+    return 1
+
+
+def protocol_eval_repeats(args: argparse.Namespace) -> int:
+    if is_single_frame_protocol(args):
+        return max(1, int(args.eval_views_per_video))
+    return 1
+
+
+def maybe_repeat_single_motion_view(inputs: torch.Tensor, second: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    return ((inputs.repeat(1, 1, 8, 1, 1) if inputs.ndim == 5 and inputs.shape[2] == 1 else inputs), (second.repeat(1, 1, 8, 1, 1) if second.ndim == 5 and second.shape[2] == 1 else second))
+
+
+def group_probabilities_by_path(
+    rel_paths: Sequence[str],
+    y_true: Sequence[int],
+    y_score: np.ndarray,
+) -> tuple[List[str], List[int], np.ndarray]:
+    groups: Dict[str, Dict[str, object]] = {}
+    order: List[str] = []
+    for rel_path, true_id, score in zip(rel_paths, y_true, y_score):
+        key = str(rel_path)
+        if key not in groups:
+            groups[key] = {"true_id": int(true_id), "scores": []}
+            order.append(key)
+        else:
+            stored = int(groups[key]["true_id"])
+            if stored != int(true_id):
+                raise ValueError(f"Inconsistent labels across repeated views for {key!r}: {stored} vs {int(true_id)}")
+        groups[key]["scores"].append(np.asarray(score, dtype=np.float64))
+
+    grouped_paths: List[str] = []
+    grouped_true: List[int] = []
+    grouped_scores: List[np.ndarray] = []
+    for key in order:
+        entry = groups[key]
+        grouped_paths.append(key)
+        grouped_true.append(int(entry["true_id"]))
+        grouped_scores.append(np.mean(np.stack(entry["scores"], axis=0), axis=0))
+    return grouped_paths, grouped_true, np.asarray(grouped_scores, dtype=np.float64)
 
 
 def count_parameters(module: nn.Module) -> tuple[int, int]:
@@ -385,6 +615,10 @@ def parse_split_ids(spec: str) -> List[int]:
     return split_ids
 
 
+def parse_manifest_list(spec: str) -> List[Path]:
+    return [Path(part.strip()).expanduser().resolve() for part in str(spec).split(",") if part.strip()]
+
+
 def apply_dataset_defaults(args: argparse.Namespace) -> None:
     dataset = str(args.dataset_name).lower()
     default_root = WORKSPACE_ROOT / "datasets" / dataset
@@ -400,6 +634,22 @@ def apply_dataset_defaults(args: argparse.Namespace) -> None:
 
 
 def resolve_split_manifest_paths(args: argparse.Namespace, split_ids: Sequence[int]) -> tuple[List[Path], List[Path]]:
+    explicit_train = parse_manifest_list(getattr(args, "train_manifests", ""))
+    explicit_test = parse_manifest_list(getattr(args, "test_manifests", ""))
+    if explicit_train or explicit_test:
+        if not explicit_train or not explicit_test:
+            raise ValueError("Provide both --train_manifests and --test_manifests when using explicit manifests.")
+        if len(explicit_train) != len(explicit_test):
+            raise ValueError(
+                f"--train_manifests and --test_manifests must have equal length, got "
+                f"{len(explicit_train)} and {len(explicit_test)}."
+            )
+        missing = [str(path) for path in explicit_train + explicit_test if not path.is_file()]
+        if missing:
+            preview = ", ".join(missing[:8])
+            raise FileNotFoundError(f"Missing explicit manifest path(s): {preview}")
+        return explicit_train, explicit_test
+
     split_dir = Path(args.split_manifest_dir)
     train_manifests = [split_dir / f"train{split_id}.txt" for split_id in split_ids]
     test_manifests = [split_dir / f"test{split_id}.txt" for split_id in split_ids]
@@ -702,12 +952,21 @@ def make_dataset(
 ):
     from dataset import RGBVideoClipDataset, VideoMotionDataset
 
+    rgb_frames = int(args.rgb_frames)
+    rgb_sampling = str(args.rgb_sampling)
+    mhi_frames = int(args.mhi_frames)
+    flow_frames = int(args.flow_frames)
+    if is_single_frame_protocol(args):
+        rgb_frames = 1
+        rgb_sampling = "random" if is_train else str(args.eval_view_sampling)
+        mhi_frames = flow_frames = 1
+
     if args.input_modality == "rgb":
         return RGBVideoClipDataset(
             root_dir=args.root_dir,
-            rgb_frames=args.rgb_frames,
+            rgb_frames=rgb_frames,
             img_size=args.img_size,
-            sampling_mode=args.rgb_sampling,
+            sampling_mode=rgb_sampling,
             dataset_split_txt=str(manifest_path),
             class_id_to_label_csv=(str(label_csv) if label_csv is not None else None),
             rgb_norm=args.rgb_norm,
@@ -726,8 +985,8 @@ def make_dataset(
         root_dir=args.root_dir,
         img_size=args.img_size,
         flow_hw=args.flow_hw,
-        mhi_frames=args.mhi_frames,
-        flow_frames=args.flow_frames,
+        mhi_frames=mhi_frames,
+        flow_frames=flow_frames,
         mhi_windows=mhi_windows,
         diff_threshold=args.diff_threshold,
         flow_backend=args.flow_backend,
@@ -757,16 +1016,28 @@ def make_dataloader(
     shuffle: bool,
     seed: int,
     num_workers: int,
+    multi_attribute: bool = False,
 ) -> DataLoader:
-    from dataset import collate_rgb_clip, collate_video_motion
+    from dataset import MotionTwoStreamZstdDataset, collate_motion, collate_rgb_clip, collate_video_motion
 
     generator = torch.Generator()
     generator.manual_seed(seed)
-    collate_fn = collate_rgb_clip if hasattr(dataset, "rgb_frames") else collate_video_motion
+    inner = dataset
+    while isinstance(inner, (RepeatedSampleDataset, MultiAttributeLabelDataset)):
+        inner = getattr(inner, "base_dataset", inner)
+    if hasattr(inner, "rgb_frames") or hasattr(dataset, "rgb_frames"):
+        base_collate = collate_rgb_clip
+    elif isinstance(inner, MotionTwoStreamZstdDataset):
+        base_collate = collate_motion
+    else:
+        base_collate = collate_video_motion
+    collate_fn = _make_multi_attribute_collate(base_collate) if multi_attribute else base_collate
+    sampler = dataset.build_sampler(seed) if shuffle and hasattr(dataset, "build_sampler") else None
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         collate_fn=collate_fn,
@@ -837,6 +1108,7 @@ def compute_metrics(
     y_pred: Sequence[int],
     class_names: Sequence[str],
     y_score: np.ndarray | None = None,
+    positive_class_only: bool = False,
 ) -> Dict[str, object]:
     y_true_arr = np.asarray(list(y_true), dtype=np.int64)
     y_pred_arr = np.asarray(list(y_pred), dtype=np.int64)
@@ -864,7 +1136,10 @@ def compute_metrics(
     balanced_accuracy = float(recall[valid].mean()) if np.any(valid) else 0.0
     macro_precision = float(precision[valid].mean()) if np.any(valid) else 0.0
     macro_recall = float(recall[valid].mean()) if np.any(valid) else 0.0
-    macro_f1 = float(f1[valid].mean()) if np.any(valid) else 0.0
+    if positive_class_only and num_classes >= 2:
+        macro_f1 = float(f1[1])
+    else:
+        macro_f1 = float(f1[valid].mean()) if np.any(valid) else 0.0
     weighted_f1 = float((f1 * support).sum() / total)
     majority_baseline = float(support.max() / total) if np.any(valid) else 0.0
     chance_uniform = 1.0 / float(num_classes)
@@ -873,13 +1148,18 @@ def compute_metrics(
     if y_score is not None:
         score_arr = np.asarray(y_score, dtype=np.float64)
         if score_arr.shape == (len(y_true_arr), num_classes):
-            aps: List[float] = []
-            for class_idx in range(num_classes):
-                class_true = (y_true_arr == class_idx).astype(np.int64)
-                if class_true.sum() <= 0:
-                    continue
-                aps.append(binary_average_precision(class_true, score_arr[:, class_idx]))
-            cmap = float(np.mean(aps)) if aps else 0.0
+            if positive_class_only and num_classes >= 2:
+                class_true = (y_true_arr == 1).astype(np.int64)
+                if class_true.sum() > 0:
+                    cmap = binary_average_precision(class_true, score_arr[:, 1])
+            else:
+                aps: List[float] = []
+                for class_idx in range(num_classes):
+                    class_true = (y_true_arr == class_idx).astype(np.int64)
+                    if class_true.sum() <= 0:
+                        continue
+                    aps.append(binary_average_precision(class_true, score_arr[:, class_idx]))
+                cmap = float(np.mean(aps)) if aps else 0.0
 
     per_class = []
     for idx, name in enumerate(class_names):
@@ -1032,7 +1312,7 @@ def forward_privacy_model(
 ) -> Dict[str, torch.Tensor]:
     if input_modality == "rgb":
         return model(inputs, None)
-    return model(inputs, second)
+    return model(*maybe_repeat_single_motion_view(inputs, second))
 
 
 def train_one_epoch(
@@ -1049,6 +1329,11 @@ def train_one_epoch(
     input_modality: str,
 ) -> Dict[str, float]:
     model.train()
+
+    if hasattr(dataloader.dataset, "set_epoch"):
+        dataloader.dataset.set_epoch(epoch_idx)
+    if hasattr(dataloader.sampler, "set_epoch"):
+        dataloader.sampler.set_epoch(epoch_idx)
 
     running_loss = 0.0
     seen = 0
@@ -1098,6 +1383,8 @@ def evaluate(
     class_names: Sequence[str],
     root_dir: Path,
     input_modality: str,
+    aggregate_by_video: bool = False,
+    positive_class_only: bool = False,
 ) -> Dict[str, object]:
     model.eval()
     all_true: List[int] = []
@@ -1120,14 +1407,26 @@ def evaluate(
             all_probabilities.extend(probabilities.cpu().tolist())
             all_paths.extend(relative_paths(paths, root_dir))
 
+    score_array = np.asarray(all_probabilities, dtype=np.float64)
+    rel_paths_for_metrics = list(all_paths)
+    true_for_metrics = list(all_true)
+    if aggregate_by_video:
+        rel_paths_for_metrics, true_for_metrics, score_array = group_probabilities_by_path(
+            all_paths,
+            all_true,
+            score_array,
+        )
+        all_pred = score_array.argmax(axis=1).tolist()
+        all_confidence = score_array.max(axis=1).tolist()
     metrics = compute_metrics(
-        all_true,
+        true_for_metrics,
         all_pred,
         class_names,
-        y_score=np.asarray(all_probabilities, dtype=np.float64),
+        y_score=score_array,
+        positive_class_only=positive_class_only,
     )
     predictions = []
-    for rel_path, true_id, pred_id, confidence in zip(all_paths, all_true, all_pred, all_confidence):
+    for rel_path, true_id, pred_id, confidence in zip(rel_paths_for_metrics, true_for_metrics, all_pred, all_confidence):
         predictions.append(
             {
                 "rel_path": rel_path,
@@ -1379,7 +1678,19 @@ def train_joint_fold(
     fold_dir = out_dir / "joint_action_privacy" / attr_tag / f"fold_{fold.fold_id}"
     fold_dir.mkdir(parents=True, exist_ok=True)
     train_dataset = make_dataset(args, artifacts.train_manifest, artifacts.label_csv, is_train=True)
+    if is_single_frame_protocol(args):
+        train_dataset = RepeatedSampleDataset(
+            train_dataset,
+            repeats=protocol_train_repeats(args),
+            seed=int(args.seed),
+        )
     test_dataset = make_dataset(args, artifacts.test_manifest, artifacts.label_csv, is_train=False)
+    if is_single_frame_protocol(args):
+        test_dataset = RepeatedSampleDataset(
+            test_dataset,
+            repeats=protocol_eval_repeats(args),
+            seed=int(args.seed) + 50000,
+        )
     maybe_save_fold_dataset_debug(args=args, out_dir=fold_dir, train_dataset=train_dataset, test_dataset=test_dataset)
 
     train_loader = make_dataloader(
@@ -1768,7 +2079,19 @@ def train_attribute_fold(
     fold_dir = out_dir / attribute / f"fold_{fold.fold_id}"
     fold_dir.mkdir(parents=True, exist_ok=True)
     train_dataset = make_dataset(args, artifacts.train_manifest, artifacts.label_csv, is_train=True)
+    if is_single_frame_protocol(args):
+        train_dataset = RepeatedSampleDataset(
+            train_dataset,
+            repeats=protocol_train_repeats(args),
+            seed=int(args.seed),
+        )
     test_dataset = make_dataset(args, artifacts.test_manifest, artifacts.label_csv, is_train=False)
+    if is_single_frame_protocol(args):
+        test_dataset = RepeatedSampleDataset(
+            test_dataset,
+            repeats=protocol_eval_repeats(args),
+            seed=int(args.seed) + 50000,
+        )
     maybe_save_fold_dataset_debug(args=args, out_dir=fold_dir, train_dataset=train_dataset, test_dataset=test_dataset)
 
     train_loader = make_dataloader(
@@ -1863,6 +2186,8 @@ def train_attribute_fold(
                 class_names=class_names,
                 root_dir=Path(args.root_dir),
                 input_modality=args.input_modality,
+                aggregate_by_video=is_single_frame_protocol(args),
+                positive_class_only=(args.privacy_metric_mode == "positive_only"),
             )
             eval_score = extract_early_stop_score(eval_metrics, early_stop_metric)
             epoch_stats[f"eval_{early_stop_metric}"] = float(eval_score)
@@ -1896,6 +2221,8 @@ def train_attribute_fold(
             class_names=class_names,
             root_dir=Path(args.root_dir),
             input_modality=args.input_modality,
+            aggregate_by_video=is_single_frame_protocol(args),
+            positive_class_only=(args.privacy_metric_mode == "positive_only"),
         )
 
     save_rows_csv(
@@ -1966,6 +2293,312 @@ def train_attribute_fold(
         "stopped_early": bool(stopped_early),
     }
     return fold_summary
+
+
+# ---------------------------------------------------------------------------
+# Multi-attribute BCE training (matching motion posthoc attacker style)
+# ---------------------------------------------------------------------------
+
+def _eval_multi_attribute_bce(
+    model: "MultiAttributePrivacyModel",
+    dataloader: DataLoader,
+    device: torch.device,
+    root_dir: Path,
+    input_modality: str,
+    positive_class_only: bool = False,
+    aggregate_by_video: bool = False,
+) -> Dict[str, Dict[str, object]]:
+    """Evaluate a MultiAttributePrivacyModel.  Returns {attr: compute_metrics dict}."""
+    attributes = model.attributes
+    model.eval()
+    all_logits: List[torch.Tensor] = []
+    all_labels: Dict[str, List[int]] = {attr: [] for attr in attributes}
+    all_paths: List[str] = []
+
+    with torch.no_grad():
+        for inputs, second, labels, paths in dataloader:
+            inputs = inputs.to(device, non_blocking=True)
+            second = second.to(device, non_blocking=True)
+            if device.type != "cuda":
+                inputs = inputs.float()
+                second = second.float()
+            with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
+                outputs = forward_privacy_model(model, inputs, second, input_modality)
+            all_logits.append(outputs["privacy_logits"].float().cpu())
+            for attr, v in labels.items():
+                all_labels[attr].extend(v.tolist())
+            all_paths.extend(relative_paths(paths, root_dir))
+
+    logits_arr = torch.cat(all_logits, dim=0).numpy()   # (N, num_attrs)
+    probs_arr = 1.0 / (1.0 + np.exp(-logits_arr))       # sigmoid
+
+    if aggregate_by_video:
+        # Average probabilities per video path before thresholding
+        path_order: List[str] = []
+        path_to_probs: Dict[str, List[np.ndarray]] = {}
+        path_to_labels: Dict[str, Dict[str, int]] = {}
+        for i, path in enumerate(all_paths):
+            if path not in path_to_probs:
+                path_order.append(path)
+                path_to_probs[path] = []
+                path_to_labels[path] = {attr: all_labels[attr][i] for attr in attributes}
+            path_to_probs[path].append(probs_arr[i])
+        all_paths = path_order
+        probs_arr = np.stack([np.mean(path_to_probs[p], axis=0) for p in path_order])
+        all_labels = {
+            attr: [path_to_labels[p][attr] for p in path_order]
+            for attr in attributes
+        }
+
+    results: Dict[str, Dict[str, object]] = {}
+    for i, attr in enumerate(attributes):
+        class_names = attribute_class_names(attr)
+        y_true = np.array(all_labels[attr], dtype=np.int64)
+        p = probs_arr[:, i]
+        # Stack [p_neg, p_pos] so compute_metrics can compute cmap over both classes
+        y_score = np.stack([1.0 - p, p], axis=1)
+        y_pred = (p >= 0.5).astype(np.int64).tolist()
+        metrics = compute_metrics(
+            y_true.tolist(), y_pred, class_names,
+            y_score=y_score,
+            positive_class_only=positive_class_only,
+        )
+        predictions = [
+            {
+                "rel_path": path,
+                "true_id": int(t),
+                "true_name": class_names[int(t)],
+                "pred_id": int(pr),
+                "pred_name": class_names[int(pr)],
+                "confidence": float(probs_arr[j, i]),
+            }
+            for j, (path, t, pr) in enumerate(zip(all_paths, y_true.tolist(), y_pred))
+        ]
+        metrics["predictions"] = predictions
+        results[attr] = metrics
+    return results
+
+
+def train_multi_attribute_fold_bce(
+    args: argparse.Namespace,
+    device: torch.device,
+    attributes: List[str],
+    fold: "PrivacyFold",
+    artifacts: Dict[str, FoldArtifacts],
+    out_dir: Path,
+) -> List[Dict[str, object]]:
+    """Train all attributes simultaneously with BCEWithLogitsLoss on a shared
+    ResNet encoder.  Returns per-attribute fold summaries (same format as
+    train_attribute_fold)."""
+    fold_dir = out_dir / "multi_attribute" / f"fold_{fold.fold_id}"
+    fold_dir.mkdir(parents=True, exist_ok=True)
+
+    first_artifacts = artifacts[attributes[0]]
+    base_train = make_dataset(args, first_artifacts.train_manifest, first_artifacts.label_csv, is_train=True)
+    if is_single_frame_protocol(args):
+        base_train = RepeatedSampleDataset(base_train, repeats=protocol_train_repeats(args), seed=int(args.seed))
+    train_dataset = MultiAttributeLabelDataset(base_train, fold.train_records, attributes)
+
+    base_test = make_dataset(args, first_artifacts.test_manifest, first_artifacts.label_csv, is_train=False)
+    if is_single_frame_protocol(args):
+        base_test = RepeatedSampleDataset(base_test, repeats=protocol_eval_repeats(args), seed=int(args.seed) + 50000)
+    test_dataset = MultiAttributeLabelDataset(base_test, fold.test_records, attributes)
+
+    train_loader = make_dataloader(train_dataset, args.batch_size, shuffle=True,
+                                   seed=args.seed + fold.fold_id, num_workers=args.num_workers,
+                                   multi_attribute=True)
+    test_loader = make_dataloader(test_dataset, args.batch_size, shuffle=False,
+                                  seed=args.seed + 100 + fold.fold_id, num_workers=args.num_workers,
+                                  multi_attribute=True)
+
+    print(
+        f"[SPLIT] multi_attribute BCE fold={fold.fold_id} "
+        f"train_videos={len(fold.train_records)} test_videos={len(fold.test_records)} "
+        f"effective_train_samples={len(train_dataset)}",
+        flush=True,
+    )
+
+    num_first_channels, num_second_channels = infer_encoder_channels(args)
+    encoder = build_encoder(args, num_mhi_channels=num_first_channels,
+                             num_second_channels=num_second_channels).to(device)
+    model = MultiAttributePrivacyModel(
+        encoder=encoder,
+        embed_dim=args.embed_dim,
+        attributes=attributes,
+        head_dropout=getattr(args, "head_dropout", 0.0),
+    ).to(device)
+
+    total_params, trainable_params = sum(p.numel() for p in model.parameters()), \
+                                     sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(
+        f"[MODEL] MultiAttr ResNet  trainable={trainable_params}/{total_params} "
+        f"({100.0 * trainable_params / max(1, total_params):.2f}%)",
+        flush=True,
+    )
+
+    # Optional BCE pos_weight: n_neg / n_pos per attribute (clipped at 10)
+    pos_weight: Optional[torch.Tensor] = None
+    if getattr(args, "class_weight_mode", "none") != "none":
+        pw = []
+        for attr in attributes:
+            labels_list = train_dataset.labels_per_attr[attr]
+            pos = float(sum(labels_list))
+            neg = float(len(labels_list) - pos)
+            pw.append(min(neg / max(pos, 1.0), 10.0))
+        pos_weight = torch.tensor(pw, dtype=torch.float32).to(device)
+        print(
+            "[POS_WEIGHT] " + " ".join(f"{a}={pos_weight[i].item():.2f}" for i, a in enumerate(attributes)),
+            flush=True,
+        )
+
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr, weight_decay=args.weight_decay,
+    )
+    total_steps = max(1, len(train_loader) * max(1, args.epochs))
+    scheduler = build_warmup_cosine_scheduler(
+        optimizer, base_lr=args.lr, min_lr=args.min_lr,
+        warmup_steps=args.warmup_steps, total_steps=total_steps,
+    )
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
+    except AttributeError:
+        scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+
+    positive_class_only = (getattr(args, "privacy_metric_mode", "classwise") == "positive_only")
+    selection_metric = getattr(args, "selection_metric", "cmap")
+    best_score = float("-inf")
+    best_state = None
+    best_eval_per_attr: Dict[str, Dict[str, object]] = {}
+    best_epoch = 0
+    history_rows: List[Dict[str, object]] = []
+
+    for epoch_idx in range(args.epochs):
+        model.train()
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch_idx)
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch_idx)
+
+        running_loss = 0.0
+        seen = 0
+        t0 = time.time()
+
+        for step_idx, (inputs, second, labels, _) in enumerate(train_loader, start=1):
+            inputs = inputs.to(device, non_blocking=True)
+            second = second.to(device, non_blocking=True)
+            if device.type != "cuda":
+                inputs = inputs.float()
+                second = second.float()
+
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
+                outputs = forward_privacy_model(model, inputs, second, args.input_modality)
+                # privacy_logits: (batch, num_attrs)
+                logits = outputs["privacy_logits"].float()
+                targets = torch.stack(
+                    [labels[attr].float().to(device) for attr in attributes], dim=1
+                )  # (batch, num_attrs)
+                loss = F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+
+            running_loss += float(loss.detach().item()) * inputs.shape[0]
+            seen += inputs.shape[0]
+
+            if args.print_every > 0 and step_idx % args.print_every == 0:
+                print(
+                    f"[epoch {epoch_idx + 1:02d}/{args.epochs:02d} step {step_idx:04d}/{len(train_loader):04d}] "
+                    f"loss={running_loss / max(1, seen):.4f} lr={optimizer.param_groups[0]['lr']:.6f} "
+                    f"time={(time.time() - t0) / 60.0:.1f}m",
+                    flush=True,
+                )
+
+        eval_per_attr = _eval_multi_attribute_bce(
+            model, test_loader, device,
+            Path(args.root_dir), args.input_modality,
+            positive_class_only=positive_class_only,
+            aggregate_by_video=is_single_frame_protocol(args),
+        )
+        mean_score = float(np.mean([float(m[selection_metric]) for m in eval_per_attr.values()]))
+        mean_f1 = float(np.mean([float(m["macro_f1"]) for m in eval_per_attr.values()]))
+        epoch_stats: Dict[str, object] = {
+            "epoch": epoch_idx + 1,
+            "loss": running_loss / max(1, seen),
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            "test_mean_f1": mean_f1,
+            f"test_mean_{selection_metric}": mean_score,
+        }
+        attr_scores = " ".join(f"{a}={eval_per_attr[a][selection_metric]:.4f}" for a in attributes)
+        print(
+            f"[EPOCH {epoch_idx:03d}] privacy_loss={running_loss / max(1, seen):.4f}  "
+            f"mean_f1={mean_f1:.4f}  mean_{selection_metric}={mean_score:.4f}  [{attr_scores}]",
+            flush=True,
+        )
+        if mean_score > best_score:
+            best_score = mean_score
+            best_epoch = epoch_idx + 1
+            best_eval_per_attr = eval_per_attr
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        history_rows.append(epoch_stats)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        eval_per_attr = best_eval_per_attr
+    else:
+        eval_per_attr = _eval_multi_attribute_bce(
+            model, test_loader, device,
+            Path(args.root_dir), args.input_modality,
+            positive_class_only=positive_class_only,
+            aggregate_by_video=is_single_frame_protocol(args),
+        )
+
+    save_rows_csv(fold_dir / "train_history.csv", history_rows,
+                  fieldnames=["epoch", "loss", "lr", "test_mean_f1", f"test_mean_{selection_metric}"])
+    torch.save({
+        "model_state": model.state_dict(),
+        "args": vars(args),
+        "fold_id": fold.fold_id,
+        "attributes": attributes,
+        "train_history": history_rows,
+        "best_epoch": best_epoch or args.epochs,
+    }, fold_dir / "checkpoint_final.pt")
+    if best_state is not None:
+        torch.save({"model_state": best_state, "args": vars(args), "fold_id": fold.fold_id},
+                   fold_dir / "checkpoint_best.pt")
+
+    fold_summaries: List[Dict[str, object]] = []
+    for attr in attributes:
+        m = eval_per_attr[attr]
+        attr_dir = out_dir / attr / f"fold_{fold.fold_id}_multi"
+        attr_dir.mkdir(parents=True, exist_ok=True)
+        save_rows_csv(attr_dir / "test_predictions.csv", m.pop("predictions", []))
+        save_json(attr_dir / "metrics.json", {"attribute": attr, "fold_id": fold.fold_id, "metrics": m})
+        save_rows_csv(attr_dir / "per_class_metrics.csv", m.get("per_class", []))
+        fold_summaries.append({
+            "attribute": attr,
+            "fold_id": fold.fold_id,
+            "num_train": len(train_dataset),
+            "num_test": len(test_dataset),
+            "num_classes": 2,
+            "accuracy": float(m["accuracy"]),
+            "top1_accuracy": float(m["top1_accuracy"]),
+            "balanced_accuracy": float(m["balanced_accuracy"]),
+            "macro_precision": float(m["macro_precision"]),
+            "macro_recall": float(m["macro_recall"]),
+            "f1": float(m["f1"]),
+            "macro_f1": float(m["macro_f1"]),
+            "weighted_f1": float(m["weighted_f1"]),
+            "cmap": float(m["cmap"]),
+            "majority_baseline": float(m["majority_baseline"]),
+            "chance_uniform": float(m["chance_uniform"]),
+            "best_epoch": int(best_epoch) if best_epoch > 0 else int(args.epochs),
+        })
+    save_json(fold_dir / "per_attribute_metrics.json", fold_summaries)
+    return fold_summaries
 
 
 def main() -> None:
@@ -2089,6 +2722,43 @@ def main() -> None:
         }
         save_rows_csv(joint_dir / "summary_metrics.csv", [summary_row])
         save_json(joint_dir / "summary_metrics.json", summary_row)
+    elif args.multi_attribute:
+        print(f"\n=== Multi-attribute BCE training: {', '.join(attributes)} ===", flush=True)
+        for fold in folds:
+            fold_artifacts = {attr: generated_artifacts[attr][fold.fold_id] for attr in attributes}
+            fold_rows = train_multi_attribute_fold_bce(
+                args=args, device=device, attributes=attributes,
+                fold=fold, artifacts=fold_artifacts, out_dir=out_dir,
+            )
+            all_fold_rows.extend(fold_rows)
+
+        # Aggregate per-attribute summaries from all_fold_rows (same format as per-attribute path)
+        for attribute in attributes:
+            attribute_rows = [r for r in all_fold_rows if r["attribute"] == attribute]
+            attribute_dir = out_dir / attribute
+            save_rows_csv(attribute_dir / "fold_metrics.csv", attribute_rows)
+            save_json(attribute_dir / "fold_metrics.json", attribute_rows)
+
+            summary_row = {
+                "attribute": attribute,
+                "accuracy_mean": float(np.mean([float(r["accuracy"]) for r in attribute_rows])),
+                "accuracy_std": float(np.std([float(r["accuracy"]) for r in attribute_rows], ddof=0)),
+                "balanced_accuracy_mean": float(np.mean([float(r["balanced_accuracy"]) for r in attribute_rows])),
+                "balanced_accuracy_std": float(np.std([float(r["balanced_accuracy"]) for r in attribute_rows], ddof=0)),
+                "top1_accuracy_mean": float(np.mean([float(r["top1_accuracy"]) for r in attribute_rows])),
+                "top1_accuracy_std": float(np.std([float(r["top1_accuracy"]) for r in attribute_rows], ddof=0)),
+                "macro_f1_mean": float(np.mean([float(r["macro_f1"]) for r in attribute_rows])),
+                "macro_f1_std": float(np.std([float(r["macro_f1"]) for r in attribute_rows], ddof=0)),
+                "cmap_mean": float(np.mean([float(r["cmap"]) for r in attribute_rows])),
+                "cmap_std": float(np.std([float(r["cmap"]) for r in attribute_rows], ddof=0)),
+                "majority_baseline_mean": float(np.mean([float(r["majority_baseline"]) for r in attribute_rows])),
+                "chance_uniform_mean": float(np.mean([float(r["chance_uniform"]) for r in attribute_rows])),
+            }
+            save_rows_csv(attribute_dir / "summary_metrics.csv", [summary_row])
+            save_json(attribute_dir / "summary_metrics.json", summary_row)
+            _means = {k: v for k, v in summary_row.items() if k.endswith("_mean")}
+            summary_line = " ".join(f"{k}={v:.4f}" for k, v in sorted(_means.items()))
+            print(f"[ATTR SUMMARY] {attribute} {summary_line}", flush=True)
     else:
         for attribute in attributes:
             print(f"\n=== Attribute: {attribute} ===", flush=True)
@@ -2132,11 +2802,24 @@ def main() -> None:
             }
             save_rows_csv(attribute_dir / "summary_metrics.csv", [summary_row])
             save_json(attribute_dir / "summary_metrics.json", summary_row)
+            _means = {k: v for k, v in summary_row.items() if k.endswith("_mean")}
+            summary_line = " ".join(f"{k}={v:.4f}" for k, v in sorted(_means.items()))
+            print(f"[ATTR SUMMARY] {attribute} {summary_line}", flush=True)
 
         plot_overall_attribute_summary(all_fold_rows, out_prefix=out_dir / "overall_summary", dataset_name=args.dataset_name)
 
     save_rows_csv(out_dir / "all_fold_metrics.csv", all_fold_rows)
     save_json(out_dir / "all_fold_metrics.json", all_fold_rows)
+
+    all_cmaps: dict = {}
+    for _row in all_fold_rows:
+        _attr = str(_row["attribute"])
+        all_cmaps.setdefault(_attr, []).append(float(_row["cmap"]))
+    if all_cmaps:
+        cmap_per_attr = {_attr: float(np.mean(_vals)) for _attr, _vals in all_cmaps.items()}
+        overall_cmap = float(np.mean(list(cmap_per_attr.values())))
+        cmap_line = " ".join(f"cmap/{_attr}={_v:.4f}" for _attr, _v in sorted(cmap_per_attr.items()))
+        print(f"[FINAL SUMMARY] {cmap_line} privacy_cmap={overall_cmap:.4f}", flush=True)
 
     elapsed = time.time() - start_time
     print(f"\n[OK] finished {dataset_display_name(args.dataset_name)} privacy training in {elapsed / 60.0:.1f} minutes", flush=True)

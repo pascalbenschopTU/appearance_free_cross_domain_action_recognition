@@ -26,17 +26,24 @@ from dataset import RGBVideoClipDataset, collate_rgb_clip
 
 K400_RGB_MEAN = torch.tensor([0.43216, 0.394666, 0.37645], dtype=torch.float32).view(1, 3, 1, 1, 1)
 K400_RGB_STD = torch.tensor([0.22803, 0.22145, 0.216989], dtype=torch.float32).view(1, 3, 1, 1, 1)
-MODE_NAME = "rgb_r2plus1d_model"
+MVIT_RGB_MEAN = torch.tensor([0.45, 0.45, 0.45], dtype=torch.float32).view(1, 3, 1, 1, 1)
+MVIT_RGB_STD = torch.tensor([0.225, 0.225, 0.225], dtype=torch.float32).view(1, 3, 1, 1, 1)
+
+
+def mode_name_for_model(model_name: str) -> str:
+    return f"rgb_{str(model_name).lower()}_model"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train/evaluate a Kinetics-pretrained RGB-only action model for the skin-tone probe.")
+    parser = argparse.ArgumentParser(
+        description="Train/evaluate a Kinetics-pretrained torchvision RGB-only action model."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train = subparsers.add_parser("train")
     add_common_dataset_args(train)
     train.add_argument("--out_dir", type=str, required=True)
-    train.add_argument("--model", type=str, default="r3d_18", choices=["r3d_18", "mc3_18", "r2plus1d_18"])
+    train.add_argument("--model", type=str, default="r3d_18", choices=["r3d_18", "mc3_18", "r2plus1d_18", "mvit_v2_s"])
     train.add_argument("--pretrained", action="store_true", default=True)
     train.add_argument("--no_pretrained", dest="pretrained", action="store_false")
     train.add_argument("--batch_size", type=int, default=4)
@@ -59,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     ev.add_argument("--ckpt", type=str, required=True)
     ev.add_argument("--out_dir", type=str, required=True)
     ev.add_argument("--split_name", type=str, default="eval")
-    ev.add_argument("--model", type=str, default="r3d_18", choices=["r3d_18", "mc3_18", "r2plus1d_18"])
+    ev.add_argument("--model", type=str, default="r3d_18", choices=["r3d_18", "mc3_18", "r2plus1d_18", "mvit_v2_s"])
     ev.add_argument("--batch_size", type=int, default=4)
     ev.add_argument("--num_workers", type=int, default=4)
     ev.add_argument("--device", type=str, default="cuda")
@@ -68,7 +75,7 @@ def parse_args() -> argparse.Namespace:
 
     ag = subparsers.add_parser("aggregate")
     ag.add_argument("--out_dir", type=str, required=True)
-    ag.add_argument("--model", type=str, required=True, choices=["r3d_18", "mc3_18", "r2plus1d_18"])
+    ag.add_argument("--model", type=str, required=True, choices=["r3d_18", "mc3_18", "r2plus1d_18", "mvit_v2_s"])
 
     return parser.parse_args()
 
@@ -123,14 +130,25 @@ def build_model(model_name: str, num_classes: int, pretrained: bool) -> nn.Modul
     elif model_name == "r2plus1d_18":
         weights = _resolve_weights(tv_video, "R2Plus1D_18_Weights", pretrained)
         model = tv_video.r2plus1d_18(weights=weights)
+    elif model_name == "mvit_v2_s":
+        weights = _resolve_weights(tv_video, "MViT_V2_S_Weights", pretrained)
+        model = tv_video.mvit_v2_s(weights=weights)
     else:
         raise ValueError(f"Unsupported model: {model_name}")
 
-    if not hasattr(model, "fc"):
-        raise RuntimeError(f"Expected torchvision video model with .fc head, got: {type(model).__name__}")
-    in_features = int(model.fc.in_features)
-    model.fc = nn.Linear(in_features, int(num_classes))
-    return model
+    if hasattr(model, "fc"):
+        in_features = int(model.fc.in_features)
+        model.fc = nn.Linear(in_features, int(num_classes))
+        return model
+
+    if hasattr(model, "head") and isinstance(model.head, nn.Sequential) and len(model.head) > 0:
+        final_layer = model.head[-1]
+        if isinstance(final_layer, nn.Linear):
+            in_features = int(final_layer.in_features)
+            model.head[-1] = nn.Linear(in_features, int(num_classes))
+            return model
+
+    raise RuntimeError(f"Expected torchvision video model with a replaceable classifier head, got: {type(model).__name__}")
 
 
 def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDataset:
@@ -147,9 +165,13 @@ def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDatas
     )
 
 
-def normalize_k400(x: torch.Tensor) -> torch.Tensor:
-    mean = K400_RGB_MEAN.to(device=x.device, dtype=x.dtype)
-    std = K400_RGB_STD.to(device=x.device, dtype=x.dtype)
+def normalize_rgb(x: torch.Tensor, model_name: str) -> torch.Tensor:
+    if str(model_name).lower() == "mvit_v2_s":
+        mean = MVIT_RGB_MEAN.to(device=x.device, dtype=x.dtype)
+        std = MVIT_RGB_STD.to(device=x.device, dtype=x.dtype)
+    else:
+        mean = K400_RGB_MEAN.to(device=x.device, dtype=x.dtype)
+        std = K400_RGB_STD.to(device=x.device, dtype=x.dtype)
     return (x - mean) / std
 
 
@@ -198,9 +220,9 @@ def save_per_class_csv(classnames: List[str], precision: np.ndarray, recall: np.
             writer.writerow([class_name, int(sup), float(prec), float(rec), float(f1_val), float(acc)])
 
 
-def build_summary(*, split_name: str, metrics: Dict[str, float]) -> Dict[str, object]:
+def build_summary(*, mode_name: str, split_name: str, metrics: Dict[str, float]) -> Dict[str, object]:
     return {
-        "mode": MODE_NAME,
+        "mode": mode_name,
         "num_splits": 1,
         "splits": {split_name: metrics},
         "aggregate": {key: {"mean": float(value), "std": 0.0} for key, value in metrics.items()},
@@ -208,9 +230,10 @@ def build_summary(*, split_name: str, metrics: Dict[str, float]) -> Dict[str, ob
 
 
 def aggregate_split_summaries(out_dir: Path, model_name: str) -> Dict[str, object]:
+    mode_name = mode_name_for_model(model_name)
     split_summaries: Dict[str, Dict[str, float]] = {}
     for split_dir in sorted(path for path in out_dir.iterdir() if path.is_dir() and path.name.startswith("eval_")):
-        summary_path = split_dir / f"summary_{MODE_NAME}.json"
+        summary_path = split_dir / f"summary_{mode_name}.json"
         if not summary_path.exists():
             continue
         payload = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -230,7 +253,7 @@ def aggregate_split_summaries(out_dir: Path, model_name: str) -> Dict[str, objec
         }
 
     return {
-        "mode": MODE_NAME,
+        "mode": mode_name,
         "model_name": str(model_name),
         "num_splits": len(split_summaries),
         "splits": split_summaries,
@@ -249,6 +272,7 @@ def evaluate_model(
     summary_only: bool,
 ) -> Dict[str, float]:
     model.eval()
+    mode_name = mode_name_for_model(getattr(model, "_benchmark_model_name", "r2plus1d_18"))
     y_true: List[int] = []
     y_pred: List[int] = []
     top1_correct = 0
@@ -256,7 +280,7 @@ def evaluate_model(
 
     with torch.no_grad():
         for rgb, _dummy_second, labels, _paths in dataloader:
-            rgb = normalize_k400(rgb.to(device, non_blocking=True))
+            rgb = normalize_rgb(rgb.to(device, non_blocking=True), getattr(model, "_benchmark_model_name", "r3d_18"))
             labels = labels.to(device, non_blocking=True)
             logits = model(rgb)
             preds = logits.argmax(dim=1)
@@ -290,15 +314,15 @@ def evaluate_model(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     if not summary_only:
-        (out_dir / f"metrics_{MODE_NAME}.json").write_text(
-            json.dumps({"mode": MODE_NAME, "split": split_name, "metrics": metrics}, indent=2),
+        (out_dir / f"metrics_{mode_name}.json").write_text(
+            json.dumps({"mode": mode_name, "split": split_name, "metrics": metrics}, indent=2),
             encoding="utf-8",
         )
-        save_cm_csv(cm, classnames, out_dir / f"confusion_{MODE_NAME}.csv")
-        save_per_class_csv(classnames, precision, recall, f1, support, top1_acc, out_dir / f"per_class_{MODE_NAME}.csv")
+        save_cm_csv(cm, classnames, out_dir / f"confusion_{mode_name}.csv")
+        save_per_class_csv(classnames, precision, recall, f1, support, top1_acc, out_dir / f"per_class_{mode_name}.csv")
 
-    summary = build_summary(split_name=split_name, metrics=metrics)
-    (out_dir / f"summary_{MODE_NAME}.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary = build_summary(mode_name=mode_name, split_name=split_name, metrics=metrics)
+    (out_dir / f"summary_{mode_name}.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return metrics
 
 
@@ -322,6 +346,7 @@ def train(args: argparse.Namespace) -> None:
     )
 
     model = build_model(args.model, num_classes=len(train_dataset.classnames), pretrained=bool(args.pretrained)).to(device)
+    model._benchmark_model_name = str(args.model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -339,7 +364,7 @@ def train(args: argparse.Namespace) -> None:
         num_batches = 0
         start_time = time.time()
         for step, (rgb, _dummy_second, labels, _paths) in enumerate(train_loader, start=1):
-            rgb = normalize_k400(rgb.to(device, non_blocking=True))
+            rgb = normalize_rgb(rgb.to(device, non_blocking=True), args.model)
             labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, enabled=use_amp):
@@ -391,6 +416,7 @@ def evaluate(args: argparse.Namespace) -> None:
     )
 
     model = build_model(model_name, num_classes=len(eval_dataset.classnames), pretrained=False).to(device)
+    model._benchmark_model_name = model_name
     model.load_state_dict(ckpt["model_state"], strict=True)
 
     metrics = evaluate_model(
@@ -408,7 +434,7 @@ def evaluate(args: argparse.Namespace) -> None:
 def aggregate(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir)
     summary = aggregate_split_summaries(out_dir, model_name=str(args.model))
-    out_path = out_dir / f"summary_{MODE_NAME}.json"
+    out_path = out_dir / f"summary_{mode_name_for_model(args.model)}.json"
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps({"summary_path": out_path.as_posix(), "num_splits": summary["num_splits"]}, indent=2), flush=True)
 

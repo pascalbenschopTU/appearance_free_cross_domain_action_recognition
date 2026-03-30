@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-DATASETS=(hmdb51 ucf101 ssv2)
+DATASETS_RAW="${FEWSHOT_DATASETS:-hmdb51,ucf101,ssv2}"
 HEAD_MODES_RAW="${FEWSHOT_HEAD_MODES:-both}"
 PRETRAINED_CKPT_OVERRIDE="${FEWSHOT_PRETRAINED_CKPT:-out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss3.4912.pt}"
 OUT_ROOT="${FEWSHOT_OUT_ROOT:-out/few_shot_cfg2}"
@@ -18,6 +18,7 @@ if [[ "$#" -gt 0 ]]; then
 else
   SHOTS=(8 16)
 fi
+IFS=',' read -r -a DATASETS <<< "$DATASETS_RAW"
 IFS=',' read -r -a HEAD_MODES <<< "$HEAD_MODES_RAW"
 
 latest_ckpt() {
