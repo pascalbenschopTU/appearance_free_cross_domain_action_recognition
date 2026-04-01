@@ -1269,12 +1269,15 @@ def build_clip_text_bank_and_logit_scale(
     apply_templates_to_class_texts: bool = True,
     class_text_label_weight: float = 0.5,
     apply_templates_to_class_descriptions: bool = False,
+    output_mode: str = "class_proto",
     out_dir: Optional[str] = None,
     clip_cache_dir: Optional[str] = None,
 ):
     """
     Returns:
-      text_bank: (C, 512) normalized, detached, dtype on device
+      (text_bank, logit_scale) where:
+        - output_mode="class_proto": text_bank is (C, 512) averaged, detached, dtype on device
+        - output_mode="class_multi_positive": text_bank is a ClassMultiPositiveTextBank
       logit_scale: LogitScale module on device
     """
     templates = CLIP_TEMPLATES
@@ -1296,7 +1299,10 @@ def build_clip_text_bank_and_logit_scale(
         apply_templates_to_class_texts=apply_templates_to_class_texts,
         class_text_label_weight=class_text_label_weight,
         apply_templates_to_class_descriptions=apply_templates_to_class_descriptions,
+        output_mode=output_mode,
     )
+    if isinstance(text_bank, ClassMultiPositiveTextBank):
+        return text_bank, logit_scale
     text_bank = text_bank.to(dtype=dtype).to(device).detach()
 
     return text_bank, logit_scale

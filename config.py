@@ -932,6 +932,18 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         help="Optional residual adapter applied to frozen text embeddings before loss/eval.",
     )
     text.add_argument(
+        "--text_supervision_mode",
+        type=str,
+        default="class_label",
+        choices=["class_label", "class_averaged", "class_multi_positive"],
+        help=(
+            "How to use text descriptions during training. "
+            "'class_label': single class-name embedding (ignores train_class_text_json descriptions). "
+            "'class_averaged': weighted average of label + descriptions (alpha=class_text_label_weight). "
+            "'class_multi_positive': multi-positive contrastive loss over label + all description embeddings."
+        ),
+    )
+    text.add_argument(
         "--lambda_clip_ce",
         type=float,
         default=1.0,
@@ -1059,6 +1071,17 @@ def build_finetune_parser(default_device: str) -> argparse.ArgumentParser:
         help="None -> inherit from pretrained checkpoint",
     )
     model.add_argument("--compute_second_only", action="store_true", help=argparse.SUPPRESS)
+    model.add_argument(
+        "--use_projection",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    model.add_argument(
+        "--dual_projection_heads",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    model.add_argument("--use_nonlinear_projection", action="store_true", help=argparse.SUPPRESS)
     model.add_argument("--lambda_align", type=float, default=0.0)
     model.add_argument(
         "--lambda_cls",

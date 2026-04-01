@@ -47,6 +47,7 @@ from util import (
     apply_text_adapter,
     build_clip_text_bank_and_logit_scale,
     build_text_adapter,
+    ClassMultiPositiveTextBank,
     count_matching_class_texts,
     load_precomputed_text_bank_and_logit_scale,
     load_class_texts,
@@ -408,9 +409,13 @@ def main():
     args.dropout = dropout
     args.second_type = ckpt_cfg.second_type
     args.use_stems = ckpt_cfg.use_stems
-    args.use_projection = ckpt_cfg.use_projection
-    args.dual_projection_heads = ckpt_cfg.dual_projection_heads
-    args.use_nonlinear_projection = ckpt_cfg.use_projection
+    args.use_projection = bool(getattr(args, "use_projection", False) or ckpt_cfg.use_projection)
+    args.dual_projection_heads = bool(
+        getattr(args, "dual_projection_heads", False) or ckpt_cfg.dual_projection_heads
+    )
+    args.use_nonlinear_projection = bool(
+        getattr(args, "use_nonlinear_projection", False) or getattr(args, "use_projection", False)
+    )
     args.x3d_variant = ckpt_cfg.x3d_variant
     train_modality = str(args.train_modality).lower()
     val_modality = str(args.val_modality).lower()
@@ -654,8 +659,10 @@ def main():
         val_dataloader = None
         val_class_texts = None
 
+    text_supervision_mode = getattr(args, "text_supervision_mode", "class_label")
+
     train_class_texts = None
-    if args.train_class_text_json:
+    if args.train_class_text_json and text_supervision_mode != "class_label":
         train_class_texts = load_class_texts(args.train_class_text_json)
         print(
             f"[TRAIN] custom prompts available for {count_matching_class_texts(train_class_texts, dataset.classnames)}/"
@@ -664,6 +671,10 @@ def main():
         )
 
     # Text bank for training classes
+    class_multi_positive_targets: Optional[torch.Tensor] = None
+    # For rep_mix semantic similarity we always need a (C, D) proto bank.
+    clip_class_proto_bank_raw: Optional[torch.Tensor] = None
+
     if args.text_bank_backend == "precomputed":
         clip_text_bank_raw, logit_scale = load_precomputed_text_bank_and_logit_scale(
             dataset_classnames=dataset.classnames,
@@ -675,6 +686,49 @@ def main():
             init_temp=0.07,
             dtype=data_dtype,
         )
+    elif text_supervision_mode == "class_multi_positive":
+        if not args.train_class_text_json:
+            raise ValueError("--text_supervision_mode class_multi_positive requires --train_class_text_json.")
+        mp_bank, logit_scale = build_clip_text_bank_and_logit_scale(
+            dataset_classnames=dataset.classnames,
+            device=device,
+            init_temp=0.07,
+            dtype=data_dtype,
+            class_texts=train_class_texts,
+            apply_templates_to_class_texts=bool(args.apply_templates_to_class_texts),
+            class_text_label_weight=float(args.class_text_label_weight),
+            apply_templates_to_class_descriptions=bool(args.apply_templates_to_class_descriptions),
+            output_mode="class_multi_positive",
+            out_dir=args.out_dir,
+            clip_cache_dir=(args.clip_cache_dir or None),
+        )
+        assert isinstance(mp_bank, ClassMultiPositiveTextBank)
+        clip_text_bank_raw = mp_bank.text_bank.to(dtype=data_dtype).to(device).detach()
+        class_multi_positive_targets = mp_bank.build_targets(
+            label_weight=float(args.class_text_label_weight),
+            device=device,
+            dtype=torch.float32,
+        )
+        print(
+            f"[TEXT] class_multi_positive: texts={clip_text_bank_raw.shape[0]} "
+            f"per_class={mp_bank.text_entries_per_class} label_weight={args.class_text_label_weight:.3f}",
+            flush=True,
+        )
+        # Also build a (C, D) proto bank for rep_mix semantic similarity.
+        clip_class_proto_bank_raw, _ = build_clip_text_bank_and_logit_scale(
+            dataset_classnames=dataset.classnames,
+            device=device,
+            init_temp=0.07,
+            dtype=data_dtype,
+            class_texts=train_class_texts,
+            apply_templates_to_class_texts=bool(args.apply_templates_to_class_texts),
+            class_text_label_weight=float(args.class_text_label_weight),
+            apply_templates_to_class_descriptions=bool(args.apply_templates_to_class_descriptions),
+            output_mode="class_proto",
+            out_dir=args.out_dir,
+            clip_cache_dir=(args.clip_cache_dir or None),
+        )
+        clip_class_proto_bank_raw = clip_class_proto_bank_raw.detach()
     else:
         clip_text_bank_raw, logit_scale = build_clip_text_bank_and_logit_scale(
             dataset_classnames=dataset.classnames,
@@ -685,6 +739,7 @@ def main():
             apply_templates_to_class_texts=bool(args.apply_templates_to_class_texts),
             class_text_label_weight=float(args.class_text_label_weight),
             apply_templates_to_class_descriptions=bool(args.apply_templates_to_class_descriptions),
+            output_mode="class_proto",
             out_dir=args.out_dir,
             clip_cache_dir=(args.clip_cache_dir or None),
         )
@@ -700,9 +755,11 @@ def main():
         return apply_text_adapter(clip_text_bank_raw, text_adapter)
 
     clip_text_bank = adapt_clip_text_bank().detach()
+    # For rep_mix semantic similarity always use the (C, D) proto bank.
+    _proto_for_sim = clip_class_proto_bank_raw if clip_class_proto_bank_raw is not None else clip_text_bank
     class_text_sim = None
     if args.rep_mix_semantic:
-        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+        t_norm = F.normalize(_proto_for_sim, dim=-1).float()
         class_text_sim = (t_norm @ t_norm.t()).detach()
     num_classes = len(dataset.classnames)
     needs_cls_head = bool(
@@ -722,8 +779,8 @@ def main():
             dropout=dropout,
             init_scratch=(pretrained_path is None),
             use_stems=ckpt_cfg.use_stems,
-            use_projection=ckpt_cfg.use_projection,
-            dual_projection_heads=ckpt_cfg.dual_projection_heads,
+            use_projection=args.use_projection,
+            dual_projection_heads=args.dual_projection_heads,
             num_classes=(num_classes if needs_cls_head else 0),
             active_branch=active_branch,
         ).to(device)
@@ -739,8 +796,8 @@ def main():
             fuse=fuse,
             dropout=dropout,
             x3d_variant=ckpt_cfg.x3d_variant,
-            use_projection=ckpt_cfg.use_projection,
-            dual_projection_heads=ckpt_cfg.dual_projection_heads,
+            use_projection=args.use_projection,
+            dual_projection_heads=args.dual_projection_heads,
             num_classes=(num_classes if needs_cls_head else 0),
             active_branch=active_branch,
         ).to(device)
@@ -933,7 +990,16 @@ def main():
                 if effective_lambda_clip > 0:
                     video = F.normalize(clip_emb, dim=-1)
                     logits = logit_scale().exp() * (video @ clip_text_bank.t())
-                    if labels_soft is not None:
+                    if text_supervision_mode == "class_multi_positive" and class_multi_positive_targets is not None:
+                        # Map hard (or soft-mixup) labels to per-text-entry soft targets.
+                        if labels_soft is not None:
+                            base = labels_soft
+                        else:
+                            base = torch.zeros(len(labels), len(dataset.classnames), device=labels.device)
+                            base.scatter_(1, labels.unsqueeze(1), 1.0)
+                        labels_mp = base.to(dtype=class_multi_positive_targets.dtype) @ class_multi_positive_targets
+                        clip_loss = soft_target_cross_entropy(logits, labels_mp)
+                    elif labels_soft is not None:
                         clip_loss = soft_target_cross_entropy(logits, labels_soft)
                     else:
                         clip_loss = F.cross_entropy(logits, labels, label_smoothing=args.label_smoothing)
@@ -943,12 +1009,20 @@ def main():
                 if args.lambda_rep_mix > 0:
                     class_text_sim_step = class_text_sim
                     if args.rep_mix_semantic and text_adapter is not None:
-                        t_norm = F.normalize(clip_text_bank, dim=-1).float()
+                        # Always use (C, D) proto bank for semantic similarity, not the multi-positive bank.
+                        _proto = apply_text_adapter(clip_class_proto_bank_raw, text_adapter) if clip_class_proto_bank_raw is not None else clip_text_bank
+                        t_norm = F.normalize(_proto, dim=-1).float()
                         class_text_sim_step = (t_norm @ t_norm.t()).detach()
+                    # rep_mix always needs a (C, D) proto bank, not the multi-positive bank.
+                    _rep_mix_bank = (
+                        apply_text_adapter(clip_class_proto_bank_raw, text_adapter)
+                        if clip_class_proto_bank_raw is not None
+                        else clip_text_bank
+                    )
                     loss_rep_mix = representation_mix_consistency_loss(
                         clip_emb,
                         labels,
-                        clip_text_bank,
+                        _rep_mix_bank,
                         alpha=args.rep_mix_alpha,
                         semantic_mix=args.rep_mix_semantic,
                         semantic_topk=args.rep_mix_semantic_topk,

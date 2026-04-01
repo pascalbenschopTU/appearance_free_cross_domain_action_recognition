@@ -1,13 +1,8 @@
 {
-  "Assault": [
-    "a person fighting aggressively with another person",
-    "a violent attack involving punches or kicks",
-    "physical aggression directed at someone nearby"
-  ],
-  "Fighting": [
-    "two or more people engaged in a fight",
-    "a mutual violent altercation between people",
-    "people exchanging punches kicks or grappling"
+  "Fight": [
+    "one or more people engaged in a fight",
+    "a violent attack or mutual altercation with punches kicks or grappling",
+    "physical aggression directed at another person nearby"
   ],
   "Normal": [
     "people walking standing dancing or hugging without violence",

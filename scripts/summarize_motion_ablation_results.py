@@ -153,6 +153,7 @@ def aggregate_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
         "cls_head",
         "repmix",
         "text_bank",
+        "text_mode",
         "mhi_windows",
         "fb_tag",
     ]
@@ -166,7 +167,7 @@ def aggregate_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
         merged["kind"] = "aggregate"
         merged["num_seeds"] = len(items)
         merged["seeds"] = ",".join(sorted(str(item.get("seed", "")) for item in items))
-        for metric_prefix in ["hmdb12", "ucf12_val"]:
+        for metric_prefix in ["hmdb12", "hmdb16", "ucf12_val"]:
             for mode in ["motion_only", "class_head"]:
                 for metric_key in DEFAULT_METRIC_KEYS:
                     field = f"{metric_prefix}_{mode}_{metric_key}"
@@ -189,12 +190,15 @@ def build_experiment_table(aggregate_rows_out: List[Dict[str, object]]) -> List[
                 "cls_head": row.get("cls_head"),
                 "repmix": row.get("repmix"),
                 "text_bank": row.get("text_bank"),
+                "text_mode": row.get("text_mode"),
                 "mhi_windows": row.get("mhi_windows"),
                 "fb_tag": row.get("fb_tag"),
                 "num_seeds": row.get("num_seeds"),
                 "seeds": row.get("seeds"),
                 "hmdb12_top1_mean": row.get("hmdb12_motion_only_top1_mean"),
                 "hmdb12_top1_std": row.get("hmdb12_motion_only_top1_std"),
+                "hmdb16_top1_mean": row.get("hmdb16_motion_only_top1_mean"),
+                "hmdb16_top1_std": row.get("hmdb16_motion_only_top1_std"),
                 "ucf12_val_top1_mean": row.get("ucf12_val_motion_only_top1_mean"),
                 "ucf12_val_top1_std": row.get("ucf12_val_motion_only_top1_std"),
                 "hmdb12_class_head_top1_mean": row.get("hmdb12_class_head_top1_mean"),
@@ -222,6 +226,15 @@ def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
             writer.writerow(row)
 
 
+def _fmt_metric(value: object) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def main() -> None:
     args = parse_args()
     run_root = Path(args.run_root).resolve()
@@ -230,13 +243,13 @@ def main() -> None:
     out_json = Path(args.out_json).resolve() if args.out_json else summary_dir / "summary.json"
 
     run_rows: List[Dict[str, object]] = []
-    for config_path in sorted(run_root.glob("*/run_config.json")):
+    for config_path in sorted(run_root.glob("**/run_config.json")):
         run_dir = config_path.parent
         config = load_json(config_path)
         meta = parse_run_name(run_dir.name)
         row: Dict[str, object] = {
             "kind": "run",
-            "run_name": run_dir.name,
+            "run_name": str(run_dir.relative_to(run_root)),
             "run_dir": str(run_dir),
             "seed": config.get("seed"),
             "stage": config.get("stage", meta.get("stage", "")),
@@ -245,18 +258,23 @@ def main() -> None:
             "cls_head": config.get("cls_head", meta.get("cls", "")),
             "repmix": config.get("rep_mix", meta.get("repmix", "")),
             "text_bank": config.get("text_bank", meta.get("text", "")),
+            "text_mode": config.get("text_mode", meta.get("tmode", "")),
             "mhi_windows": str(config.get("mhi_windows", meta.get("wins", ""))),
             "fb_tag": config.get("fb_tag", meta.get("fb", "")),
         }
 
         hmdb_motion = maybe_load_metrics(run_dir, "eval_hmdb12", "metrics_motion_only.json")
         hmdb_class = maybe_load_metrics(run_dir, "eval_hmdb12", "metrics_class_head.json")
+        hmdb16_motion = maybe_load_metrics(run_dir, "eval_hmdb16", "metrics_motion_only.json")
+        hmdb16_class = maybe_load_metrics(run_dir, "eval_hmdb16", "metrics_class_head.json")
         ucf_motion = maybe_load_metrics(run_dir, "eval_ucf12_val", "metrics_motion_only.json")
         ucf_class = maybe_load_metrics(run_dir, "eval_ucf12_val", "metrics_class_head.json")
 
         for prefix, payload in [
             ("hmdb12_motion_only", hmdb_motion),
             ("hmdb12_class_head", hmdb_class),
+            ("hmdb16_motion_only", hmdb16_motion),
+            ("hmdb16_class_head", hmdb16_class),
             ("ucf12_val_motion_only", ucf_motion),
             ("ucf12_val_class_head", ucf_class),
         ]:
@@ -299,6 +317,34 @@ def main() -> None:
             f"wins={best_scout.get('mhi_windows')} fb={best_scout.get('fb_tag')} "
             f"hmdb12_top1={best_scout.get('hmdb12_motion_only_top1')}"
         )
+
+    if experiment_table:
+        print("[SUMMARY] aggregated experiment means:")
+        header = (
+            "stage,group,branch,cls_head,repmix,text_bank,text_mode,"
+            "mhi_windows,fb_tag,num_seeds,hmdb12_top1_mean,hmdb16_top1_mean,ucf12_val_top1_mean"
+        )
+        print(header)
+        for row in experiment_table:
+            print(
+                ",".join(
+                    [
+                        str(row.get("stage", "")),
+                        str(row.get("group", "")),
+                        str(row.get("branch", "")),
+                        str(row.get("cls_head", "")),
+                        str(row.get("repmix", "")),
+                        str(row.get("text_bank", "")),
+                        str(row.get("text_mode", "")),
+                        str(row.get("mhi_windows", "")),
+                        str(row.get("fb_tag", "")),
+                        str(row.get("num_seeds", "")),
+                        _fmt_metric(row.get("hmdb12_top1_mean")),
+                        _fmt_metric(row.get("hmdb16_top1_mean")),
+                        _fmt_metric(row.get("ucf12_val_top1_mean")),
+                    ]
+                )
+            )
 
 
 if __name__ == "__main__":

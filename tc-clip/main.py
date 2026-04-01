@@ -44,7 +44,7 @@ def _norm_label_name(name):
     return str(name).strip().lower().replace("_", " ").replace("-", " ")
 
 
-def _load_grouped_text_prompts(grouped_text_file):
+def _load_grouped_text_entries(grouped_text_file, dataset_classes):
     with open(grouped_text_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -53,43 +53,156 @@ def _load_grouped_text_prompts(grouped_text_file):
     if not isinstance(data, dict):
         raise ValueError(f"Grouped text file must be a dict (or have a 'groups' dict): {grouped_text_file}")
 
-    prompt_class_names = []
-    group_to_prompt_indices = {}
+    name_to_prompts = {}
+    id_to_prompts = {}
     for group_name, prompts in data.items():
         if isinstance(prompts, str):
             prompts = [prompts]
         if not isinstance(prompts, list) or len(prompts) == 0:
             raise ValueError(f"Each group must contain a non-empty list of prompts: {group_name}")
-        start_idx = len(prompt_class_names)
-        prompt_class_names.extend([str(p) for p in prompts])
-        group_to_prompt_indices[str(group_name)] = list(range(start_idx, len(prompt_class_names)))
-
-    return prompt_class_names, group_to_prompt_indices
-
-
-def _build_eval_group_map_from_dataset_labels(group_to_prompt_indices, dataset_classes):
-    name_to_label_id = {}
-    for label_id, label_name in dataset_classes:
-        name_to_label_id[_norm_label_name(label_name)] = int(label_id)
-
-    eval_group_map = {}
-    for group_name, prompt_indices in group_to_prompt_indices.items():
-        label_id = None
+        cleaned_prompts = [str(prompt).strip() for prompt in prompts if str(prompt).strip()]
+        if not cleaned_prompts:
+            raise ValueError(f"Grouped prompt label '{group_name}' contains no usable prompts.")
+        name_to_prompts[_norm_label_name(group_name)] = cleaned_prompts
         try:
-            group_id = int(group_name)
-            if any(int(k) == group_id for k, _ in dataset_classes):
-                label_id = group_id
+            id_to_prompts[int(group_name)] = cleaned_prompts
         except ValueError:
-            label_id = name_to_label_id.get(_norm_label_name(group_name))
+            pass
 
-        if label_id is None:
+    resolved_entries = []
+    for label_id, label_name in dataset_classes:
+        label_id = int(label_id)
+        prompts = id_to_prompts.get(label_id)
+        if prompts is None:
+            prompts = name_to_prompts.get(_norm_label_name(label_name))
+        if prompts is None:
             raise ValueError(
-                f"Grouped prompt label '{group_name}' not found in dataset labels. "
-                f"Available labels: {[name for _, name in dataset_classes]}"
+                f"Grouped prompt label for dataset class '{label_name}' (id={label_id}) "
+                f"not found in {grouped_text_file}."
             )
-        eval_group_map[int(label_id)] = [int(i) for i in prompt_indices]
+        resolved_entries.append((label_id, str(label_name), list(prompts)))
 
-    return eval_group_map
+    return resolved_entries
+
+
+def _build_text_prompt_strategy(
+    logger,
+    config,
+    dataset,
+    class_names,
+    *,
+    target_data_config,
+    split_name,
+    fallback_grouped_text_file=None,
+):
+    mode = str(config.get("text_prompt_mode", "grouped_tcclip")).lower()
+    label_weight = float(config.get("class_text_label_weight", 0.5))
+    grouped_text_file = target_data_config.get("grouped_text_file", None)
+    if grouped_text_file is None:
+        grouped_text_file = fallback_grouped_text_file
+
+    if mode == "labels" or not grouped_text_file:
+        if mode != "labels" and not grouped_text_file:
+            logger.info(
+                f"{split_name}: text_prompt_mode={mode} requested but no grouped_text_file was found. "
+                f"Falling back to labels."
+            )
+        else:
+            logger.info(f"{split_name}: text_prompt_mode=labels.")
+        return {
+            "prompt_class_names": class_names,
+            "eval_group_map": None,
+            "eval_group_reduce": str(target_data_config.get("eval_group_reduce", "max")).lower(),
+            "text_group_indices": None,
+            "text_group_weights": None,
+        }
+
+    resolved_entries = _load_grouped_text_entries(grouped_text_file, dataset.classes)
+    eval_group_reduce = str(target_data_config.get("eval_group_reduce", "max")).lower()
+
+    if mode == "grouped_tcclip":
+        prompt_class_names = []
+        eval_group_map = {}
+        for label_id, _, prompts in resolved_entries:
+            start_idx = len(prompt_class_names)
+            prompt_class_names.extend(prompts)
+            eval_group_map[label_id] = list(range(start_idx, len(prompt_class_names)))
+        logger.info(
+            f"{split_name}: text_prompt_mode=grouped_tcclip using {grouped_text_file} "
+            f"({len(prompt_class_names)} prompts -> {len(eval_group_map)} labels, reduce={eval_group_reduce})."
+        )
+        return {
+            "prompt_class_names": prompt_class_names,
+            "eval_group_map": eval_group_map,
+            "eval_group_reduce": eval_group_reduce,
+            "text_group_indices": None,
+            "text_group_weights": None,
+        }
+
+    if mode == "averaged_descriptions":
+        alpha = float(max(0.0, min(1.0, label_weight)))
+        prompt_class_names = []
+        text_group_indices = []
+        text_group_weights = []
+        for _, label_name, prompts in resolved_entries:
+            class_indices = [len(prompt_class_names)]
+            class_weights = [1.0 if not prompts else alpha]
+            prompt_class_names.append(label_name)
+            if prompts and alpha < 1.0:
+                description_weight = (1.0 - alpha) / float(len(prompts))
+                for prompt in prompts:
+                    class_indices.append(len(prompt_class_names))
+                    class_weights.append(description_weight)
+                    prompt_class_names.append(prompt)
+            text_group_indices.append(class_indices)
+            text_group_weights.append(class_weights)
+
+        logger.info(
+            f"{split_name}: text_prompt_mode=averaged_descriptions using {grouped_text_file} "
+            f"({len(prompt_class_names)} prompts -> {len(text_group_indices)} classes, "
+            f"label_weight={alpha:.3f})."
+        )
+        return {
+            "prompt_class_names": prompt_class_names,
+            "eval_group_map": None,
+            "eval_group_reduce": eval_group_reduce,
+            "text_group_indices": text_group_indices,
+            "text_group_weights": text_group_weights,
+        }
+
+    raise ValueError(
+        f"Unsupported text_prompt_mode={mode!r}. "
+        f"Expected one of: labels, grouped_tcclip, averaged_descriptions."
+    )
+
+
+def _apply_text_prompt_strategy(model, strategy):
+    setter = getattr(model, "_set_text_aggregation", None)
+    if setter is not None:
+        setter(
+            group_indices=strategy["text_group_indices"],
+            group_weights=strategy["text_group_weights"],
+        )
+
+
+def _format_metric_summary(stats):
+    return (
+        f"Acc@1 {stats['acc1']:.1f}, Acc@5 {stats['acc5']:.1f}, "
+        f"Macro P/R/F1 {stats['precision_macro']:.4f}/{stats['recall_macro']:.4f}/{stats['f1_macro']:.4f}, "
+        f"Weighted P/R/F1 {stats['precision_weighted']:.4f}/{stats['recall_weighted']:.4f}/{stats['f1_weighted']:.4f}"
+    )
+
+
+def _write_metric_summary(output_dir, mode_name, split_name, stats):
+    summary = {
+        "mode": str(mode_name),
+        "num_splits": 1,
+        "splits": {str(split_name): {key: float(value) for key, value in stats.items()}},
+        "aggregate": {str(key): {"mean": float(value), "std": 0.0} for key, value in stats.items()},
+    }
+    output_path = Path(output_dir) / f"summary_{mode_name}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def main_training(logger, config):
@@ -97,17 +210,29 @@ def main_training(logger, config):
     train_data, train_loader, class_names = build_train_dataloader(logger, config)
     val_data, val_loader, val_class_names = build_val_dataloader(logger, config, target_data_config=config.data.val)
 
-    val_eval_group_map = None
-    val_eval_group_reduce = str(config.data.val.get("eval_group_reduce", "max")).lower()
-    if config.data.val.get("grouped_text_file", None):
-        prompt_class_names, group_to_prompt_indices = _load_grouped_text_prompts(config.data.val.grouped_text_file)
-        val_eval_group_map = _build_eval_group_map_from_dataset_labels(group_to_prompt_indices, val_data.classes)
-        val_class_names = prompt_class_names
-        logger.info(
-            f"Training-time val uses grouped prompts from {config.data.val.grouped_text_file}: "
-            f"{len(prompt_class_names)} prompts aggregated to {len(val_eval_group_map)} labels "
-            f"(reduce={val_eval_group_reduce})."
-        )
+    train_prompt_strategy = _build_text_prompt_strategy(
+        logger,
+        config,
+        train_data,
+        class_names,
+        target_data_config=config.data.train,
+        split_name="train",
+        fallback_grouped_text_file=config.data.val.get("grouped_text_file", None),
+    )
+    val_prompt_strategy = _build_text_prompt_strategy(
+        logger,
+        config,
+        val_data,
+        val_class_names,
+        target_data_config=config.data.val,
+        split_name="val",
+    )
+    train_class_names = train_prompt_strategy["prompt_class_names"]
+    val_class_names = val_prompt_strategy["prompt_class_names"]
+    train_eval_group_map = train_prompt_strategy["eval_group_map"]
+    val_eval_group_map = val_prompt_strategy["eval_group_map"]
+    train_eval_group_reduce = train_prompt_strategy["eval_group_reduce"]
+    val_eval_group_reduce = val_prompt_strategy["eval_group_reduce"]
 
     mixup_fn = None
     if config.aug.mixup > 0:
@@ -123,7 +248,8 @@ def main_training(logger, config):
         criterion = nn.CrossEntropyLoss()
 
     "------------ Build model, optimizer, scheduler -----------"
-    model, clip_model = returnCLIP(config, logger, class_names, return_clip_model=True)
+    model, clip_model = returnCLIP(config, logger, train_class_names, return_clip_model=True)
+    _apply_text_prompt_strategy(model, train_prompt_strategy)
     model = model.cuda()
     optimizer = build_optimizer(logger, config, model)
     lr_scheduler = build_scheduler(config, optimizer, len(train_loader))
@@ -159,6 +285,7 @@ def main_training(logger, config):
     "------------ Eval only mode -----------"
     if config.eval is not None:
         _unwrap_model(model)._rebuild_classnames(config, val_class_names, clip_model, logger)
+        _apply_text_prompt_strategy(_unwrap_model(model), val_prompt_strategy)
         test_stats = validate(
             val_loader,
             model,
@@ -167,8 +294,11 @@ def main_training(logger, config):
             eval_group_map=val_eval_group_map,
             eval_group_reduce=val_eval_group_reduce,
         )
-        logger.info(f"Accuracy of the network on the {len(val_data)} test videos: Acc@1 {test_stats['acc1']:.1f}, "
-                    f"Acc@5 {test_stats['acc5']:.1f}\n")
+        split_name = str(config.data.val.get("dataset_name", config.data.val.get("name", "val")))
+        _write_metric_summary(config.output, "tc_clip", split_name, test_stats)
+        logger.info(
+            f"Metrics of the network on the {len(val_data)} test videos: {_format_metric_summary(test_stats)}\n"
+        )
         return
 
     "------------ Training mode -----------"
@@ -179,7 +309,19 @@ def main_training(logger, config):
             train_loader.sampler.set_epoch(epoch)
 
         # train
-        train_stats = train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_loader, logger, config, mixup_fn)
+        train_stats = train_one_epoch(
+            epoch,
+            model,
+            criterion,
+            optimizer,
+            lr_scheduler,
+            train_loader,
+            logger,
+            config,
+            mixup_fn,
+            train_group_map=train_eval_group_map,
+            train_group_reduce=train_eval_group_reduce,
+        )
         log_stats = {**{f'train/{k}': v for k, v in train_stats.items()},
                      'epoch': epoch}
         logger.info("\n")
@@ -189,6 +331,7 @@ def main_training(logger, config):
         # validation
         if epoch % config.save_freq == 0 or epoch == (config.epochs - 1) or epoch == start_epoch:
             _unwrap_model(model)._rebuild_classnames(config, val_class_names, clip_model, logger)
+            _apply_text_prompt_strategy(_unwrap_model(model), val_prompt_strategy)
             test_stats = validate(
                 val_loader,
                 model,
@@ -198,9 +341,12 @@ def main_training(logger, config):
                 eval_group_reduce=val_eval_group_reduce,
             )
             acc1, acc5 = test_stats['acc1'], test_stats['acc5']
-            logger.info(f"Accuracy of the network on the {len(val_data)} test videos: Acc@1 {acc1:.1f}, "
-                        f"Acc@5 {acc5:.1f}\n")
-            _unwrap_model(model)._rebuild_classnames(config, class_names, clip_model, logger)
+            logger.info(
+                f"Metrics of the network on the {len(val_data)} test videos: "
+                f"{_format_metric_summary(test_stats)}\n"
+            )
+            _unwrap_model(model)._rebuild_classnames(config, train_class_names, clip_model, logger)
+            _apply_text_prompt_strategy(_unwrap_model(model), train_prompt_strategy)
 
             is_best = acc1 > max_accuracy
             max_accuracy = acc1 if is_best else max_accuracy
@@ -216,6 +362,12 @@ def main_training(logger, config):
 
             log_stats = {'val/acc1': acc1,
                          'val/acc5': acc5,
+                         'val/precision_macro': test_stats['precision_macro'],
+                         'val/recall_macro': test_stats['recall_macro'],
+                         'val/f1_macro': test_stats['f1_macro'],
+                         'val/precision_weighted': test_stats['precision_weighted'],
+                         'val/recall_weighted': test_stats['recall_weighted'],
+                         'val/f1_weighted': test_stats['f1_weighted'],
                          'val/best': max_accuracy,
                          'val/best5': max_accuracy_acc5}
 
@@ -264,29 +416,30 @@ def main_testing(logger, config, prefix='test'):
     for dataset_config in config.data.test:
         name = dataset_config.name  # ex. hmdb51_val
         protocol = dataset_config.get("protocol", "top1")
-        acc1_list, acc5_list = [], []
+        fold_stats = []
         for test_config in dataset_config.dataset_list:
             dataset_name = test_config.dataset_name
-            eval_group_map = None
-            eval_group_reduce = str(test_config.get("eval_group_reduce", "max")).lower()
 
             logger.info(f"======== Start evaluation on {colorstr(dataset_name)} =======")
 
             "------------ Build dataloader, model -----------"
             val_data, val_loader, class_names = build_val_dataloader(logger, config, target_data_config=test_config)
-            if test_config.get("grouped_text_file", None):
-                prompt_class_names, group_to_prompt_indices = _load_grouped_text_prompts(test_config.grouped_text_file)
-                eval_group_map = _build_eval_group_map_from_dataset_labels(group_to_prompt_indices, val_data.classes)
-                class_names = prompt_class_names
-                logger.info(
-                    f"Using grouped prompt eval from {test_config.grouped_text_file}: "
-                    f"{len(prompt_class_names)} prompts aggregated to {len(eval_group_map)} labels "
-                    f"(reduce={eval_group_reduce})."
-                )
+            prompt_strategy = _build_text_prompt_strategy(
+                logger,
+                config,
+                val_data,
+                class_names,
+                target_data_config=test_config,
+                split_name=dataset_name,
+            )
+            class_names = prompt_strategy["prompt_class_names"]
+            eval_group_map = prompt_strategy["eval_group_map"]
+            eval_group_reduce = prompt_strategy["eval_group_reduce"]
 
             # At first iteration, build model & load checkpoints
             if model is None:
                 model, clip_model = returnCLIP(config, logger, class_names, return_clip_model=True)
+                _apply_text_prompt_strategy(model, prompt_strategy)
                 model.cuda()
 
                 if config.opt_level != 'O0':
@@ -308,6 +461,7 @@ def main_testing(logger, config, prefix='test'):
             # From second iteration, just rebuild classnames part only
             else:
                 _unwrap_model(model)._rebuild_classnames(config, class_names, clip_model, logger)
+                _apply_text_prompt_strategy(_unwrap_model(model), prompt_strategy)
 
             "------------ Validation -----------"
             test_stats = validate(
@@ -318,21 +472,32 @@ def main_testing(logger, config, prefix='test'):
                 eval_group_map=eval_group_map,
                 eval_group_reduce=eval_group_reduce,
             )
-            acc1_list.append(test_stats['acc1'])
-            acc5_list.append(test_stats['acc5'])
-            logger.info(f"Accuracy of the checkpoint on {colorstr(dataset_name)} test videos (size: {len(val_data)}): "
-                        f"Acc@1 {test_stats['acc1']:.1f}, Acc@5 {test_stats['acc5']:.1f}")
+            fold_stats.append(test_stats)
+            logger.info(
+                f"Metrics of the checkpoint on {colorstr(dataset_name)} test videos (size: {len(val_data)}): "
+                f"{_format_metric_summary(test_stats)}"
+            )
             del val_loader
             del val_data
             torch.cuda.empty_cache()
 
         if protocol == "avg_std":
-            result_dict[name] = {'acc1_avg': np.mean(acc1_list), 'acc1_std': np.std(acc1_list),
-                                 'acc5_avg': np.mean(acc5_list), 'acc5_std': np.std(acc5_list), 'protocol': protocol}
-            total_acc1_list.append(np.mean(acc1_list))
+            result = {'protocol': protocol}
+            for metric_name in (
+                'acc1', 'acc5',
+                'precision_macro', 'recall_macro', 'f1_macro',
+                'precision_weighted', 'recall_weighted', 'f1_weighted',
+            ):
+                metric_values = [stats[metric_name] for stats in fold_stats]
+                result[f'{metric_name}_avg'] = float(np.mean(metric_values))
+                result[f'{metric_name}_std'] = float(np.std(metric_values))
+            result_dict[name] = result
+            total_acc1_list.append(result['acc1_avg'])
         else:
-            result_dict[name] = {'acc1': acc1_list[-1], 'acc5': acc5_list[-1], 'protocol': protocol}
-            total_acc1_list.append(acc1_list[-1])
+            result_dict[name] = {**fold_stats[-1], 'protocol': protocol}
+            total_acc1_list.append(fold_stats[-1]['acc1'])
+            if len(dataset_config.dataset_list) == 1:
+                _write_metric_summary(config.output, "tc_clip", name, fold_stats[-1])
 
     "------------ Log results -----------"
     if is_main() and config.use_wandb:
@@ -341,11 +506,21 @@ def main_testing(logger, config, prefix='test'):
     for name, result in result_dict.items():
         protocol = result.pop('protocol')
         if protocol == "avg_std":
-            logger.info(f"Accuracy of the checkpoint on {name} test videos: "
-                        f"Acc@1 {result['acc1_avg']:.1f} (+- {result['acc1_std']:.1f}), Acc@5 {result['acc5_avg']:.1f} (+- {result['acc5_std']:.1f})\n")
+            logger.info(
+                f"Metrics of the checkpoint on {name} test videos: "
+                f"Acc@1 {result['acc1_avg']:.1f} (+- {result['acc1_std']:.1f}), "
+                f"Acc@5 {result['acc5_avg']:.1f} (+- {result['acc5_std']:.1f}), "
+                f"Macro P/R/F1 {result['precision_macro_avg']:.4f} (+- {result['precision_macro_std']:.4f}) / "
+                f"{result['recall_macro_avg']:.4f} (+- {result['recall_macro_std']:.4f}) / "
+                f"{result['f1_macro_avg']:.4f} (+- {result['f1_macro_std']:.4f}), "
+                f"Weighted P/R/F1 {result['precision_weighted_avg']:.4f} (+- {result['precision_weighted_std']:.4f}) / "
+                f"{result['recall_weighted_avg']:.4f} (+- {result['recall_weighted_std']:.4f}) / "
+                f"{result['f1_weighted_avg']:.4f} (+- {result['f1_weighted_std']:.4f})\n"
+            )
         else:
-            logger.info(f"Accuracy of the checkpoint on {name} test videos: "
-                        f"Acc@1 {result['acc1']:.1f}, Acc@5 {result['acc5']:.1f}\n")
+            logger.info(
+                f"Metrics of the checkpoint on {name} test videos: {_format_metric_summary(result)}\n"
+            )
 
         if len(result_dict) > 1:
             log_stats = {f"{prefix}/{name}_{k}": v for k, v in result.items()}

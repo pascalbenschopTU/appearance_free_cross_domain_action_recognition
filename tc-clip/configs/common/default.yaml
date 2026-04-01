@@ -233,7 +233,7 @@ ucf_crime_surveillance:
   dataset_name: ucf_crime_surveillance
   root: /YOUR/PATH/TO/DATASET/UCF_Crime/videos
   num_classes:
-    default: 3
+    default: 2
   label_files:
     default: labels/custom/ucf_crime_surveillance_labels.csv
     grouped_text: labels/custom/ucf_crime_surveillance_class_texts.json
@@ -251,3 +251,5 @@ custom:
   test_ann_file: datasets_splits/custom/rwf2000_all.txt
 
 parse_ucf101: true
+text_prompt_mode: grouped_tcclip
+class_text_label_weight: 0.5

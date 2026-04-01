@@ -21,7 +21,77 @@ def _is_rank0():
     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
 
 
-def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_loader, logger, config, mixup_fn):
+def _reduce_grouped_scores(scores, eval_group_map, eval_group_reduce):
+    group_keys = sorted(int(k) for k in eval_group_map.keys())
+    grouped_scores = []
+    for group_key in group_keys:
+        class_indices = [int(v) for v in eval_group_map[group_key]]
+        if len(class_indices) == 0:
+            continue
+        class_indices_tensor = torch.as_tensor(class_indices, device=scores.device, dtype=torch.long)
+        class_scores = torch.index_select(scores, dim=1, index=class_indices_tensor)
+        if eval_group_reduce == "mean":
+            grouped_scores.append(class_scores.mean(dim=1))
+        else:
+            grouped_scores.append(class_scores.max(dim=1).values)
+
+    if len(grouped_scores) == 0:
+        raise ValueError("eval_group_map is set but produced no valid grouped scores.")
+
+    return torch.stack(grouped_scores, dim=1), group_keys
+
+
+def _compute_prf_metrics(y_true, y_pred, num_classes):
+    cm = torch.zeros((num_classes, num_classes), dtype=torch.int64)
+    for true_label, pred_label in zip(y_true.tolist(), y_pred.tolist()):
+        cm[int(true_label), int(pred_label)] += 1
+
+    tp = torch.diag(cm).to(torch.float64)
+    support = cm.sum(dim=1).to(torch.float64)
+    pred_sum = cm.sum(dim=0).to(torch.float64)
+    eps = 1e-12
+
+    precision = tp / (pred_sum + eps)
+    recall = tp / (support + eps)
+    f1 = 2.0 * precision * recall / (precision + recall + eps)
+
+    macro_precision = float(torch.nanmean(precision).item())
+    macro_recall = float(torch.nanmean(recall).item())
+    macro_f1 = float(torch.nanmean(f1).item())
+
+    total_support = float(support.sum().item())
+    if total_support > 0.0:
+        weighted_precision = float((precision * support).sum().item() / total_support)
+        weighted_recall = float((recall * support).sum().item() / total_support)
+        weighted_f1 = float((f1 * support).sum().item() / total_support)
+    else:
+        weighted_precision = 0.0
+        weighted_recall = 0.0
+        weighted_f1 = 0.0
+
+    return {
+        "precision_macro": macro_precision,
+        "recall_macro": macro_recall,
+        "f1_macro": macro_f1,
+        "precision_weighted": weighted_precision,
+        "recall_weighted": weighted_recall,
+        "f1_weighted": weighted_f1,
+    }
+
+
+def train_one_epoch(
+    epoch,
+    model,
+    criterion,
+    optimizer,
+    lr_scheduler,
+    train_loader,
+    logger,
+    config,
+    mixup_fn,
+    train_group_map=None,
+    train_group_reduce="max",
+):
     model.train()
     optimizer.zero_grad()
 
@@ -42,7 +112,10 @@ def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_load
 
         # forward
         output = model(images)
-        total_loss = criterion(output["logits"], label_id)
+        logits = output["logits"]
+        if train_group_map is not None:
+            logits, _ = _reduce_grouped_scores(logits, train_group_map, train_group_reduce)
+        total_loss = criterion(logits, label_id)
         total_loss_divided = total_loss / config.accumulation_steps
 
         # backward
@@ -89,6 +162,8 @@ def validate(val_loader, model, logger, config, eval_group_map=None, eval_group_
     model.eval()
     metric_logger = MetricLogger(delimiter="  ")
     header = 'Val:'
+    y_true_local = []
+    y_pred_local = []
 
     logger.info(f"{config.num_clip * config.num_crop} views inference")
     for idx, batch_data in enumerate(metric_logger.log_every(val_loader, config.print_freq, logger, header)):
@@ -117,21 +192,9 @@ def validate(val_loader, model, logger, config, eval_group_map=None, eval_group_
 
         label_for_metric = label_id
         if eval_group_map is not None:
-            group_keys = sorted(int(k) for k in eval_group_map.keys())
-            grouped_scores = []
-            for group_key in group_keys:
-                class_indices = [int(v) for v in eval_group_map[group_key]]
-                if len(class_indices) == 0:
-                    continue
-                class_indices_tensor = torch.as_tensor(class_indices, device=tot_similarity.device, dtype=torch.long)
-                class_scores = torch.index_select(tot_similarity, dim=1, index=class_indices_tensor)
-                if eval_group_reduce == "mean":
-                    grouped_scores.append(class_scores.mean(dim=1))
-                else:
-                    grouped_scores.append(class_scores.max(dim=1).values)
-            if len(grouped_scores) == 0:
-                raise ValueError("eval_group_map is set but produced no valid grouped scores.")
-            tot_similarity = torch.stack(grouped_scores, dim=1)
+            tot_similarity, group_keys = _reduce_grouped_scores(
+                tot_similarity, eval_group_map, eval_group_reduce
+            )
 
             label_for_metric = torch.full_like(label_id, -1)
             for new_idx, group_key in enumerate(group_keys):
@@ -143,6 +206,64 @@ def validate(val_loader, model, logger, config, eval_group_map=None, eval_group_
         metric_logger.meters['acc1'].update(float(acc1) / denom * 100, n=denom)
         metric_logger.meters['acc5'].update(float(acc5) / denom * 100, n=denom)
 
+        valid_mask = label_for_metric >= 0
+        if valid_mask.any():
+            y_true_local.append(label_for_metric[valid_mask].detach().cpu())
+            y_pred_local.append(indices_1[valid_mask].reshape(-1).detach().cpu())
+
     metric_logger.synchronize_between_processes()
-    logger.info(f' * Acc@1 {metric_logger.acc1.global_avg:.3f} Acc@5 {metric_logger.acc5.global_avg:.3f}')
-    return metric_logger.get_stats()
+    stats = metric_logger.get_stats()
+
+    if y_true_local:
+        y_true_local = torch.cat(y_true_local, dim=0)
+        y_pred_local = torch.cat(y_pred_local, dim=0)
+    else:
+        y_true_local = torch.empty((0,), dtype=torch.long)
+        y_pred_local = torch.empty((0,), dtype=torch.long)
+
+    gathered = [None]
+    if dist.is_available() and dist.is_initialized():
+        gathered = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(gathered, (y_true_local, y_pred_local))
+    else:
+        gathered = [(y_true_local, y_pred_local)]
+
+    metrics = {}
+    if _is_rank0():
+        y_true_all = [chunk_true for chunk_true, _ in gathered if chunk_true.numel() > 0]
+        y_pred_all = [chunk_pred for _, chunk_pred in gathered if chunk_pred.numel() > 0]
+        if y_true_all:
+            y_true_all = torch.cat(y_true_all, dim=0)
+            y_pred_all = torch.cat(y_pred_all, dim=0)
+            num_classes = int(max(y_true_all.max().item(), y_pred_all.max().item()) + 1)
+            metrics = _compute_prf_metrics(y_true_all, y_pred_all, num_classes)
+        else:
+            metrics = {
+                "precision_macro": 0.0,
+                "recall_macro": 0.0,
+                "f1_macro": 0.0,
+                "precision_weighted": 0.0,
+                "recall_weighted": 0.0,
+                "f1_weighted": 0.0,
+            }
+
+    metrics_box = [metrics]
+    if dist.is_available() and dist.is_initialized():
+        dist.broadcast_object_list(metrics_box, src=0)
+    metrics = metrics_box[0]
+
+    stats.update(metrics)
+    logger.info(
+        " * Acc@1 %.3f Acc@5 %.3f | Macro P/R/F1 %.4f / %.4f / %.4f | Weighted P/R/F1 %.4f / %.4f / %.4f"
+        % (
+            stats["acc1"],
+            stats["acc5"],
+            stats["precision_macro"],
+            stats["recall_macro"],
+            stats["f1_macro"],
+            stats["precision_weighted"],
+            stats["recall_weighted"],
+            stats["f1_weighted"],
+        )
+    )
+    return stats
