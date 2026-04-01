@@ -11,6 +11,7 @@ TRAIN_DATASETS_RAW="${TRAIN_DATASETS:-rwf2000,ucf_crime}"
 EVAL_TARGETS_RAW="${EVAL_TARGETS:-source,rwf2000,ucf_crime}"
 HEAD_MODES_RAW="${SURVEILLANCE_HEAD_MODES:-class}"
 LABEL_ONLY_BASELINE="${SURVEILLANCE_LABEL_ONLY_BASELINE:-0}"
+SURVEILLANCE_SEED="${SEED:-0}"
 
 RWF2000_ROOT="${RWF2000_ROOT:-$ROOT_DIR/../../../Video_LLM_testing/datasets_AR/RWF2000}"
 UCF_CRIME_ROOT="${UCF_CRIME_ROOT:-$ROOT_DIR/../../datasets/UCF_Crime/videos}"
@@ -338,6 +339,7 @@ train_motion_model() {
   MOTION_ARGS=(
     --config configs/ntu_transfer/finetune/common.toml
     --out_dir "$out_dir"
+    --seed "$SURVEILLANCE_SEED"
     --motion_data_source "$MOTION_DATA_SOURCE"
     --finetune_head_mode "$head_mode"
     --root_dir "$(dataset_root "$train_dataset")"
@@ -397,6 +399,7 @@ train_tc_clip_model() {
     main.py
     -cn fully_supervised
     "data=$(tc_clip_train_config "$train_dataset")"
+    "seed=${SURVEILLANCE_SEED}"
     "resume=${TC_CLIP_PRETRAINED_CKPT}"
     "output=${train_output}"
     "trainer=${TC_CLIP_TRAINER}"
@@ -438,6 +441,7 @@ eval_tc_clip_model() {
     -cn "${tc_eval[0]}"
     "data=${tc_eval[1]}"
     "eval=${tc_eval[2]}"
+    "seed=${SURVEILLANCE_SEED}"
     "resume=${ckpt}"
     "output=${eval_output}"
     "trainer=${TC_CLIP_TRAINER}"
@@ -475,6 +479,7 @@ train_rgb_model() {
   echo "=================================================================="
   "$PYTHON_BIN" scripts/train_torchvision_rgb_probe.py \
     train \
+    --seed "$SURVEILLANCE_SEED" \
     --root_dir "$(dataset_root "$train_dataset")" \
     --manifest "$(dataset_train_manifest "$train_dataset")" \
     --class_id_to_label_csv "$(dataset_label_csv "$train_dataset")" \
@@ -503,6 +508,7 @@ eval_rgb_model() {
   echo "Evaluating torchvision RGB | train=${train_dataset} | eval=${eval_dataset} | model=${model_name}"
   "$PYTHON_BIN" scripts/train_torchvision_rgb_probe.py \
     eval \
+    --seed "$SURVEILLANCE_SEED" \
     --root_dir "$(dataset_root "$eval_dataset")" \
     --manifest "$(dataset_val_manifest "$eval_dataset")" \
     --class_id_to_label_csv "$(dataset_label_csv "$eval_dataset")" \

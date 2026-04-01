@@ -36,6 +36,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.models import resnet50, ResNet50_Weights
 
 THIS_DIR = Path(__file__).resolve().parent
 MODEL_DIR = THIS_DIR.parent
@@ -423,6 +424,62 @@ class DomainAdaptationModel(nn.Module):
         if self.privacy_head is not None:
             outputs["privacy_logits"] = self.privacy_head(grad_reverse(feat, privacy_grl_lambda))
         return outputs
+
+
+class ResNet50MotionPrivacyAttacker(nn.Module):
+    """ResNet-50 privacy attacker on single-frame motion inputs, predicts all attributes in one pass.
+
+    MHI mode: takes the first MHI frame (channel 0 of primary) and repeats to 3 channels.
+    Flow mode: takes the first flow frame (u, v channels of secondary), computes
+               magnitude = sqrt(u²+v²) as the 3rd channel.
+    The selection is fixed at construction via motion_modality arg; forward always receives
+    both tensors and selects internally, keeping the loop logic unchanged.
+    """
+
+    def __init__(
+        self,
+        attributes: List[str],
+        motion_modality: str = "mhi",
+        imagenet_pretrained: bool = True,
+    ):
+        super().__init__()
+        backbone = resnet50(weights=ResNet50_Weights.DEFAULT if imagenet_pretrained else None)
+        backbone.fc = nn.Identity()
+        self.backbone = backbone
+        self.motion_modality = str(motion_modality)
+        self.attributes = list(attributes)
+        self.heads = nn.ModuleDict({attr: nn.Linear(2048, 1) for attr in self.attributes})
+        # Non-None sentinel required by evaluate_privacy_attribute_metrics.
+        self.privacy_head = self.heads
+        # Dummy domain_head so the freeze loop in run_posthoc_privacy_attacker is a no-op.
+        self.domain_head = nn.Identity()
+        self.register_buffer("norm_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("norm_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def forward(
+        self,
+        primary: torch.Tensor,
+        secondary: torch.Tensor,
+        *,
+        domain_grl_lambda: float = 0.0,
+        privacy_grl_lambda: float = 0.0,
+    ) -> Dict[str, torch.Tensor]:
+        if self.motion_modality == "mhi":
+            # primary: (B, C, T, H, W) — take first temporal frame of channel 0
+            frame = primary[:, 0, 0]                              # (B, H, W)
+            x = frame.unsqueeze(1).repeat(1, 3, 1, 1).float()    # (B, 3, H, W)
+        else:
+            # secondary: (B, 2, T, H, W) — take first temporal frame, u/v channels
+            frame = secondary[:, :, 0].float()                    # (B, 2, H, W)
+            u, v = frame[:, 0], frame[:, 1]
+            mag = (u.pow(2) + v.pow(2)).sqrt()
+            x = torch.stack([u, v, mag], dim=1)                   # (B, 3, H, W)
+        x = (x - self.norm_mean) / self.norm_std
+        feat = self.backbone(x)                                    # (B, 2048)
+        privacy_logits = torch.cat(
+            [self.heads[attr](feat) for attr in self.attributes], dim=1
+        )  # (B, num_attrs)
+        return {"privacy_logits": privacy_logits}
 
 
 # -----------------------------------------------------------------------------
@@ -823,7 +880,7 @@ def build_da_model(
     mhi_windows: Sequence[int],
     num_privacy_attrs: int,
 ) -> "DomainAdaptationModel":
-    needs_cls_head = args.lambda_ce > 0
+    needs_cls_head = action_head_uses_classifier(args)
     in_ch_second = 1 if args.second_type in ("dphase", "phase") else 2
     in_ch_mhi = 3 if args.input_modality == "rgb" else len(mhi_windows)
     if args.model == "i3d":
@@ -930,6 +987,45 @@ def aggregate_privacy_scores_by_sample_id(
 # -----------------------------------------------------------------------------
 # Action supervision helpers
 # -----------------------------------------------------------------------------
+
+
+def resolve_action_head_mode(args: argparse.Namespace) -> str:
+    mode = str(getattr(args, "action_head_mode", "hybrid")).strip().lower()
+    if mode not in {"clip", "classifier", "hybrid"}:
+        raise ValueError(f"Unsupported --action_head_mode value: {mode!r}")
+    return mode
+
+
+def action_head_uses_clip(args: argparse.Namespace) -> bool:
+    return resolve_action_head_mode(args) in {"clip", "hybrid"}
+
+
+def action_head_uses_classifier(args: argparse.Namespace) -> bool:
+    return resolve_action_head_mode(args) in {"classifier", "hybrid"}
+
+
+def get_action_logits(
+    outputs: Dict[str, torch.Tensor],
+    *,
+    args: argparse.Namespace,
+    text_bank: Optional[torch.Tensor],
+    logit_scale: Optional[LogitScale],
+) -> torch.Tensor:
+    mode = resolve_action_head_mode(args)
+    if mode == "classifier":
+        logits = outputs.get("logits_cls", None)
+        if logits is None:
+            raise RuntimeError("action_head_mode=classifier requires the backbone to return logits_cls.")
+        return logits
+
+    if text_bank is None or logit_scale is None:
+        raise RuntimeError(f"action_head_mode={mode} requires CLIP text-bank action logits, but no text bank is available.")
+
+    if args.feature_key_for_action in outputs:
+        feat = outputs[args.feature_key_for_action]
+    else:
+        feat = outputs.get("emb_fuse_clip", outputs.get("emb_fuse", outputs["adapt_feat"]))
+    return normalized_logits(feat, text_bank, logit_scale)
 
 
 def build_clip_text_bank_for_dataset(
@@ -1041,10 +1137,10 @@ def evaluate_action_accuracy(
     model: DomainAdaptationModel,
     dataloader: DataLoader,
     *,
-    text_bank: torch.Tensor,
-    logit_scale: LogitScale,
+    text_bank: Optional[torch.Tensor],
+    logit_scale: Optional[LogitScale],
     device: torch.device,
-    feature_key_for_action: str,
+    args: argparse.Namespace,
 ) -> float:
     model.eval()
     correct = 0
@@ -1056,11 +1152,12 @@ def evaluate_action_accuracy(
         labels = labels.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, enabled=autocast_enabled):
             outputs = model(*maybe_repeat_single_motion_view(primary, secondary), domain_grl_lambda=0.0, privacy_grl_lambda=0.0)
-            if feature_key_for_action in outputs:
-                feat = outputs[feature_key_for_action]
-            else:
-                feat = outputs.get("emb_fuse_clip", outputs.get("emb_fuse", outputs["adapt_feat"]))
-            logits = normalized_logits(feat, text_bank, logit_scale)
+            logits = get_action_logits(
+                outputs,
+                args=args,
+                text_bank=text_bank,
+                logit_scale=logit_scale,
+            )
         pred = logits.argmax(dim=-1)
         correct += int((pred == labels).sum().item())
         total += int(labels.numel())
@@ -1326,6 +1423,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda_embed_cos", type=float, default=0.0)
     parser.add_argument("--lambda_ce", type=float, default=0.0)
     parser.add_argument(
+        "--action_head_mode",
+        type=str,
+        default="hybrid",
+        choices=["clip", "classifier", "hybrid"],
+        help=(
+            "Which action head drives motion domain adaptation. "
+            "'hybrid' keeps the current CLIP+classifier setup, "
+            "'clip' uses only CLIP/text logits, "
+            "'classifier' uses only logits_cls."
+        ),
+    )
+    parser.add_argument(
         "--feature_key_for_action",
         type=str,
         default="emb_fuse_clip",
@@ -1363,7 +1472,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--sgd_momentum", type=float, default=0.9)
     parser.add_argument("--warmup_steps", type=int, default=100)
-    parser.add_argument("--num_workers", type=int, default=6)
+    parser.add_argument("--num_workers", type=int, default=16)
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=20)
     parser.add_argument("--save_every", type=int, default=0)
@@ -1382,6 +1491,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "When set, the backbone is also re-initialized from --pretrained_ckpt instead of "
             "the DA checkpoint, making the attacker independent of the DA model."
         ),
+    )
+    parser.add_argument(
+        "--posthoc_backbone",
+        type=str,
+        default="da_model",
+        choices=["da_model", "resnet50"],
+        help="Backbone for posthoc_privacy_attacker mode. 'resnet50' uses a standalone ResNet-50 on motion frames.",
+    )
+    parser.add_argument(
+        "--motion_attacker_modality",
+        type=str,
+        default="mhi",
+        choices=["mhi", "flow"],
+        help="Which motion stream ResNet-50 reads in posthoc_privacy_attacker mode with --posthoc_backbone resnet50.",
     )
     parser.add_argument(
         "--privacy_attribute_class_weighting",
@@ -1603,35 +1726,50 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
     log_dataset_summary(eval_dataset, label="Target eval")
     ensure_loader_has_batches(train_loader, loader_name="Post-hoc target-train loader", batch_size=batch_size)
 
-    model = build_da_model(
-        args=args,
-        device=device,
-        num_classes=len(train_dataset.classnames),
-        mhi_windows=mhi_windows,
-        num_privacy_attrs=len(privacy_attrs),
-    )
-
-    unfreeze_backbone = bool(getattr(args, "posthoc_unfreeze_backbone", False))
+    use_resnet50 = str(getattr(args, "posthoc_backbone", "da_model")) == "resnet50"
     backbone_init_checkpoint = str(getattr(args, "pretrained_ckpt", "")).strip()
-    if unfreeze_backbone and backbone_init_checkpoint:
-        load_backbone_checkpoint(model.backbone, args.pretrained_ckpt, device=device)
-    elif ckpt is not None:
-        ckpt_state = ckpt["model_state"]
-        filtered_state = {k: v for k, v in ckpt_state.items() if not str(k).startswith("privacy_head.")}
-        incompatible = model.load_state_dict(filtered_state, strict=False)
+
+    if use_resnet50:
+        model = ResNet50MotionPrivacyAttacker(
+            attributes=privacy_attrs,
+            motion_modality=str(getattr(args, "motion_attacker_modality", "mhi")),
+            imagenet_pretrained=True,
+        ).to(device)
         print(
-            f"[INIT] loaded backbone from {ckpt_path} "
-            f"(missing={len(incompatible.missing_keys)} unexpected={len(incompatible.unexpected_keys)})",
+            f"[INIT] ResNet50MotionPrivacyAttacker "
+            f"modality={model.motion_modality} attrs={model.attributes}",
             flush=True,
         )
-        backbone_init_checkpoint = str(ckpt_path)
-    elif backbone_init_checkpoint:
-        load_backbone_checkpoint(model.backbone, args.pretrained_ckpt, device=device)
     else:
-        print("[INIT] no checkpoint provided for standalone post-hoc mode; using random backbone init", flush=True)
+        model = build_da_model(
+            args=args,
+            device=device,
+            num_classes=len(train_dataset.classnames),
+            mhi_windows=mhi_windows,
+            num_privacy_attrs=len(privacy_attrs),
+        )
 
-    for param in model.backbone.parameters():
-        param.requires_grad_(unfreeze_backbone)
+        unfreeze_backbone = bool(getattr(args, "posthoc_unfreeze_backbone", False))
+        if unfreeze_backbone and backbone_init_checkpoint:
+            load_backbone_checkpoint(model.backbone, args.pretrained_ckpt, device=device)
+        elif ckpt is not None:
+            ckpt_state = ckpt["model_state"]
+            filtered_state = {k: v for k, v in ckpt_state.items() if not str(k).startswith("privacy_head.")}
+            incompatible = model.load_state_dict(filtered_state, strict=False)
+            print(
+                f"[INIT] loaded backbone from {ckpt_path} "
+                f"(missing={len(incompatible.missing_keys)} unexpected={len(incompatible.unexpected_keys)})",
+                flush=True,
+            )
+            backbone_init_checkpoint = str(ckpt_path)
+        elif backbone_init_checkpoint:
+            load_backbone_checkpoint(model.backbone, args.pretrained_ckpt, device=device)
+        else:
+            print("[INIT] no checkpoint provided for standalone post-hoc mode; using random backbone init", flush=True)
+
+        for param in model.backbone.parameters():
+            param.requires_grad_(unfreeze_backbone)
+
     for param in model.domain_head.parameters():
         param.requires_grad_(False)
     if model.privacy_head is None:
@@ -1837,6 +1975,8 @@ def main() -> None:
     device = torch.device(args.device)
     set_seed(args.seed)
     writer = SummaryWriter(log_dir=args.tb_dir)
+    action_head_mode = resolve_action_head_mode(args)
+    print(f"[ACTION] action_head_mode={action_head_mode}", flush=True)
 
     if args.input_modality == "rgb" and args.active_branch != "first":
         print(f"[WARN] input_modality=rgb forces active_branch=first (was {args.active_branch}).", flush=True)
@@ -1927,11 +2067,16 @@ def main() -> None:
         )
 
     num_classes = len(source_dataset.classnames)
-    text_bank, logit_scale = build_clip_text_bank_for_dataset(source_dataset.classnames, args, device)
-    if int(args.embed_dim) != int(text_bank.shape[-1]):
-        raise ValueError(
-            f"Embedding dim mismatch: --embed_dim={args.embed_dim}, text bank dim={text_bank.shape[-1]}"
-        )
+    text_bank: Optional[torch.Tensor] = None
+    logit_scale: Optional[LogitScale] = None
+    if action_head_uses_clip(args):
+        text_bank, logit_scale = build_clip_text_bank_for_dataset(source_dataset.classnames, args, device)
+        if int(args.embed_dim) != int(text_bank.shape[-1]):
+            raise ValueError(
+                f"Embedding dim mismatch: --embed_dim={args.embed_dim}, text bank dim={text_bank.shape[-1]}"
+            )
+    else:
+        print("[ACTION] classifier mode skips CLIP text-bank construction for action supervision.", flush=True)
 
     model = build_da_model(
         args=args,
@@ -1960,7 +2105,9 @@ def main() -> None:
     if args.lambda_privacy > 0 and not source_privacy_resolver.enabled:
         raise ValueError("--lambda_privacy > 0 but no valid source privacy annotations were loaded.")
 
-    params = list(model.parameters()) + list(logit_scale.parameters())
+    params = list(model.parameters())
+    if logit_scale is not None:
+        params.extend(list(logit_scale.parameters()))
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     else:
@@ -1976,7 +2123,7 @@ def main() -> None:
     )
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    if pretrained_payload is not None and pretrained_payload.get("logit_scale_state") is not None:
+    if logit_scale is not None and pretrained_payload is not None and pretrained_payload.get("logit_scale_state") is not None:
         logit_scale.load_state_dict(pretrained_payload["logit_scale_state"])
         print(f"[INIT] loaded logit_scale from {args.pretrained_ckpt}", flush=True)
 
@@ -2001,7 +2148,7 @@ def main() -> None:
         scheduler.load_state_dict(ckpt["scheduler_state"])
         if ckpt.get("scaler_state") is not None:
             scaler.load_state_dict(ckpt["scaler_state"])
-        if ckpt.get("logit_scale_state") is not None:
+        if logit_scale is not None and ckpt.get("logit_scale_state") is not None:
             logit_scale.load_state_dict(ckpt["logit_scale_state"])
         start_epoch = int(ckpt.get("epoch", -1)) + 1
         global_step = int(ckpt.get("global_step", 0))
@@ -2060,27 +2207,37 @@ def main() -> None:
                     privacy_grl_lambda=0.0,
                 )
 
-                src_action_feat = src_out.get(
-                    args.feature_key_for_action,
-                    src_out.get("emb_fuse_clip", src_out.get("emb_fuse", src_out["adapt_feat"])),
+                src_logits_for_action = get_action_logits(
+                    src_out,
+                    args=args,
+                    text_bank=text_bank,
+                    logit_scale=logit_scale,
                 )
-                tgt_action_feat = tgt_out.get(
-                    args.feature_key_for_action,
-                    tgt_out.get("emb_fuse_clip", tgt_out.get("emb_fuse", tgt_out["adapt_feat"])),
+                tgt_logits_for_action = get_action_logits(
+                    tgt_out,
+                    args=args,
+                    text_bank=text_bank,
+                    logit_scale=logit_scale,
                 )
-                src_clip_logits = normalized_logits(src_action_feat, text_bank, logit_scale)
-                tgt_clip_logits = normalized_logits(tgt_action_feat, text_bank, logit_scale)
 
-                loss_action_clip_ce = F.cross_entropy(src_clip_logits, src_labels)
-                target_embed = text_bank.index_select(0, src_labels)
-                pred_embed = F.normalize(src_action_feat.float(), dim=-1)
-                target_embed = F.normalize(target_embed.float(), dim=-1)
-                loss_action_embed_cos = (1.0 - F.cosine_similarity(pred_embed, target_embed, dim=-1)).mean()
+                if action_head_uses_clip(args):
+                    src_action_feat = src_out.get(
+                        args.feature_key_for_action,
+                        src_out.get("emb_fuse_clip", src_out.get("emb_fuse", src_out["adapt_feat"])),
+                    )
+                    loss_action_clip_ce = F.cross_entropy(src_logits_for_action, src_labels)
+                    target_embed = text_bank.index_select(0, src_labels)
+                    pred_embed = F.normalize(src_action_feat.float(), dim=-1)
+                    target_embed = F.normalize(target_embed.float(), dim=-1)
+                    loss_action_embed_cos = (1.0 - F.cosine_similarity(pred_embed, target_embed, dim=-1)).mean()
+                else:
+                    loss_action_clip_ce = torch.zeros((), device=device, dtype=torch.float32)
+                    loss_action_embed_cos = torch.zeros((), device=device, dtype=torch.float32)
 
-                if args.lambda_ce > 0:
+                if action_head_uses_classifier(args):
                     logits_cls = src_out.get("logits_cls", None)
                     if logits_cls is None:
-                        raise RuntimeError("--lambda_ce > 0 but the backbone returned no logits_cls.")
+                        raise RuntimeError("Classifier action supervision requires the backbone to return logits_cls.")
                     loss_action_ce = F.cross_entropy(logits_cls, src_labels)
                 else:
                     loss_action_ce = torch.zeros((), device=device, dtype=torch.float32)
@@ -2103,7 +2260,7 @@ def main() -> None:
                 else:
                     loss_privacy = torch.zeros((), device=device, dtype=torch.float32)
 
-                loss_target_entropy = entropy_from_logits(tgt_clip_logits)
+                loss_target_entropy = entropy_from_logits(tgt_logits_for_action)
 
                 loss = (
                     args.lambda_clip_ce * loss_action_clip_ce
@@ -2143,7 +2300,8 @@ def main() -> None:
                 writer.add_scalar("loss/privacy", float(loss_privacy.item()), global_step)
                 writer.add_scalar("loss/target_entropy", float(loss_target_entropy.item()), global_step)
                 writer.add_scalar("params/lr", optimizer.param_groups[0]["lr"], global_step)
-                writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp().item()), global_step)
+                if logit_scale is not None:
+                    writer.add_scalar("params/logit_scale_exp", float(logit_scale().exp().item()), global_step)
                 writer.add_scalar("params/grl_lambda", grl_lambda, global_step)
 
             if args.log_every > 0 and global_step % args.log_every == 0:
@@ -2169,7 +2327,7 @@ def main() -> None:
                         "optimizer_state": optimizer.state_dict(),
                         "scheduler_state": scheduler.state_dict(),
                         "scaler_state": scaler.state_dict() if device.type == "cuda" else None,
-                        "logit_scale_state": logit_scale.state_dict(),
+                        "logit_scale_state": (logit_scale.state_dict() if logit_scale is not None else None),
                         "best_metric": best_metric,
                         "args": vars(args),
                     },
@@ -2194,7 +2352,7 @@ def main() -> None:
                 text_bank=text_bank,
                 logit_scale=logit_scale,
                 device=device,
-                feature_key_for_action=args.feature_key_for_action,
+                args=args,
             )
             writer.add_scalar("eval/action_top1", eval_acc, global_step)
             print(f"[EVAL EPOCH {epoch:03d}] action_top1={eval_acc:.4f}", flush=True)
@@ -2227,7 +2385,7 @@ def main() -> None:
                 "optimizer_state": optimizer.state_dict(),
                 "scheduler_state": scheduler.state_dict(),
                 "scaler_state": scaler.state_dict() if device.type == "cuda" else None,
-                "logit_scale_state": logit_scale.state_dict(),
+                "logit_scale_state": (logit_scale.state_dict() if logit_scale is not None else None),
                 "best_metric": best_metric,
                 "args": vars(args),
             },

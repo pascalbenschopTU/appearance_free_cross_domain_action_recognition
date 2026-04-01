@@ -2,22 +2,22 @@
 # Bidirectional STPrivacy UCF <-> HMDB12 domain adaptation benchmark.
 #
 # Setups:
-#   i3d_mhi_of   I3D pretrained (MHI + OF)
-#   i3d_of_only  I3D pretrained (OF only)
-#   vit_rgb      ViT-S RGB baseline (STPrivacy, full HMDB51/UCF101)
+#   i3d_mhi_of           I3D pretrained (MHI + OF)
+#   i3d_of_only          I3D pretrained (OF only)
+#   i3d_mhi_of_cls       I3D pretrained (MHI + OF), classifier-head-only DA
+#   i3d_of_only_cls      I3D pretrained (OF only), classifier-head-only DA
+#   motion_resnet50_mhi  ResNet-50 privacy attacker on MHI (single frame x 3ch)
+#   motion_resnet50_flow ResNet-50 privacy attacker on optical flow (u,v,mag)
+#   rgb_da               R(2+1)-D domain adaptation UCF RGB <-> HMDB RGB
+#   rgb_privacy          ResNet-50 privacy attacker on RGB frames (STPrivacy CV protocol)
 #
 # Usage:
 #   bash run_domain_adaptation.sh
 #   bash run_domain_adaptation.sh i3d_mhi_of
-#   bash run_domain_adaptation.sh i3d_mhi_of i3d_of_only
+#   bash run_domain_adaptation.sh motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy
 #
 # Via env var (e.g. from sbatch):
-#   MODELS="i3d_mhi_of i3d_of_only" bash run_domain_adaptation.sh
-#   DOMAIN_ADAPTATION_SETUPS="i3d_mhi_of i3d_of_only" bash run_domain_adaptation.sh
-#
-# Legacy aliases are accepted for compatibility:
-#   mhi_of -> i3d_mhi_of
-#   of_only -> i3d_of_only
+#   MODELS="motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy" bash run_domain_adaptation.sh
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +44,10 @@ SPLIT_ID="${DOMAIN_ADAPTATION_SPLIT_ID:-${SPLIT_ID:-1}}"
 RUN_NAME_PREFIX="${DOMAIN_ADAPTATION_RUN_NAME_PREFIX:-${RUN_NAME_PREFIX:-domain_adaptation_i3d_motion_clip_stprivacy}}"
 OUT_ROOT="${DOMAIN_ADAPTATION_OUT_ROOT:-${BASE_OUT_ROOT:-$ROOT_DIR/privacy/out}}"
 MANIFEST_DIR="${DOMAIN_ADAPTATION_MANIFEST_DIR:-${MANIFEST_DIR:-$OUT_ROOT/manifests/split_${SPLIT_ID}}}"
+RGB_PRIVACY_MANIFEST_ROOT="${DOMAIN_ADAPTATION_RGB_PRIVACY_MANIFEST_ROOT:-${RGB_PRIVACY_MANIFEST_ROOT:-$OUT_ROOT/manifests/rgb_privacy}}"
+UCF_RGB_PRIVACY_MANIFEST_DIR="${DOMAIN_ADAPTATION_UCF_RGB_PRIVACY_MANIFEST_DIR:-${UCF_RGB_PRIVACY_MANIFEST_DIR:-$RGB_PRIVACY_MANIFEST_ROOT/ucf101}}"
+HMDB_RGB_PRIVACY_MANIFEST_DIR="${DOMAIN_ADAPTATION_HMDB_RGB_PRIVACY_MANIFEST_DIR:-${HMDB_RGB_PRIVACY_MANIFEST_DIR:-$RGB_PRIVACY_MANIFEST_ROOT/hmdb51}}"
+COMMON_CLASS_LABEL_CSV="${DOMAIN_ADAPTATION_COMMON_CLASS_LABEL_CSV:-${COMMON_CLASS_LABEL_CSV:-$MANIFEST_DIR/common_12class_labels.csv}}"
 
 CKPT_I3D_MHI_OF="${DOMAIN_ADAPTATION_CKPT_I3D_MHI_OF:-${CKPT_MHI_OF:-$ROOT_DIR/out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss3.4912.pt}}"
 CKPT_I3D_OF_ONLY="${DOMAIN_ADAPTATION_CKPT_I3D_OF_ONLY:-${CKPT_OF_ONLY:-$ROOT_DIR/out/train_i3d_flow_only_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss4.2931.pt}}"
@@ -63,16 +67,18 @@ POSTHOC_BATCH_SIZE="${DOMAIN_ADAPTATION_POSTHOC_BATCH_SIZE:-${POSTHOC_BATCH_SIZE
 POSTHOC_LR="${DOMAIN_ADAPTATION_POSTHOC_LR:-${POSTHOC_LR:-6.25e-5}}"
 POSTHOC_MIN_LR="${DOMAIN_ADAPTATION_POSTHOC_MIN_LR:-${POSTHOC_MIN_LR:-6e-7}}"
 POSTHOC_WEIGHT_DECAY="${DOMAIN_ADAPTATION_POSTHOC_WEIGHT_DECAY:-${POSTHOC_WEIGHT_DECAY:-0.05}}"
-POSTHOC_WARMUP_STEPS="${DOMAIN_ADAPTATION_POSTHOC_WARMUP_STEPS:-${POSTHOC_WARMUP_STEPS:-100}}"
+POSTHOC_WARMUP_STEPS="${DOMAIN_ADAPTATION_POSTHOC_WARMUP_STEPS:-${POSTHOC_WARMUP_STEPS:-1000}}"
 POSTHOC_SELECT_METRIC="${DOMAIN_ADAPTATION_POSTHOC_SELECT_METRIC:-${POSTHOC_SELECT_METRIC:-privacy_cmap}}"
 POSTHOC_POS_WEIGHT="${DOMAIN_ADAPTATION_POSTHOC_POS_WEIGHT:-${POSTHOC_POS_WEIGHT:-disabled}}"
-POSTHOC_METRIC_MODE="${DOMAIN_ADAPTATION_POSTHOC_METRIC_MODE:-${POSTHOC_METRIC_MODE:-classwise}}"
+POSTHOC_METRIC_MODE="${DOMAIN_ADAPTATION_POSTHOC_METRIC_MODE:-${POSTHOC_METRIC_MODE:-positive_only}}"
 PRIVACY_FRAME_PROTOCOL="${DOMAIN_ADAPTATION_PRIVACY_FRAME_PROTOCOL:-${PRIVACY_FRAME_PROTOCOL:-single_frame}}"
 TRAIN_VIEWS_PER_VIDEO="${DOMAIN_ADAPTATION_TRAIN_VIEWS_PER_VIDEO:-${TRAIN_VIEWS_PER_VIDEO:-4}}"
 EVAL_VIEWS_PER_VIDEO="${DOMAIN_ADAPTATION_EVAL_VIEWS_PER_VIDEO:-${EVAL_VIEWS_PER_VIDEO:-8}}"
 EVAL_VIEW_SAMPLING="${DOMAIN_ADAPTATION_EVAL_VIEW_SAMPLING:-${EVAL_VIEW_SAMPLING:-uniform}}"
 POSTHOC_ONLY="${DOMAIN_ADAPTATION_POSTHOC_ONLY:-${POSTHOC_ONLY:-}}"
-TRAIN_PRIVACY_ATTRIBUTES_RESNET="${DOMAIN_ADAPTATION_TRAIN_PRIVACY_ATTRIBUTES_RESNET:-${TRAIN_PRIVACY_ATTRIBUTES_RESNET:-0}}"
+RGB_DA_EPOCHS="${DOMAIN_ADAPTATION_RGB_DA_EPOCHS:-${RGB_DA_EPOCHS:-40}}"
+RGB_DA_BATCH_SIZE="${DOMAIN_ADAPTATION_RGB_DA_BATCH_SIZE:-${RGB_DA_BATCH_SIZE:-8}}"
+MOTION_DA_ACTION_HEAD_MODE="${DOMAIN_ADAPTATION_MOTION_DA_ACTION_HEAD_MODE:-${MOTION_DA_ACTION_HEAD_MODE:-hybrid}}"
 
 POSTHOC_DIR_SUFFIX=""
 [[ "${POSTHOC_POS_WEIGHT:-}" == "enabled" ]] && POSTHOC_DIR_SUFFIX="${POSTHOC_DIR_SUFFIX}_posweight"
@@ -87,11 +93,12 @@ export HF_HOME
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 
 mkdir -p \
-  "$OUT_ROOT" \
-  "$MANIFEST_DIR" \
-  "$CLIP_CACHE_DIR" \
-  "$TORCH_CACHE_DIR" \
-  "$HF_HOME"
+    "$OUT_ROOT" \
+    "$MANIFEST_DIR" \
+    "$RGB_PRIVACY_MANIFEST_ROOT" \
+    "$CLIP_CACHE_DIR" \
+    "$TORCH_CACHE_DIR" \
+    "$HF_HOME"
 
 require_file() {
   local path="$1"
@@ -113,11 +120,16 @@ require_dir() {
 
 canonicalize_setup() {
   case "$1" in
-    i3d_mhi_of|mhi_of) echo "i3d_mhi_of" ;;
-    i3d_of_only|of_only) echo "i3d_of_only" ;;
-    vit_rgb) echo "vit_rgb" ;;
+    i3d_mhi_of) echo "i3d_mhi_of" ;;
+    i3d_of_only) echo "i3d_of_only" ;;
+    i3d_mhi_of_cls) echo "i3d_mhi_of_cls" ;;
+    i3d_of_only_cls) echo "i3d_of_only_cls" ;;
+    motion_resnet50_mhi) echo "motion_resnet50_mhi" ;;
+    motion_resnet50_flow) echo "motion_resnet50_flow" ;;
+    rgb_da) echo "rgb_da" ;;
+    rgb_privacy) echo "rgb_privacy" ;;
     *)
-      echo "Unknown setup: '$1' (valid: i3d_mhi_of i3d_of_only vit_rgb)" >&2
+      echo "Unknown setup: '$1' (valid: i3d_mhi_of i3d_of_only i3d_mhi_of_cls i3d_of_only_cls motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy)" >&2
       exit 1
       ;;
   esac
@@ -125,8 +137,8 @@ canonicalize_setup() {
 
 resolve_checkpoint() {
   case "$1" in
-    i3d_mhi_of) echo "$CKPT_I3D_MHI_OF" ;;
-    i3d_of_only) echo "$CKPT_I3D_OF_ONLY" ;;
+    i3d_mhi_of|i3d_mhi_of_cls) echo "$CKPT_I3D_MHI_OF" ;;
+    i3d_of_only|i3d_of_only_cls) echo "$CKPT_I3D_OF_ONLY" ;;
     *)
       echo "Checkpoint not configured for setup '$1'" >&2
       exit 1
@@ -138,7 +150,12 @@ describe_setup() {
   case "$1" in
     i3d_mhi_of) echo "I3D pretrained (MHI + OF)" ;;
     i3d_of_only) echo "I3D pretrained (OF only)" ;;
-    vit_rgb) echo "ViT-S (RGB)" ;;
+    i3d_mhi_of_cls) echo "I3D pretrained (MHI + OF), classifier-head-only DA" ;;
+    i3d_of_only_cls) echo "I3D pretrained (OF only), classifier-head-only DA" ;;
+    motion_resnet50_mhi) echo "Motion ResNet-50 privacy attacker (MHI)" ;;
+    motion_resnet50_flow) echo "Motion ResNet-50 privacy attacker (Flow)" ;;
+    rgb_da) echo "RGB domain adaptation R(2+1)-D" ;;
+    rgb_privacy) echo "RGB ResNet-50 privacy attacker" ;;
     *)
       echo "Description not configured for setup '$1'" >&2
       exit 1
@@ -154,12 +171,34 @@ print_header() {
   echo "=================================================================="
 }
 
+# Print all arguments of a run to stdout before executing.
+# Usage: print_run_args "label" cmd arg1 arg2 ...
+print_run_args() {
+  local label="$1"; shift
+  local n="$#"
+  local i=0
+  echo
+  echo "=================================================================="
+  printf 'ARGS: %s\n' "$label"
+  echo "=================================================================="
+  for arg in "$@"; do
+    i=$((i + 1))
+    if [[ $i -lt $n ]]; then
+      printf '  %s \\\n' "$arg"
+    else
+      printf '  %s\n' "$arg"
+    fi
+  done
+  echo "=================================================================="
+}
+
 generate_manifests() {
   print_header "Generating shared UCF/HMDB manifests (split ${SPLIT_ID})"
 
   MODEL_ROOT="$ROOT_DIR" \
   MANIFEST_DIR="$MANIFEST_DIR" \
   SPLIT_ID="$SPLIT_ID" \
+  COMMON_CLASS_LABEL_CSV="$COMMON_CLASS_LABEL_CSV" \
   UCF_ROOT_DIR="$UCF_ROOT_DIR" \
   HMDB_ROOT_DIR="$HMDB_ROOT_DIR" \
   "$PYTHON_BIN" - <<'PY'
@@ -172,6 +211,7 @@ from util import _build_video_lookup_tables, _resolve_manifest_video_path
 model_root = Path(os.environ["MODEL_ROOT"])
 manifest_dir = Path(os.environ["MANIFEST_DIR"])
 split_id = str(os.environ["SPLIT_ID"])
+common_class_label_csv = Path(os.environ["COMMON_CLASS_LABEL_CSV"])
 ucf_root = Path(os.environ["UCF_ROOT_DIR"])
 hmdb_root = Path(os.environ["HMDB_ROOT_DIR"])
 
@@ -250,47 +290,30 @@ write_manifest("ucf_train.txt", load_and_filter(ucf_split_dir / f"train{split_id
 write_manifest("ucf_test.txt", load_and_filter(ucf_split_dir / f"test{split_id}.txt", ucf_root, ucf_to_common))
 write_manifest("hmdb_train.txt", load_and_filter(hmdb_split_dir / f"train{split_id}.txt", hmdb_root, hmdb_to_common))
 write_manifest("hmdb_test.txt", load_and_filter(hmdb_split_dir / f"test{split_id}.txt", hmdb_root, hmdb_to_common))
+
+common_class_label_csv.parent.mkdir(parents=True, exist_ok=True)
+with common_class_label_csv.open("w", encoding="utf-8") as handle:
+    handle.write("id,name\n")
+    for label_id, label_name in enumerate(common_class_names):
+        handle.write(f"{label_id},{label_name}\n")
+print(f"[MANIFEST] {common_class_label_csv}", flush=True)
 PY
 }
 
-run_resnet_baselines() {
-  if [[ "$TRAIN_PRIVACY_ATTRIBUTES_RESNET" != "1" ]]; then
-    return
-  fi
+generate_rgb_privacy_manifests() {
+  print_header "Preparing RGB privacy split manifests (split ${SPLIT_ID})"
 
-  print_header "Running optional STPrivacy ResNet baselines"
+  mkdir -p "$UCF_RGB_PRIVACY_MANIFEST_DIR" "$HMDB_RGB_PRIVACY_MANIFEST_DIR"
 
-  "$PYTHON_BIN" privacy/train_stprivacy_privacy_cv.py \
-    --dataset_name hmdb51 \
-    --root_dir "$HMDB_RGB_ROOT_DIR" \
-    --input_modality rgb \
-    --model_backbone resnet50 \
-    --epochs 50 \
-    --privacy_frame_protocol "$PRIVACY_FRAME_PROTOCOL" \
-    --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO" \
-    --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO" \
-    --eval_view_sampling "$EVAL_VIEW_SAMPLING" \
-    --train_manifests "$MANIFEST_DIR/hmdb_train.txt" \
-    --test_manifests "$MANIFEST_DIR/hmdb_test.txt" \
-    --attributes face,skin_color,gender,nudity,relationship \
-    --splits 1 \
-    --out_dir "$OUT_ROOT/stprivacy_privacy_cv_hmdb12_resnet50_split${SPLIT_ID}"
+  cp "$MANIFEST_DIR/ucf_train.txt" "$UCF_RGB_PRIVACY_MANIFEST_DIR/train${SPLIT_ID}.txt"
+  cp "$MANIFEST_DIR/ucf_test.txt" "$UCF_RGB_PRIVACY_MANIFEST_DIR/test${SPLIT_ID}.txt"
+  cp "$MANIFEST_DIR/hmdb_train.txt" "$HMDB_RGB_PRIVACY_MANIFEST_DIR/train${SPLIT_ID}.txt"
+  cp "$MANIFEST_DIR/hmdb_test.txt" "$HMDB_RGB_PRIVACY_MANIFEST_DIR/test${SPLIT_ID}.txt"
 
-  "$PYTHON_BIN" privacy/train_stprivacy_privacy_cv.py \
-    --dataset_name ucf101 \
-    --root_dir "$UCF_RGB_ROOT_DIR" \
-    --input_modality rgb \
-    --model_backbone resnet50 \
-    --epochs 50 \
-    --privacy_frame_protocol "$PRIVACY_FRAME_PROTOCOL" \
-    --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO" \
-    --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO" \
-    --eval_view_sampling "$EVAL_VIEW_SAMPLING" \
-    --train_manifests "$MANIFEST_DIR/ucf_train.txt" \
-    --test_manifests "$MANIFEST_DIR/ucf_test.txt" \
-    --attributes face,skin_color,gender,nudity,relationship \
-    --splits 1 \
-    --out_dir "$OUT_ROOT/stprivacy_privacy_cv_ucf12_resnet50_split${SPLIT_ID}"
+  echo "[MANIFEST] ucf101: $UCF_RGB_PRIVACY_MANIFEST_DIR/train${SPLIT_ID}.txt"
+  echo "[MANIFEST] ucf101: $UCF_RGB_PRIVACY_MANIFEST_DIR/test${SPLIT_ID}.txt"
+  echo "[MANIFEST] hmdb51: $HMDB_RGB_PRIVACY_MANIFEST_DIR/train${SPLIT_ID}.txt"
+  echo "[MANIFEST] hmdb51: $HMDB_RGB_PRIVACY_MANIFEST_DIR/test${SPLIT_ID}.txt"
 }
 
 run_da_training() {
@@ -305,6 +328,7 @@ run_da_training() {
   local eval_manifest="$9"
   local source_dataset="${10}"
   local eval_dataset="${11}"
+  local action_head_mode="${12:-$MOTION_DA_ACTION_HEAD_MODE}"
 
   if [[ -n "$POSTHOC_ONLY" ]]; then
     echo "[SKIP] ${label} domain adaptation (DOMAIN_ADAPTATION_POSTHOC_ONLY is set)"
@@ -312,7 +336,8 @@ run_da_training() {
   fi
 
   echo "[RUN] ${label} domain adaptation"
-  "$PYTHON_BIN" privacy/train_domain_adaptation.py \
+  local cmd=(
+    "$PYTHON_BIN" privacy/train_domain_adaptation.py
     --config "$CONFIG_PATH" \
     --out_dir "$out_dir" \
     --pretrained_ckpt "$checkpoint" \
@@ -327,9 +352,13 @@ run_da_training() {
     --source_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR" \
     --eval_stprivacy_dataset "$eval_dataset" \
     --eval_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR" \
+    --action_head_mode "$action_head_mode" \
     --lambda_privacy 0 \
     --privacy_grl_lambda 0 \
     --privacy_attributes ""
+  )
+  print_run_args "$label" "${cmd[@]}"
+  "${cmd[@]}"
 }
 
 run_posthoc_attacker() {
@@ -347,37 +376,192 @@ run_posthoc_attacker() {
   echo "[RUN] ${label} post-hoc privacy attacker"
   local cmd=(
     "$PYTHON_BIN" privacy/train_domain_adaptation.py
-    --mode posthoc_privacy_attacker \
-    --out_dir "$out_dir" \
-    --config "$CONFIG_PATH" \
-    --pretrained_ckpt "$checkpoint" \
-    --target_root_dir "$target_root_dir" \
-    --target_manifest "$target_manifest" \
-    --eval_root_dir "$eval_root_dir" \
-    --eval_manifest "$eval_manifest" \
-    --target_stprivacy_dataset "$target_dataset" \
-    --eval_stprivacy_dataset "$eval_dataset" \
-    --target_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR" \
-    --eval_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR" \
-    --epochs "$POSTHOC_EPOCHS" \
-    --batch_size "$POSTHOC_BATCH_SIZE" \
-    --lr "$POSTHOC_LR" \
-    --min_lr "$POSTHOC_MIN_LR" \
-    --weight_decay "$POSTHOC_WEIGHT_DECAY" \
-    --warmup_steps "$POSTHOC_WARMUP_STEPS" \
-    --select_metric "$POSTHOC_SELECT_METRIC" \
-    --posthoc_unfreeze_backbone \
-    --privacy_attribute_class_weighting "$POSTHOC_POS_WEIGHT" \
-    --privacy_metric_mode "$POSTHOC_METRIC_MODE" \
-    --privacy_frame_protocol "$PRIVACY_FRAME_PROTOCOL" \
-    --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO" \
-    --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO" \
+    --mode posthoc_privacy_attacker
+    --out_dir "$out_dir"
+    --config "$CONFIG_PATH"
+    --pretrained_ckpt "$checkpoint"
+    --target_root_dir "$target_root_dir"
+    --target_manifest "$target_manifest"
+    --eval_root_dir "$eval_root_dir"
+    --eval_manifest "$eval_manifest"
+    --target_stprivacy_dataset "$target_dataset"
+    --eval_stprivacy_dataset "$eval_dataset"
+    --target_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR"
+    --eval_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR"
+    --epochs "$POSTHOC_EPOCHS"
+    --batch_size "$POSTHOC_BATCH_SIZE"
+    --lr "$POSTHOC_LR"
+    --min_lr "$POSTHOC_MIN_LR"
+    --weight_decay "$POSTHOC_WEIGHT_DECAY"
+    --warmup_steps "$POSTHOC_WARMUP_STEPS"
+    --select_metric "$POSTHOC_SELECT_METRIC"
+    --posthoc_unfreeze_backbone
+    --privacy_attribute_class_weighting "$POSTHOC_POS_WEIGHT"
+    --privacy_metric_mode "$POSTHOC_METRIC_MODE"
+    --privacy_frame_protocol "$PRIVACY_FRAME_PROTOCOL"
+    --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO"
+    --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO"
     --eval_view_sampling "$EVAL_VIEW_SAMPLING"
   )
   if [[ -n "$active_branch_override" ]]; then
     cmd+=( --active_branch "$active_branch_override" )
   fi
+  print_run_args "$label" "${cmd[@]}"
   "${cmd[@]}"
+}
+
+# ---------------------------------------------------------------------------
+# Motion ResNet-50 privacy attacker (MHI or Flow) — no DA training step
+# ---------------------------------------------------------------------------
+
+run_motion_resnet50_attacker() {
+  local modality="$1"   # mhi or flow
+  local out_dir="$OUT_ROOT/motion_resnet50_${modality}_stprivacy_split${SPLIT_ID}${POSTHOC_DIR_SUFFIX}"
+
+  print_header "Motion ResNet-50 privacy attacker (${modality}) (split ${SPLIT_ID})"
+
+  for dataset in hmdb51 ucf101; do
+    local root_dir train_manifest eval_manifest
+    if [[ "$dataset" == "hmdb51" ]]; then
+      root_dir="$HMDB_ROOT_DIR"
+      train_manifest="$MANIFEST_DIR/hmdb_train.txt"
+      eval_manifest="$MANIFEST_DIR/hmdb_test.txt"
+    else
+      root_dir="$UCF_ROOT_DIR"
+      train_manifest="$MANIFEST_DIR/ucf_train.txt"
+      eval_manifest="$MANIFEST_DIR/ucf_test.txt"
+    fi
+
+    local label="Motion ResNet-50 (${modality}) privacy attacker — ${dataset}"
+    local cmd=(
+      "$PYTHON_BIN" privacy/train_domain_adaptation.py
+      --mode posthoc_privacy_attacker
+      --posthoc_backbone resnet50
+      --motion_attacker_modality "$modality"
+      --out_dir "${out_dir}/${dataset}"
+      --target_root_dir "$root_dir"
+      --target_manifest "$train_manifest"
+      --eval_root_dir "$root_dir"
+      --eval_manifest "$eval_manifest"
+      --target_stprivacy_dataset "$dataset"
+      --eval_stprivacy_dataset "$dataset"
+      --target_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR"
+      --eval_stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR"
+      --epochs "$POSTHOC_EPOCHS"
+      --batch_size "$POSTHOC_BATCH_SIZE"
+      --lr "$POSTHOC_LR"
+      --min_lr "$POSTHOC_MIN_LR"
+      --weight_decay "$POSTHOC_WEIGHT_DECAY"
+      --warmup_steps "$POSTHOC_WARMUP_STEPS"
+      --select_metric "$POSTHOC_SELECT_METRIC"
+      --posthoc_unfreeze_backbone
+      --privacy_attribute_class_weighting "$POSTHOC_POS_WEIGHT"
+      --privacy_metric_mode "$POSTHOC_METRIC_MODE"
+      --privacy_frame_protocol "$PRIVACY_FRAME_PROTOCOL"
+      --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO"
+      --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO"
+      --eval_view_sampling "$EVAL_VIEW_SAMPLING"
+    )
+    print_run_args "$label" "${cmd[@]}"
+    mkdir -p "${out_dir}/${dataset}"
+    "${cmd[@]}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# RGB domain adaptation with R(2+1)-D (bidirectional UCF <-> HMDB)
+# ---------------------------------------------------------------------------
+
+run_rgb_da_setup() {
+  local out_dir="$OUT_ROOT/rgb_da_r2plus1d_stprivacy_split${SPLIT_ID}"
+
+  print_header "RGB domain adaptation R(2+1)-D (split ${SPLIT_ID})"
+
+  for direction in ucf_to_hmdb hmdb_to_ucf; do
+    local label source_root source_manifest target_root target_manifest run_out
+    if [[ "$direction" == "ucf_to_hmdb" ]]; then
+      label="UCF → HMDB (RGB R(2+1)-D DA)"
+      source_root="$UCF_RGB_ROOT_DIR"
+      source_manifest="$MANIFEST_DIR/ucf_train.txt"
+      target_root="$HMDB_RGB_ROOT_DIR"
+      target_manifest="$MANIFEST_DIR/hmdb_train.txt"
+      run_out="${out_dir}/ucf_to_hmdb"
+    else
+      label="HMDB → UCF (RGB R(2+1)-D DA)"
+      source_root="$HMDB_RGB_ROOT_DIR"
+      source_manifest="$MANIFEST_DIR/hmdb_train.txt"
+      target_root="$UCF_RGB_ROOT_DIR"
+      target_manifest="$MANIFEST_DIR/ucf_train.txt"
+      run_out="${out_dir}/hmdb_to_ucf"
+    fi
+
+    local cmd=(
+      "$PYTHON_BIN" privacy/train_domain_adaptation_rgb.py
+      --mode domain_adaptation
+      --out_dir "$run_out"
+      --source_root_dir "$source_root"
+      --source_manifest "$source_manifest"
+      --source_class_id_to_label_csv "$COMMON_CLASS_LABEL_CSV"
+      --target_root_dir "$target_root"
+      --target_manifest "$target_manifest"
+      --target_class_id_to_label_csv "$COMMON_CLASS_LABEL_CSV"
+      --epochs "$RGB_DA_EPOCHS"
+      --batch_size "$RGB_DA_BATCH_SIZE"
+      --lr "$POSTHOC_LR"
+      --min_lr "$POSTHOC_MIN_LR"
+      --weight_decay "$POSTHOC_WEIGHT_DECAY"
+      --warmup_steps "$POSTHOC_WARMUP_STEPS"
+    )
+    print_run_args "$label" "${cmd[@]}"
+    mkdir -p "$run_out"
+    "${cmd[@]}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# RGB ResNet-50 privacy attacker (STPrivacy CV protocol, both datasets)
+# ---------------------------------------------------------------------------
+
+run_rgb_privacy_setup() {
+  local out_dir="$OUT_ROOT/rgb_privacy_resnet50_stprivacy_split${SPLIT_ID}${POSTHOC_DIR_SUFFIX}"
+
+  local class_weight_mode="none"
+  [[ "${POSTHOC_POS_WEIGHT:-}" == "enabled" ]] && class_weight_mode="inverse_freq"
+
+  print_header "RGB ResNet-50 privacy attacker (split ${SPLIT_ID})"
+
+  for dataset in hmdb51 ucf101; do
+    local root_dir
+    if [[ "$dataset" == "hmdb51" ]]; then
+      root_dir="$HMDB_RGB_ROOT_DIR"
+    else
+      root_dir="$UCF_RGB_ROOT_DIR"
+    fi
+
+    local label="RGB ResNet-50 privacy attacker — ${dataset}"
+    local cmd=(
+      "$PYTHON_BIN" privacy/train_domain_adaptation_rgb.py
+      --mode privacy_attacker
+      --dataset_name "$dataset"
+      --root_dir "$root_dir"
+      --stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR"
+      --split_manifest_dir "$([[ "$dataset" == "hmdb51" ]] && printf '%s' "$HMDB_RGB_PRIVACY_MANIFEST_DIR" || printf '%s' "$UCF_RGB_PRIVACY_MANIFEST_DIR")"
+      --splits "$SPLIT_ID"
+      --out_dir "${out_dir}/${dataset}"
+      --epochs "$POSTHOC_EPOCHS"
+      --batch_size "$POSTHOC_BATCH_SIZE"
+      --lr "$POSTHOC_LR"
+      --min_lr "$POSTHOC_MIN_LR"
+      --weight_decay "$POSTHOC_WEIGHT_DECAY"
+      --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO"
+      --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO"
+      --eval_view_sampling "$EVAL_VIEW_SAMPLING"
+      --class_weight_mode "$class_weight_mode"
+    )
+    print_run_args "$label" "${cmd[@]}"
+    mkdir -p "${out_dir}/${dataset}"
+    "${cmd[@]}"
+  done
 }
 
 write_summary() {
@@ -449,10 +633,13 @@ run_setup() {
   local hmdb_to_ucf_out_dir
   local ucf_to_hmdb_posthoc_out_dir
   local hmdb_to_ucf_posthoc_out_dir
+  local action_head_mode
 
   setup="$(canonicalize_setup "$raw_setup")"
   checkpoint="$(resolve_checkpoint "$setup")"
   label="$(describe_setup "$setup")"
+  action_head_mode="$MOTION_DA_ACTION_HEAD_MODE"
+  [[ "$setup" == *_cls ]] && action_head_mode="classifier"
 
   require_file "$checkpoint" "Pretrained checkpoint for ${setup}"
 
@@ -483,7 +670,8 @@ run_setup() {
     "$HMDB_ROOT_DIR" \
     "$MANIFEST_DIR/hmdb_test.txt" \
     "ucf101" \
-    "hmdb51"
+    "hmdb51" \
+    "$action_head_mode"
 
   run_posthoc_attacker \
     "UCF -> HMDB" \
@@ -495,7 +683,7 @@ run_setup() {
     "$MANIFEST_DIR/hmdb_test.txt" \
     "hmdb51" \
     "hmdb51" \
-    "$([[ "$setup" == "i3d_of_only" ]] && printf 'second')"
+    "$([[ "$setup" == "i3d_of_only" || "$setup" == "i3d_of_only_cls" ]] && printf 'second')"
 
   run_da_training \
     "HMDB -> UCF" \
@@ -508,7 +696,8 @@ run_setup() {
     "$UCF_ROOT_DIR" \
     "$MANIFEST_DIR/ucf_test.txt" \
     "hmdb51" \
-    "ucf101"
+    "ucf101" \
+    "$action_head_mode"
 
   run_posthoc_attacker \
     "HMDB -> UCF" \
@@ -520,7 +709,7 @@ run_setup() {
     "$MANIFEST_DIR/ucf_test.txt" \
     "ucf101" \
     "ucf101" \
-    "$([[ "$setup" == "i3d_of_only" ]] && printf 'second')"
+    "$([[ "$setup" == "i3d_of_only" || "$setup" == "i3d_of_only_cls" ]] && printf 'second')"
 
   write_summary \
     "$benchmark_out_dir" \
@@ -530,77 +719,63 @@ run_setup() {
     "$hmdb_to_ucf_posthoc_out_dir"
 }
 
-run_vit_rgb_setup() {
-  local out_dir="$OUT_ROOT/vit_rgb_stprivacy_split${SPLIT_ID}"
+# ---------------------------------------------------------------------------
+# Pre-flight checks (only for the setups that were requested)
+# ---------------------------------------------------------------------------
 
-  require_dir "$HMDB_RGB_ROOT_DIR" "HMDB RGB root"
-  require_dir "$UCF_RGB_ROOT_DIR" "UCF RGB root"
+needs_motion_data=0
+needs_rgb_data=0
+needs_config=0
+needs_rgb_privacy_manifests=0
 
-  # train_stprivacy_vit_attacker.py expects train{N}.txt / test{N}.txt naming.
-  # Create per-dataset split-view dirs that symlink our generated 12-class manifests.
-  local hmdb_split_view="$out_dir/hmdb_split_view"
-  local ucf_split_view="$out_dir/ucf_split_view"
-  mkdir -p "$hmdb_split_view" "$ucf_split_view"
-  ln -sf "$MANIFEST_DIR/hmdb_train.txt" "$hmdb_split_view/train${SPLIT_ID}.txt"
-  ln -sf "$MANIFEST_DIR/hmdb_test.txt"  "$hmdb_split_view/test${SPLIT_ID}.txt"
-  ln -sf "$MANIFEST_DIR/ucf_train.txt"  "$ucf_split_view/train${SPLIT_ID}.txt"
-  ln -sf "$MANIFEST_DIR/ucf_test.txt"   "$ucf_split_view/test${SPLIT_ID}.txt"
+for s in "${REQUESTED_SETUPS[@]}"; do
+  [[ -z "$s" ]] && continue
+  canonical="$(canonicalize_setup "$s")"
+  case "$canonical" in
+    i3d_mhi_of|i3d_of_only|i3d_mhi_of_cls|i3d_of_only_cls)
+      needs_motion_data=1
+      needs_config=1
+      ;;
+    motion_resnet50_mhi|motion_resnet50_flow)
+      needs_motion_data=1
+      ;;
+    rgb_da|rgb_privacy)
+      needs_rgb_data=1
+      ;;
+  esac
+  [[ "$canonical" == "rgb_privacy" ]] && needs_rgb_privacy_manifests=1
+done
 
-  print_header "ViT-S RGB baseline (split ${SPLIT_ID})"
-
-  for dataset in hmdb51 ucf101; do
-    if [[ "$dataset" == "hmdb51" ]]; then
-      local root_dir="$HMDB_RGB_ROOT_DIR"
-      local split_dir="$hmdb_split_view"
-    else
-      local root_dir="$UCF_RGB_ROOT_DIR"
-      local split_dir="$ucf_split_view"
-    fi
-    echo "[RUN] ViT-S RGB attacker on $dataset"
-    "$PYTHON_BIN" privacy/train_stprivacy_vit_attacker.py \
-      --dataset_name "$dataset" \
-      --root_dir "$root_dir" \
-      --stprivacy_annotations_dir "$STPRIVACY_ANNOTATIONS_DIR" \
-      --split_manifest_dir "$split_dir" \
-      --splits "$SPLIT_ID" \
-      --input_modality rgb \
-      --num_frames 16 \
-      --hf_cache_dir "$HF_HOME" \
-      --epochs "$POSTHOC_EPOCHS" \
-      --lr "$POSTHOC_LR" \
-      --min_lr "$POSTHOC_MIN_LR" \
-      --weight_decay "$POSTHOC_WEIGHT_DECAY" \
-      --batch_size "$POSTHOC_BATCH_SIZE" \
-      --class_weight_mode none \
-      --privacy_frame_protocol "$PRIVACY_FRAME_PROTOCOL" \
-      --train_views_per_video "$TRAIN_VIEWS_PER_VIDEO" \
-      --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO" \
-      --eval_view_sampling "$EVAL_VIEW_SAMPLING" \
-      --multi_attribute \
-      --out_dir "${out_dir}/${dataset}"
-  done
-}
-
-require_file "$CONFIG_PATH" "Config file"
-require_dir "$UCF_ROOT_DIR" "UCF motion root"
-require_dir "$HMDB_ROOT_DIR" "HMDB motion root"
+[[ $needs_config -eq 1 ]] && require_file "$CONFIG_PATH" "Config file"
+[[ $needs_motion_data -eq 1 ]] && require_dir "$UCF_ROOT_DIR" "UCF motion root"
+[[ $needs_motion_data -eq 1 ]] && require_dir "$HMDB_ROOT_DIR" "HMDB motion root"
+[[ $needs_rgb_data -eq 1 ]] && require_dir "$UCF_RGB_ROOT_DIR" "UCF RGB root"
+[[ $needs_rgb_data -eq 1 ]] && require_dir "$HMDB_RGB_ROOT_DIR" "HMDB RGB root"
 require_dir "$STPRIVACY_ANNOTATIONS_DIR" "STPrivacy annotations directory"
-if [[ "$TRAIN_PRIVACY_ATTRIBUTES_RESNET" == "1" ]]; then
-  require_dir "$UCF_RGB_ROOT_DIR" "UCF RGB root"
-  require_dir "$HMDB_RGB_ROOT_DIR" "HMDB RGB root"
-fi
 
 generate_manifests
-run_resnet_baselines
+[[ $needs_rgb_privacy_manifests -eq 1 ]] && generate_rgb_privacy_manifests
 
 for requested_setup in "${REQUESTED_SETUPS[@]}"; do
   [[ -z "$requested_setup" ]] && continue
   setup="$(canonicalize_setup "$requested_setup")"
-  if [[ "$setup" == "vit_rgb" ]]; then
-    run_vit_rgb_setup
-  else
-    run_setup "$requested_setup"
-  fi
+  case "$setup" in
+    motion_resnet50_mhi)
+      run_motion_resnet50_attacker "mhi"
+      ;;
+    motion_resnet50_flow)
+      run_motion_resnet50_attacker "flow"
+      ;;
+    rgb_da)
+      run_rgb_da_setup
+      ;;
+    rgb_privacy)
+      run_rgb_privacy_setup
+      ;;
+    *)
+      run_setup "$requested_setup"
+      ;;
+  esac
 done
 
 echo

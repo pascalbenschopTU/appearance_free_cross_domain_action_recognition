@@ -1,0 +1,56 @@
+# Domain adaptation defaults for the 12-class UCF <-> HMDB STPrivacy benchmark.
+# CLI flags override these values.
+
+[data]
+input_modality = "motion"
+img_size = 224
+flow_hw = 112
+mhi_frames = 32
+flow_frames = 128
+mhi_windows = "25"
+second_type = "flow"
+probability_hflip = 0.25
+probability_affine = 0.0
+motion_spatial_crop = "random"
+class_names_override = "climb,fencing,golf,kick ball,pullup,punch,pushup,ride bike,ride horse,shoot ball,shoot bow,walk"
+
+[model]
+model = "i3d"
+embed_dim = 512
+fuse = "avg_then_proj"
+dropout = 0.0
+use_projection = true
+active_branch = "both"
+
+[action]
+lambda_clip_ce = 1.0
+lambda_ce = 1.0
+lambda_embed_cos = 0.0
+feature_key_for_action = "emb_fuse_clip"
+
+[adaptation]
+domain_feature_key = "emb_fuse_clip"
+lambda_domain = 0.5
+lambda_target_entropy = 0.01
+use_dann_schedule = true
+lambda_privacy = 1.0
+privacy_grl_lambda = 1.0
+privacy_attributes = "face,skin_color,gender,nudity,relationship"
+
+[optimization]
+batch_size = 8
+target_batch_size = 8
+epochs = 40
+optimizer = "adamw"
+lr = 0.0002
+min_lr = 0.000001
+weight_decay = 0.05
+warmup_steps = 1000
+
+[runtime]
+num_workers = 16
+eval_every = 1
+log_every = 20
+save_every = 0
+seed = 0
+device = "cuda"
