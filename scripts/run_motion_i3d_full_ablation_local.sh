@@ -142,6 +142,7 @@ python -c "
 import json, pathlib
 ucf  = json.load(open(r'${UCF12_CLASS_TEXTS_JSON}',  'r', encoding='utf-8'))
 hmdb = json.load(open(r'${HMDB51_CLASS_TEXTS_JSON}', 'r', encoding='utf-8'))
+MAX_TEXTS_PER_CLASS = 3
 
 ucf_map = {
     'climb':      ['RockClimbingIndoor', 'RopeClimbing'],
@@ -186,6 +187,15 @@ def build(src, mapping):
         merged = []
         for src_key in src_keys:
             merged.extend(src.get(src_key, []))
+        # Keep a fixed prompt count per class for multi-positive supervision.
+        deduped = []
+        seen = set()
+        for text in merged:
+            if text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+        merged = deduped[:MAX_TEXTS_PER_CLASS]
         if not merged:
             raise SystemExit(f'Missing source texts for {dst_key}: {src_keys}')
         out[dst_key] = merged

@@ -535,6 +535,7 @@ class RGBVideoClipDataset(Dataset):
         out_dtype: torch.dtype = torch.float32,
         seed: int = 0,
         color_jitter_prob: float = 0.0,
+        p_hflip: float = 0.0,
         blur_mode: str = "none",
         blur_kernel_size: int = 31,
         blur_sigma: float = 8.0,
@@ -554,6 +555,7 @@ class RGBVideoClipDataset(Dataset):
         self.uniform_single_frame_views = 1
 
         self._color_jitter_prob = float(color_jitter_prob)
+        self._p_hflip = float(p_hflip)
         self._color_jitter = (
             T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)
             if self._color_jitter_prob > 0
@@ -618,6 +620,8 @@ class RGBVideoClipDataset(Dataset):
             if self._color_jitter is not None and rng.random() < self._color_jitter_prob:
                 for t_idx in range(rgb.shape[1]):
                     rgb[:, t_idx] = self._color_jitter(rgb[:, t_idx])
+            if self._p_hflip > 0 and rng.random() < self._p_hflip:
+                rgb = torch.flip(rgb, dims=(-1,))
             if self._blur is not None:
                 for t_idx in range(rgb.shape[1]):
                     rgb[:, t_idx] = self._blur(rgb[:, t_idx])

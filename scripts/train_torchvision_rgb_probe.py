@@ -22,6 +22,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dataset import RGBVideoClipDataset, collate_rgb_clip
+from augment import mixup_batch, soft_target_cross_entropy
+from util import build_warmup_cosine_scheduler
 
 
 K400_RGB_MEAN = torch.tensor([0.43216, 0.394666, 0.37645], dtype=torch.float32).view(1, 3, 1, 1, 1)
@@ -50,16 +52,30 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--epochs", type=int, default=10)
     train.add_argument("--lr", type=float, default=2e-4)
     train.add_argument("--weight_decay", type=float, default=1e-4)
+    train.add_argument("--warmup_steps", type=int, default=0)
+    train.add_argument("--min_lr", type=float, default=0.0)
     train.add_argument("--label_smoothing", type=float, default=0.0)
     train.add_argument("--num_workers", type=int, default=4)
     train.add_argument("--device", type=str, default="cuda")
     train.add_argument("--seed", type=int, default=0)
     train.add_argument("--log_every", type=int, default=10)
     train.add_argument("--checkpoint_name", type=str, default="checkpoint_latest.pt")
+    train.add_argument("--checkpoint_mode", type=str, default="latest", choices=["latest", "best", "final"])
+    train.add_argument("--val_every", type=int, default=0)
     train.add_argument("--amp", action="store_true", default=True)
     train.add_argument("--no_amp", dest="amp", action="store_false")
     train.add_argument("--color_jitter", type=float, default=0.0,
                         help="Probability of applying ColorJitter to RGB frames during training.")
+    train.add_argument("--p_hflip", type=float, default=0.0,
+                        help="Probability of applying horizontal flip during RGB training.")
+    train.add_argument("--mixup_prob", type=float, default=0.0)
+    train.add_argument("--mixup_alpha", type=float, default=0.2)
+    train.add_argument("--freeze_backbone", action="store_true", default=False)
+    train.add_argument("--freeze_bn_stats", action="store_true", default=False)
+    train.add_argument("--val_root_dir", type=str, default="")
+    train.add_argument("--val_manifest", type=str, default="")
+    train.add_argument("--val_class_id_to_label_csv", type=str, default="")
+    train.add_argument("--resume_ckpt", type=str, default="")
 
     ev = subparsers.add_parser("eval")
     add_common_dataset_args(ev)
@@ -139,6 +155,7 @@ def build_model(model_name: str, num_classes: int, pretrained: bool) -> nn.Modul
     if hasattr(model, "fc"):
         in_features = int(model.fc.in_features)
         model.fc = nn.Linear(in_features, int(num_classes))
+        model._classifier_module = model.fc
         return model
 
     if hasattr(model, "head") and isinstance(model.head, nn.Sequential) and len(model.head) > 0:
@@ -146,6 +163,7 @@ def build_model(model_name: str, num_classes: int, pretrained: bool) -> nn.Modul
         if isinstance(final_layer, nn.Linear):
             in_features = int(final_layer.in_features)
             model.head[-1] = nn.Linear(in_features, int(num_classes))
+            model._classifier_module = model.head[-1]
             return model
 
     raise RuntimeError(f"Expected torchvision video model with a replaceable classifier head, got: {type(model).__name__}")
@@ -153,16 +171,47 @@ def build_model(model_name: str, num_classes: int, pretrained: bool) -> nn.Modul
 
 def build_dataset(args: argparse.Namespace, training: bool) -> RGBVideoClipDataset:
     return RGBVideoClipDataset(
-        root_dir=args.root_dir,
+        root_dir=args.root_dir if training or not getattr(args, "val_root_dir", "") else args.val_root_dir,
         rgb_frames=args.rgb_frames,
         img_size=args.img_size,
         sampling_mode=args.rgb_sampling if training else "uniform",
-        dataset_split_txt=args.manifest,
-        class_id_to_label_csv=args.class_id_to_label_csv,
+        dataset_split_txt=args.manifest if training or not getattr(args, "val_manifest", "") else args.val_manifest,
+        class_id_to_label_csv=(
+            args.class_id_to_label_csv
+            if training or not getattr(args, "val_class_id_to_label_csv", "")
+            else args.val_class_id_to_label_csv
+        ),
         rgb_norm="none",
         seed=args.seed,
         color_jitter_prob=getattr(args, "color_jitter", 0.0) if training else 0.0,
+        p_hflip=getattr(args, "p_hflip", 0.0) if training else 0.0,
     )
+
+
+def freeze_backbone_parameters(model: nn.Module) -> None:
+    classifier = getattr(model, "_classifier_module", None)
+    if classifier is None:
+        raise RuntimeError("Expected model to expose _classifier_module for backbone freezing.")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for parameter in classifier.parameters():
+        parameter.requires_grad_(True)
+
+
+def freeze_backbone_bn_stats(model: nn.Module) -> None:
+    classifier = getattr(model, "_classifier_module", None)
+    classifier_modules = set(classifier.modules()) if classifier is not None else set()
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm)):
+            if module in classifier_modules:
+                continue
+            module.eval()
+
+
+def save_checkpoint(payload: Dict[str, object], save_path: Path) -> None:
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, save_path)
+    print(f"[CKPT] saved {save_path.as_posix()}", flush=True)
 
 
 def normalize_rgb(x: torch.Tensor, model_name: str) -> torch.Tensor:
@@ -326,6 +375,26 @@ def evaluate_model(
     return metrics
 
 
+def evaluate_loader(
+    *,
+    model: nn.Module,
+    dataloader: DataLoader,
+    classnames: List[str],
+    device: torch.device,
+    split_name: str,
+    out_dir: Path,
+) -> Dict[str, float]:
+    return evaluate_model(
+        model=model,
+        dataloader=dataloader,
+        classnames=classnames,
+        device=device,
+        split_name=split_name,
+        out_dir=out_dir,
+        summary_only=True,
+    )
+
+
 def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = resolve_device(args.device)
@@ -347,19 +416,88 @@ def train(args: argparse.Namespace) -> None:
 
     model = build_model(args.model, num_classes=len(train_dataset.classnames), pretrained=bool(args.pretrained)).to(device)
     model._benchmark_model_name = str(args.model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if bool(args.freeze_backbone):
+        freeze_backbone_parameters(model)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    total_steps = max(1, int(args.epochs) * max(1, len(train_loader)))
+    scheduler = build_warmup_cosine_scheduler(
+        optimizer,
+        base_lr=float(args.lr),
+        min_lr=float(args.min_lr),
+        warmup_steps=int(args.warmup_steps),
+        total_steps=total_steps,
+    )
+    val_dataset = None
+    val_loader = None
+    if args.val_root_dir and args.val_manifest:
+        val_dataset = build_dataset(args, training=False)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=collate_rgb_clip,
+            drop_last=False,
+        )
+    best_top1 = -float("inf")
+    best_loss = float("inf")
+    start_epoch = 0
+    global_step = 0
+
+    if args.resume_ckpt:
+        resume_path = Path(args.resume_ckpt)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+        resume_payload = torch.load(resume_path, map_location=device)
+        resume_model_name = str(resume_payload.get("model_name", args.model))
+        if resume_model_name != str(args.model):
+            raise ValueError(
+                f"Resume checkpoint model mismatch: ckpt={resume_model_name} requested={args.model}"
+            )
+        model.load_state_dict(resume_payload["model_state"], strict=True)
+        optimizer.load_state_dict(resume_payload["optimizer_state"])
+        scheduler.load_state_dict(resume_payload["scheduler_state"])
+        scaler_state = resume_payload.get("scaler_state")
+        if scaler_state is not None:
+            scaler.load_state_dict(scaler_state)
+        start_epoch = int(resume_payload.get("epoch", -1)) + 1
+        global_step = int(resume_payload.get("global_step", 0))
+        best_top1 = float(resume_payload.get("best_top1", best_top1))
+        best_loss = float(resume_payload.get("best_loss", best_loss))
 
     print(
         f"[CONFIG] model={args.model} pretrained={args.pretrained} rgb_frames={args.rgb_frames} img_size={args.img_size} "
-        f"batch_size={args.batch_size} epochs={args.epochs} lr={args.lr} manifest={args.manifest}",
+        f"batch_size={args.batch_size} epochs={args.epochs} lr={args.lr} manifest={args.manifest} "
+        f"freeze_backbone={bool(args.freeze_backbone)} freeze_bn_stats={bool(args.freeze_bn_stats)} "
+        f"mixup_prob={float(args.mixup_prob):.3f} mixup_alpha={float(args.mixup_alpha):.3f} "
+        f"p_hflip={float(args.p_hflip):.3f} warmup_steps={int(args.warmup_steps)} min_lr={float(args.min_lr):.6g} "
+        f"val_every={int(args.val_every)} checkpoint_mode={args.checkpoint_mode} "
+        f"resume_ckpt={args.resume_ckpt or 'none'} start_epoch={start_epoch + 1}",
         flush=True,
     )
+    if start_epoch >= int(args.epochs):
+        print(
+            f"[RESUME] checkpoint already reached epoch {start_epoch}; nothing to do for epochs={args.epochs}",
+            flush=True,
+        )
+        return
+    if args.resume_ckpt:
+        print(
+            f"[RESUME] loaded {args.resume_ckpt} (next_epoch={start_epoch + 1:03d}, global_step={global_step})",
+            flush=True,
+        )
 
-    global_step = 0
-    for epoch in range(int(args.epochs)):
+    for epoch in range(start_epoch, int(args.epochs)):
         train_dataset.set_epoch(epoch)
         model.train()
+        if bool(args.freeze_bn_stats):
+            freeze_backbone_bn_stats(model)
         running_loss = 0.0
         num_batches = 0
         start_time = time.time()
@@ -367,17 +505,41 @@ def train(args: argparse.Namespace) -> None:
             rgb = normalize_rgb(rgb.to(device, non_blocking=True), args.model)
             labels = labels.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
+            labels_soft = None
+            if float(args.mixup_prob) > 0 and float(args.mixup_alpha) > 0 and labels.size(0) > 1:
+                if random.random() < float(args.mixup_prob):
+                    dummy_second = torch.zeros(
+                        (rgb.shape[0], 1, 1, 1, 1),
+                        device=rgb.device,
+                        dtype=rgb.dtype,
+                    )
+                    rgb, _dummy_second_mix, labels_soft = mixup_batch(
+                        rgb,
+                        dummy_second,
+                        labels,
+                        num_classes=len(train_dataset.classnames),
+                        alpha=float(args.mixup_alpha),
+                        label_smoothing=float(args.label_smoothing),
+                    )
             with torch.autocast(device_type=device.type, enabled=use_amp):
                 logits = model(rgb)
-                loss = F.cross_entropy(logits, labels, label_smoothing=float(args.label_smoothing))
+                if labels_soft is not None:
+                    loss = soft_target_cross_entropy(logits, labels_soft)
+                else:
+                    loss = F.cross_entropy(logits, labels, label_smoothing=float(args.label_smoothing))
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            scheduler.step()
             running_loss += float(loss.detach().item())
             num_batches += 1
             global_step += 1
             if args.log_every > 0 and step % args.log_every == 0:
-                print(f"[STEP {epoch+1:03d}:{step:04d}] loss={loss.detach().item():.4f}", flush=True)
+                print(
+                    f"[STEP {epoch+1:03d}:{step:04d}] loss={loss.detach().item():.4f} "
+                    f"lr={float(optimizer.param_groups[0]['lr']):.6g}",
+                    flush=True,
+                )
 
         epoch_loss = running_loss / max(1, num_batches)
         elapsed = time.time() - start_time
@@ -391,11 +553,63 @@ def train(args: argparse.Namespace) -> None:
             "classnames": list(train_dataset.classnames),
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "scaler_state": scaler.state_dict(),
+            "best_top1": best_top1,
+            "best_loss": best_loss,
             "args": vars(args),
         }
-        save_path = ckpt_dir / args.checkpoint_name
-        torch.save(payload, save_path)
-        print(f"[CKPT] saved {save_path.as_posix()}", flush=True)
+        checkpoint_mode = str(args.checkpoint_mode).lower()
+        epochs_completed = epoch + 1
+        is_final_epoch = epochs_completed >= int(args.epochs)
+        do_val = val_loader is not None and int(args.val_every) > 0 and epochs_completed % int(args.val_every) == 0
+
+        if do_val:
+            metrics = evaluate_loader(
+                model=model,
+                dataloader=val_loader,
+                classnames=list(val_dataset.classnames),
+                device=device,
+                split_name="validation",
+                out_dir=out_dir / "eval_validation",
+            )
+            top1 = float(metrics["top1"])
+            improved = top1 > best_top1
+            print(
+                f"[VAL] top1={top1:.6f} best={best_top1 if best_top1 > -1e8 else float('nan'):.6f} improved={improved}",
+                flush=True,
+            )
+            should_save = (
+                checkpoint_mode == "latest"
+                or (checkpoint_mode == "final" and is_final_epoch)
+                or (checkpoint_mode == "best" and improved)
+            )
+            if should_save:
+                if checkpoint_mode == "latest":
+                    save_path = ckpt_dir / args.checkpoint_name
+                elif checkpoint_mode == "final":
+                    save_path = ckpt_dir / "checkpoint_final.pt"
+                else:
+                    save_path = ckpt_dir / f"checkpoint_epoch_{epoch:03d}_top1_{top1:.4f}.pt"
+                save_checkpoint(payload, save_path)
+            if improved:
+                best_top1 = top1
+        else:
+            should_save = (
+                checkpoint_mode == "latest"
+                or (checkpoint_mode == "final" and is_final_epoch)
+                or (checkpoint_mode == "best" and epoch_loss < best_loss)
+            )
+            if should_save:
+                if checkpoint_mode == "latest":
+                    save_path = ckpt_dir / args.checkpoint_name
+                elif checkpoint_mode == "final":
+                    save_path = ckpt_dir / "checkpoint_final.pt"
+                else:
+                    save_path = ckpt_dir / f"checkpoint_epoch_{epoch:03d}_loss_{epoch_loss:.4f}.pt"
+                save_checkpoint(payload, save_path)
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
 
 
 def evaluate(args: argparse.Namespace) -> None:

@@ -37,6 +37,11 @@ HF_CACHE="${PA_HMDB51_HF_CACHE:-/tudelft.net/staff-umbrella/MoDDL/Pascal/.cache/
 ATTR_DIR="$ROOT_DIR/privacy/data/pa_hmdb51/PrivacyAttributes"
 VAL_DIR="$ROOT_DIR/tc-clip/datasets_splits/hmdb_splits"
 OUT_ROOT="${PA_HMDB51_OUT_ROOT:-$ROOT_DIR/privacy/out/pa_hmdb51_five_setups}"
+LR="${PA_HMDB51_LR:-1e-4}"
+WEIGHT_DECAY="${PA_HMDB51_WEIGHT_DECAY:-0.05}"
+WARMUP_EPOCHS="${PA_HMDB51_WARMUP_EPOCHS:-5}"
+VIT_EPOCHS="${PA_HMDB51_VIT_EPOCHS:-10}"
+I3D_EPOCHS="${PA_HMDB51_I3D_EPOCHS:-20}"
 
 # ── Pretrained checkpoints ────────────────────────────────────────────────────
 CKPT_MHI_OF="${PA_HMDB51_CKPT_MHI_OF:-out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss3.4912.pt}"
@@ -51,6 +56,9 @@ COMMON=(
   --num_workers 16
   --temporal_samples 8
   --selection_metric balanced_accuracy
+  --lr "$LR"
+  --weight_decay "$WEIGHT_DECAY"
+  --warmup_epochs "$WARMUP_EPOCHS"
 )
 [[ -n "${PA_HMDB51_MULTI:-}" ]] && COMMON+=(--multi_attribute)
 
@@ -76,7 +84,7 @@ for setup in "${SETUPS[@]}"; do
         --num_frames 16 \
         --root_dir "$ZSTD_HMDB" \
         --pretrained_ckpt "$CKPT_MHI_OF" \
-        --epochs 20 \
+        --epochs "$I3D_EPOCHS" \
         --out_dir "${OUT_ROOT}/i3d_mhi_of" \
         "${COMMON[@]}"
       ;;
@@ -91,7 +99,7 @@ for setup in "${SETUPS[@]}"; do
         --num_frames 16 \
         --root_dir "$ZSTD_HMDB" \
         --pretrained_ckpt "$CKPT_OF_ONLY" \
-        --epochs 20 \
+        --epochs "$I3D_EPOCHS" \
         --out_dir "${OUT_ROOT}/i3d_of_only" \
         "${COMMON[@]}"
       ;;
@@ -103,7 +111,7 @@ for setup in "${SETUPS[@]}"; do
         --num_frames 16 \
         --root_dir "$ZSTD_HMDB" \
         --hf_cache_dir "$HF_CACHE" \
-        --epochs 10 \
+        --epochs "$VIT_EPOCHS" \
         --out_dir "${OUT_ROOT}/vit_flow" \
         "${COMMON[@]}"
       ;;
@@ -114,7 +122,7 @@ for setup in "${SETUPS[@]}"; do
         --num_frames 16 \
         --root_dir "$ZSTD_HMDB" \
         --hf_cache_dir "$HF_CACHE" \
-        --epochs 10 \
+        --epochs "$VIT_EPOCHS" \
         --out_dir "${OUT_ROOT}/vit_mhi" \
         "${COMMON[@]}"
       ;;
@@ -125,7 +133,7 @@ for setup in "${SETUPS[@]}"; do
         --num_frames 16 \
         --root_dir "$RGB_HMDB" \
         --hf_cache_dir "$HF_CACHE" \
-        --epochs 10 \
+        --epochs "$VIT_EPOCHS" \
         --out_dir "${OUT_ROOT}/vit_rgb" \
         "${COMMON[@]}"
       ;;
