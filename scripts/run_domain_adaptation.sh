@@ -12,15 +12,16 @@
 #   rgb_privacy          ResNet-50 privacy attacker on RGB frames (STPrivacy CV protocol)
 #
 # Usage:
-#   bash run_domain_adaptation.sh
-#   bash run_domain_adaptation.sh i3d_mhi_of
-#   bash run_domain_adaptation.sh motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy
+#   bash scripts/run_domain_adaptation.sh
+#   bash scripts/run_domain_adaptation.sh i3d_mhi_of
+#   bash scripts/run_domain_adaptation.sh motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy
 #
 # Via env var (e.g. from sbatch):
-#   MODELS="motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy" bash run_domain_adaptation.sh
+#   MODELS="motion_resnet50_mhi motion_resnet50_flow rgb_da rgb_privacy" bash scripts/run_domain_adaptation.sh
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -79,6 +80,11 @@ POSTHOC_ONLY="${DOMAIN_ADAPTATION_POSTHOC_ONLY:-${POSTHOC_ONLY:-}}"
 RGB_DA_EPOCHS="${DOMAIN_ADAPTATION_RGB_DA_EPOCHS:-${RGB_DA_EPOCHS:-40}}"
 RGB_DA_BATCH_SIZE="${DOMAIN_ADAPTATION_RGB_DA_BATCH_SIZE:-${RGB_DA_BATCH_SIZE:-8}}"
 MOTION_DA_ACTION_HEAD_MODE="${DOMAIN_ADAPTATION_MOTION_DA_ACTION_HEAD_MODE:-${MOTION_DA_ACTION_HEAD_MODE:-hybrid}}"
+DEBUG_MODE="${DEBUG_MODE:-0}"
+DEBUG_MAX_UPDATES="${DEBUG_MAX_UPDATES:-0}"
+DEBUG_MAX_EVAL_BATCHES="${DEBUG_MAX_EVAL_BATCHES:-0}"
+DEBUG_SAVE_EVERY="${DEBUG_SAVE_EVERY:-0}"
+DEBUG_EPOCHS="${DEBUG_EPOCHS:-0}"
 
 POSTHOC_DIR_SUFFIX=""
 [[ "${POSTHOC_POS_WEIGHT:-}" == "enabled" ]] && POSTHOC_DIR_SUFFIX="${POSTHOC_DIR_SUFFIX}_posweight"
@@ -190,6 +196,25 @@ print_run_args() {
     fi
   done
   echo "=================================================================="
+}
+
+append_debug_training_args() {
+  local -n args_ref="$1"
+  if [[ "$DEBUG_MODE" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${DEBUG_EPOCHS:-0}" != "0" ]]; then
+    args_ref+=(--epochs "$DEBUG_EPOCHS")
+  fi
+  if [[ "${DEBUG_MAX_UPDATES:-0}" != "0" ]]; then
+    args_ref+=(--max_updates "$DEBUG_MAX_UPDATES")
+  fi
+  if [[ "${DEBUG_MAX_EVAL_BATCHES:-0}" != "0" ]]; then
+    args_ref+=(--max_eval_batches "$DEBUG_MAX_EVAL_BATCHES")
+  fi
+  if [[ "${DEBUG_SAVE_EVERY:-0}" != "0" ]]; then
+    args_ref+=(--save_every "$DEBUG_SAVE_EVERY")
+  fi
 }
 
 generate_manifests() {
@@ -357,6 +382,7 @@ run_da_training() {
     --privacy_grl_lambda 0 \
     --privacy_attributes ""
   )
+  append_debug_training_args cmd
   print_run_args "$label" "${cmd[@]}"
   "${cmd[@]}"
 }
@@ -406,6 +432,7 @@ run_posthoc_attacker() {
   if [[ -n "$active_branch_override" ]]; then
     cmd+=( --active_branch "$active_branch_override" )
   fi
+  append_debug_training_args cmd
   print_run_args "$label" "${cmd[@]}"
   "${cmd[@]}"
 }
@@ -462,6 +489,7 @@ run_motion_resnet50_attacker() {
       --eval_views_per_video "$EVAL_VIEWS_PER_VIDEO"
       --eval_view_sampling "$EVAL_VIEW_SAMPLING"
     )
+    append_debug_training_args cmd
     print_run_args "$label" "${cmd[@]}"
     mkdir -p "${out_dir}/${dataset}"
     "${cmd[@]}"
@@ -512,6 +540,7 @@ run_rgb_da_setup() {
       --weight_decay "$POSTHOC_WEIGHT_DECAY"
       --warmup_steps "$POSTHOC_WARMUP_STEPS"
     )
+    append_debug_training_args cmd
     print_run_args "$label" "${cmd[@]}"
     mkdir -p "$run_out"
     "${cmd[@]}"
@@ -558,6 +587,7 @@ run_rgb_privacy_setup() {
       --eval_view_sampling "$EVAL_VIEW_SAMPLING"
       --class_weight_mode "$class_weight_mode"
     )
+    append_debug_training_args cmd
     print_run_args "$label" "${cmd[@]}"
     mkdir -p "${out_dir}/${dataset}"
     "${cmd[@]}"

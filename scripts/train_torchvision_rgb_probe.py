@@ -535,9 +535,11 @@ def train(args: argparse.Namespace) -> None:
             num_batches += 1
             global_step += 1
             if args.log_every > 0 and step % args.log_every == 0:
+                step_elapsed = time.time() - start_time
                 print(
                     f"[STEP {epoch+1:03d}:{step:04d}] loss={loss.detach().item():.4f} "
-                    f"lr={float(optimizer.param_groups[0]['lr']):.6g}",
+                    f"lr={float(optimizer.param_groups[0]['lr']):.6g} "
+                    f"elapsed={step_elapsed:.1f}s",
                     flush=True,
                 )
 

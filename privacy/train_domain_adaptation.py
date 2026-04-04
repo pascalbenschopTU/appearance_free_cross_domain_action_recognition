@@ -1141,12 +1141,15 @@ def evaluate_action_accuracy(
     logit_scale: Optional[LogitScale],
     device: torch.device,
     args: argparse.Namespace,
+    max_batches: int = 0,
 ) -> float:
     model.eval()
     correct = 0
     total = 0
     autocast_enabled = (device.type == "cuda")
-    for primary, secondary, labels, _sample_ids in dataloader:
+    for batch_idx, (primary, secondary, labels, _sample_ids) in enumerate(dataloader):
+        if max_batches > 0 and batch_idx >= int(max_batches):
+            break
         primary = primary.to(device, non_blocking=True)
         secondary = secondary.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
@@ -1173,6 +1176,7 @@ def evaluate_privacy_attribute_metrics(
     device: torch.device,
     privacy_metric_mode: str = "classwise",
     aggregate_by_video: bool = False,
+    max_batches: int = 0,
 ) -> Dict[str, float]:
     if model.privacy_head is None or not resolver.enabled:
         return {}
@@ -1185,7 +1189,9 @@ def evaluate_privacy_attribute_metrics(
     score_chunks: List[torch.Tensor] = []
     label_chunks: List[torch.Tensor] = []
     valid_chunks: List[torch.Tensor] = []
-    for primary, secondary, _labels, sample_ids in dataloader:
+    for batch_idx, (primary, secondary, _labels, sample_ids) in enumerate(dataloader):
+        if max_batches > 0 and batch_idx >= int(max_batches):
+            break
         batch = resolver.lookup_batch(sample_ids, device=device)
         if batch is None:
             continue
@@ -1476,6 +1482,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=20)
     parser.add_argument("--save_every", type=int, default=0)
+    parser.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
+    parser.add_argument("--max_eval_batches", type=int, default=0, help="Limit evaluation to this many batches (0 disables).")
     parser.add_argument(
         "--select_metric",
         type=str,
@@ -1821,7 +1829,11 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
         raise RuntimeError("No trainable parameters found for post-hoc privacy attacker.")
 
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    max_updates = max(0, int(getattr(args, "max_updates", 0)))
+    max_eval_batches = max(0, int(getattr(args, "max_eval_batches", 0)))
     total_steps = max(1, int(args.epochs) * len(train_loader))
+    if max_updates > 0:
+        total_steps = min(total_steps, max_updates)
     scheduler = build_warmup_cosine_scheduler(
         optimizer,
         base_lr=args.lr,
@@ -1835,6 +1847,8 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
     best_path = Path(args.ckpt_dir) / "checkpoint_best.pt"
     best_eval_metrics: Dict[str, float] = {}
     global_step = 0
+    if max_updates > 0 and global_step >= max_updates:
+        print(f"[STOP] already at max_updates={max_updates}", flush=True)
 
     for epoch in range(int(args.epochs)):
         model.train()
@@ -1846,6 +1860,7 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
         running_loss = 0.0
         n_logs = 0
         start_time = time.time()
+        stop_training = False
 
         for step, (primary, secondary, _labels, sample_ids) in enumerate(train_loader):
             privacy_batch = train_resolver.lookup_batch(sample_ids, device=device)
@@ -1875,6 +1890,8 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
             if scaler.get_scale() >= prev_scale:
                 scheduler.step()
             global_step += 1
+            if max_updates > 0 and global_step >= max_updates:
+                stop_training = True
 
             running_loss += float(loss.item())
             n_logs += 1
@@ -1888,6 +1905,10 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
                     flush=True,
                 )
 
+            if stop_training:
+                print(f"[STOP] reached max_updates={max_updates}", flush=True)
+                break
+
         avg_epoch_loss = running_loss / max(n_logs, 1)
         print(f"[EPOCH {epoch:03d}] privacy_loss={avg_epoch_loss:.4f}", flush=True)
 
@@ -1898,6 +1919,7 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
             device=device,
             privacy_metric_mode=args.privacy_metric_mode,
             aggregate_by_video=is_single_frame_protocol(args),
+            max_batches=max_eval_batches,
         )
         if eval_metrics:
             summary = " ".join(f"{k}={v:.4f}" for k, v in sorted(eval_metrics.items()))
@@ -1927,6 +1949,9 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
             torch.save(ckpt_payload, best_path)
             print(f"[CKPT] saved {best_path}", flush=True)
 
+        if stop_training:
+            break
+
     summary_path = Path(args.out_dir) / "summary_posthoc_privacy_attacker.json"
     final_metrics = evaluate_privacy_attribute_metrics(
         model,
@@ -1935,6 +1960,7 @@ def run_posthoc_privacy_attacker(cli_args: argparse.Namespace) -> None:
         device=device,
         privacy_metric_mode=args.privacy_metric_mode,
         aggregate_by_video=is_single_frame_protocol(args),
+        max_batches=max_eval_batches,
     )
     summary = {
         "source_checkpoint": (str(ckpt_path) if ckpt_path is not None else ""),
@@ -2113,7 +2139,11 @@ def main() -> None:
     else:
         optimizer = torch.optim.SGD(params, lr=args.lr, momentum=args.sgd_momentum, weight_decay=args.weight_decay)
     steps_per_epoch = max(len(source_loader), len(target_loader))
+    max_updates = max(0, int(getattr(args, "max_updates", 0)))
+    max_eval_batches = max(0, int(getattr(args, "max_eval_batches", 0)))
     total_steps = max(1, args.epochs * steps_per_epoch)
+    if max_updates > 0:
+        total_steps = min(total_steps, max_updates)
     scheduler = build_warmup_cosine_scheduler(
         optimizer,
         base_lr=args.lr,
@@ -2154,6 +2184,11 @@ def main() -> None:
         global_step = int(ckpt.get("global_step", 0))
         best_metric = float(ckpt.get("best_metric", best_metric))
         print(f"[RESUME] loaded {resume_path}", flush=True)
+    if max_updates > 0 and global_step >= max_updates:
+        print(f"[STOP] checkpoint already reached max_updates={max_updates}", flush=True)
+        writer.close()
+        print("[DONE]", flush=True)
+        return
 
     source_iter = ForeverLoader(source_loader)
     target_iter = ForeverLoader(target_loader)
@@ -2175,6 +2210,7 @@ def main() -> None:
             "target_entropy": 0.0,
         }
         n_logs = 0
+        stop_training = False
 
         for step_in_epoch in range(steps_per_epoch):
             src_primary, src_secondary, src_labels, src_sample_ids = next(source_iter)
@@ -2281,6 +2317,8 @@ def main() -> None:
             if scaler.get_scale() >= prev_scale:
                 scheduler.step()
             global_step += 1
+            if max_updates > 0 and global_step >= max_updates:
+                stop_training = True
 
             running["total"] += float(loss.item())
             running["action_clip_ce"] += float(loss_action_clip_ce.item())
@@ -2335,6 +2373,10 @@ def main() -> None:
                 )
                 print(f"[CKPT] saved {ckpt_path}", flush=True)
 
+            if stop_training:
+                print(f"[STOP] reached max_updates={max_updates}", flush=True)
+                break
+
         avg_epoch = {k: v / max(n_logs, 1) for k, v in running.items()}
         print(
             f"[EPOCH {epoch:03d}] loss={avg_epoch['total']:.4f} clip_ce={avg_epoch['action_clip_ce']:.4f} "
@@ -2353,6 +2395,7 @@ def main() -> None:
                 logit_scale=logit_scale,
                 device=device,
                 args=args,
+                max_batches=max_eval_batches,
             )
             writer.add_scalar("eval/action_top1", eval_acc, global_step)
             print(f"[EVAL EPOCH {epoch:03d}] action_top1={eval_acc:.4f}", flush=True)
@@ -2365,6 +2408,7 @@ def main() -> None:
                     eval_privacy_resolver,
                     device=device,
                     privacy_metric_mode=args.privacy_metric_mode,
+                    max_batches=max_eval_batches,
                 )
                 for key, value in privacy_metrics.items():
                     writer.add_scalar(f"eval/{key}", value, global_step)
@@ -2392,6 +2436,9 @@ def main() -> None:
             ckpt_path,
         )
         print(f"[CKPT] saved {ckpt_path}", flush=True)
+
+        if stop_training:
+            break
 
     writer.close()
     print("[DONE]", flush=True)

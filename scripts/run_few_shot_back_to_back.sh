@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -15,6 +16,8 @@ P_HFLIP="${FEWSHOT_P_HFLIP:-0.5}"
 P_AFFINE="${FEWSHOT_P_AFFINE:-0.25}"
 LANGUAGE_EVAL="${FEWSHOT_LANGUAGE_EVAL:-1}"
 SKIP_EVAL="${FEWSHOT_SKIP_EVAL:-0}"
+EVAL_ONLY="${FEWSHOT_EVAL_ONLY:-0}"
+SHOTS_RAW="${FEWSHOT_SHOTS:-}"
 
 RGB_MODEL="${FEWSHOT_RGB_MODEL:-r2plus1d_18}"
 RGB_FRAMES="${FEWSHOT_RGB_FRAMES:-16}"
@@ -36,6 +39,14 @@ RGB_CHECKPOINT_MODE="${FEWSHOT_RGB_CHECKPOINT_MODE:-latest}"
 RGB_SEED="${FEWSHOT_RGB_SEED:-0}"
 RGB_RESUME="${FEWSHOT_RGB_RESUME:-0}"
 RGB_RESUME_CKPT="${FEWSHOT_RGB_RESUME_CKPT:-}"
+RGB_LOG_EVERY="${FEWSHOT_RGB_LOG_EVERY:-100}"
+
+DEBUG_MODE="${DEBUG_MODE:-0}"
+DEBUG_MAX_UPDATES="${DEBUG_MAX_UPDATES:-0}"
+DEBUG_SAVE_EVERY="${DEBUG_SAVE_EVERY:-0}"
+DEBUG_VAL_SUBSET_SIZE="${DEBUG_VAL_SUBSET_SIZE:-0}"
+DEBUG_VAL_SAMPLES_PER_CLASS="${DEBUG_VAL_SAMPLES_PER_CLASS:-0}"
+DEBUG_EPOCHS="${DEBUG_EPOCHS:-0}"
 
 I3D_MHI_OF_CKPT_DEFAULT="out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss3.4912.pt"
 I3D_OF_ONLY_CKPT_DEFAULT="out/train_i3d_flow_only_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss4.2931.pt"
@@ -44,7 +55,10 @@ X3D_MHI_OF_CKPT_DEFAULT="out/train_x3d_xs_clipce_clsce_multipos_textadapter_repm
 MOTION_MODEL_LABEL="i3d_mhi_of"
 MOTION_MODEL_ARGS=()
 
-if [[ "$#" -gt 0 ]]; then
+if [[ -n "$SHOTS_RAW" ]]; then
+  SHOTS_RAW="${SHOTS_RAW//,/ }"
+  read -r -a SHOTS <<< "$SHOTS_RAW"
+elif [[ "$#" -gt 0 ]]; then
   SHOTS=("$@")
 else
   SHOTS=(8 16)
@@ -81,9 +95,52 @@ if [[ -n "$MODEL_SELECTOR" ]]; then
   esac
 fi
 
+if [[ "$EVAL_ONLY" == "1" && "$SKIP_EVAL" == "1" ]]; then
+  echo "FEWSHOT_EVAL_ONLY=1 overrides FEWSHOT_SKIP_EVAL=1; evaluation will run." >&2
+  SKIP_EVAL=0
+fi
+
+echo "[RUN] backend=${BACKEND} model=${MODEL_SELECTOR:-${MOTION_MODEL_LABEL}} datasets=${DATASETS[*]} shots=${SHOTS[*]} eval_only=${EVAL_ONLY} skip_eval=${SKIP_EVAL}" >&2
+
 latest_ckpt() {
   local ckpt_dir="$1/checkpoints"
   ls -t "$ckpt_dir"/checkpoint*.pt 2>/dev/null | head -n 1
+}
+
+append_motion_debug_args() {
+  local -n args_ref="$1"
+  if [[ "$DEBUG_MODE" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${DEBUG_EPOCHS:-0}" != "0" ]]; then
+    args_ref+=(--epochs "$DEBUG_EPOCHS")
+  fi
+  if [[ "${DEBUG_MAX_UPDATES:-0}" != "0" ]]; then
+    args_ref+=(--max_updates "$DEBUG_MAX_UPDATES")
+  fi
+  if [[ "${DEBUG_SAVE_EVERY:-0}" != "0" ]]; then
+    args_ref+=(--save_every "$DEBUG_SAVE_EVERY")
+  fi
+  args_ref+=(--checkpoint_mode latest --val_skip_epochs 0 --val_every 1)
+  if [[ "${DEBUG_VAL_SUBSET_SIZE:-0}" != "0" ]]; then
+    args_ref+=(--val_subset_size "$DEBUG_VAL_SUBSET_SIZE")
+  fi
+  if [[ "${DEBUG_VAL_SAMPLES_PER_CLASS:-0}" != "0" ]]; then
+    args_ref+=(--val_samples_per_class "$DEBUG_VAL_SAMPLES_PER_CLASS")
+  fi
+}
+
+append_eval_debug_args() {
+  local -n args_ref="$1"
+  if [[ "$DEBUG_MODE" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${DEBUG_VAL_SUBSET_SIZE:-0}" != "0" ]]; then
+    args_ref+=(--val_subset_size "$DEBUG_VAL_SUBSET_SIZE")
+  fi
+  if [[ "${DEBUG_VAL_SAMPLES_PER_CLASS:-0}" != "0" ]]; then
+    args_ref+=(--val_samples_per_class "$DEBUG_VAL_SAMPLES_PER_CLASS")
+  fi
 }
 
 train_manifest() {
@@ -177,12 +234,17 @@ run_motion_backend() {
   if [[ "${#MOTION_MODEL_ARGS[@]}" -gt 0 ]]; then
     finetune_args+=("${MOTION_MODEL_ARGS[@]}")
   fi
+  append_motion_debug_args finetune_args
 
   echo
   echo "=================================================================="
   echo "Training ${dataset} K=${shot} | backend=motion | model=${MOTION_MODEL_LABEL} | head_mode=${head_mode}"
   echo "=================================================================="
-  "$PYTHON_BIN" finetune.py "${finetune_args[@]}"
+  if [[ "$EVAL_ONLY" != "1" ]]; then
+    "$PYTHON_BIN" finetune.py "${finetune_args[@]}"
+  else
+    echo "Skipping training for ${dataset} K=${shot} | backend=motion | model=${MOTION_MODEL_LABEL} | head_mode=${head_mode}"
+  fi
 
   ckpt="$(latest_ckpt "$out_dir")"
   if [[ -z "${ckpt:-}" ]]; then
@@ -198,12 +260,15 @@ run_motion_backend() {
   for eval_dataset in $(eval_targets "$dataset"); do
     echo
     echo "Evaluating ${dataset} K=${shot} | backend=motion | model=${MOTION_MODEL_LABEL} | head_mode=${head_mode} | target=${eval_dataset}"
-    "$PYTHON_BIN" eval.py \
-      --config configs/few_shot/eval/common.toml \
-      --config "configs/few_shot/eval/${eval_dataset}.toml" \
-      --ckpt "$ckpt" \
-      --no_clip \
+    eval_args=(
+      --config configs/few_shot/eval/common.toml
+      --config "configs/few_shot/eval/${eval_dataset}.toml"
+      --ckpt "$ckpt"
+      --no_clip
       --out_dir "$out_dir/eval_${eval_dataset}"
+    )
+    append_eval_debug_args eval_args
+    "$PYTHON_BIN" eval.py "${eval_args[@]}"
   done
 }
 
@@ -257,7 +322,6 @@ run_rgb_backend() {
     --label_smoothing "$RGB_LABEL_SMOOTHING"
     --num_workers "$RGB_NUM_WORKERS"
     --device "$RGB_DEVICE"
-    --log_every 100
     --checkpoint_mode "$RGB_CHECKPOINT_MODE"
     --val_every "$RGB_VAL_EVERY"
     --color_jitter "$RGB_COLOR_JITTER"
@@ -274,8 +338,13 @@ run_rgb_backend() {
     train_args+=(--resume_ckpt "$resume_ckpt")
   fi
 
-  "$PYTHON_BIN" scripts/train_torchvision_rgb_probe.py \
-    "${train_args[@]}"
+  if [[ "$EVAL_ONLY" != "1" ]]; then
+    train_args+=(--log_every "$RGB_LOG_EVERY")
+    "$PYTHON_BIN" scripts/train_torchvision_rgb_probe.py \
+      "${train_args[@]}"
+  else
+    echo "Skipping training for ${dataset} K=${shot} | backend=rgb | model=${RGB_MODEL}"
+  fi
 
   ckpt="$(latest_ckpt "$out_dir")"
   if [[ -z "${ckpt:-}" ]]; then

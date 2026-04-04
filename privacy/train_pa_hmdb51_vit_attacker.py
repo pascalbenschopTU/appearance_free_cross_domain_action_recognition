@@ -578,6 +578,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--print_every", type=int, default=20)
+    parser.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
+    parser.add_argument("--max_eval_batches", type=int, default=0, help="Limit evaluation to this many batches (0 disables).")
 
     parser.add_argument(
         "--selection_metric",
@@ -1146,6 +1148,7 @@ def evaluate(
     root_dir: Path,
     input_modality: str,
     rgb_norm: str,
+    max_batches: int = 0,
 ) -> Dict[str, object]:
     model.eval()
     all_true: List[int] = []
@@ -1157,7 +1160,9 @@ def evaluate(
     root_resolved = root_dir.resolve()
 
     with torch.no_grad():
-        for inputs, second, labels, paths in dataloader:
+        for batch_idx, (inputs, second, labels, paths) in enumerate(dataloader):
+            if max_batches > 0 and batch_idx >= int(max_batches):
+                break
             inputs, second, labels = prepare_batch(inputs, second, labels, device)
             with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
                 outputs = forward_privacy_model(model, inputs, second, input_modality, rgb_norm)
@@ -1278,10 +1283,15 @@ def train_fold_multi_attribute(
         lr=args.lr, weight_decay=args.weight_decay,
     )
     steps_per_epoch = max(1, len(train_loader))
+    max_updates = max(0, int(getattr(args, "max_updates", 0)))
+    max_eval_batches = max(0, int(getattr(args, "max_eval_batches", 0)))
+    total_steps = steps_per_epoch * max(1, args.epochs)
+    if max_updates > 0:
+        total_steps = min(total_steps, max_updates)
     scheduler = build_warmup_cosine_scheduler(
         optimizer, base_lr=args.lr, min_lr=args.min_lr,
         warmup_steps=steps_per_epoch * args.warmup_epochs,
-        total_steps=steps_per_epoch * max(1, args.epochs),
+        total_steps=total_steps,
     )
     try:
         scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
@@ -1306,12 +1316,14 @@ def train_fold_multi_attribute(
     best_eval_metrics_per_attr: Dict[str, Dict[str, object]] = {}
     best_epoch = 0
     history_rows: List[Dict[str, object]] = []
+    global_step = 0
 
     for epoch_idx in range(args.epochs):
         model.train()
         running_loss = 0.0
         seen = 0
         t0 = time.time()
+        stop_training = False
         if hasattr(train_loader.dataset, "set_epoch"):
             train_loader.dataset.set_epoch(epoch_idx)
         if hasattr(train_loader.sampler, "set_epoch"):
@@ -1340,6 +1352,9 @@ def train_fold_multi_attribute(
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            global_step += 1
+            if max_updates > 0 and global_step >= max_updates:
+                stop_training = True
 
             running_loss += float(loss.detach().item()) * inputs.shape[0]
             seen += inputs.shape[0]
@@ -1352,13 +1367,27 @@ def train_fold_multi_attribute(
                     flush=True,
                 )
 
+            if stop_training:
+                print(f"[STOP] reached max_updates={max_updates}", flush=True)
+                break
+
         epoch_stats: Dict[str, object] = {
             "epoch": epoch_idx + 1,
             "loss": running_loss / max(1, seen),
             "lr": float(optimizer.param_groups[0]["lr"]),
         }
 
-        eval_per_attr = _eval_multi_attribute(model, test_loader, device, attributes, attributes_num_classes, Path(args.root_dir), args.input_modality, args.rgb_norm)
+        eval_per_attr = _eval_multi_attribute(
+            model,
+            test_loader,
+            device,
+            attributes,
+            attributes_num_classes,
+            Path(args.root_dir),
+            args.input_modality,
+            args.rgb_norm,
+            max_batches=max_eval_batches,
+        )
         mean_score = float(np.mean([float(m[selection_metric]) for m in eval_per_attr.values()]))
         epoch_stats[f"test_mean_{selection_metric}"] = mean_score
         if mean_score > (best_score + float(args.selection_min_delta)):
@@ -1367,12 +1396,24 @@ def train_fold_multi_attribute(
             best_eval_metrics_per_attr = eval_per_attr
             best_state = clone_state_dict_to_cpu(model)
         history_rows.append(epoch_stats)
+        if stop_training:
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state, strict=False)
         eval_per_attr = best_eval_metrics_per_attr
     else:
-        eval_per_attr = _eval_multi_attribute(model, test_loader, device, attributes, attributes_num_classes, Path(args.root_dir), args.input_modality, args.rgb_norm)
+        eval_per_attr = _eval_multi_attribute(
+            model,
+            test_loader,
+            device,
+            attributes,
+            attributes_num_classes,
+            Path(args.root_dir),
+            args.input_modality,
+            args.rgb_norm,
+            max_batches=max_eval_batches,
+        )
 
     history_fieldnames = ["epoch", "loss", "lr"]
     history_fieldnames.append(f"test_mean_{selection_metric}")
@@ -1433,6 +1474,7 @@ def _eval_multi_attribute(
     root_dir: Path,
     input_modality: str,
     rgb_norm: str,
+    max_batches: int = 0,
 ) -> Dict[str, Dict[str, object]]:
     model.eval()
     all_true: Dict[str, List[int]] = {attr: [] for attr in attributes}
@@ -1441,7 +1483,9 @@ def _eval_multi_attribute(
     root_resolved = root_dir.resolve()
 
     with torch.no_grad():
-        for inputs, second, labels, paths in dataloader:
+        for batch_idx, (inputs, second, labels, paths) in enumerate(dataloader):
+            if max_batches > 0 and batch_idx >= int(max_batches):
+                break
             inputs = inputs.to(device, non_blocking=True)
             second = second.to(device, non_blocking=True)
             if device.type != "cuda":
@@ -1630,7 +1674,11 @@ def train_attribute_fold(
 
     optimizer = torch.optim.AdamW(trainable_params_list, lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = max(1, len(train_loader))
+    max_updates = max(0, int(getattr(args, "max_updates", 0)))
+    max_eval_batches = max(0, int(getattr(args, "max_eval_batches", 0)))
     total_steps = steps_per_epoch * max(1, args.epochs)
+    if max_updates > 0:
+        total_steps = min(total_steps, max_updates)
     warmup_steps = steps_per_epoch * args.warmup_epochs
     scheduler = build_warmup_cosine_scheduler(
         optimizer,
@@ -1654,22 +1702,64 @@ def train_attribute_fold(
     best_epoch = 0
     best_score = float("-inf")
     best_state = None
+    global_step = 0
 
     for epoch_idx in range(args.epochs):
-        epoch_stats = train_one_epoch(
-            model=model,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            scaler=scaler,
-            device=device,
-            loss_weight=loss_weight,
-            epoch_idx=epoch_idx,
-            total_epochs=args.epochs,
-            print_every=args.print_every,
-            input_modality=args.input_modality,
-            rgb_norm=args.rgb_norm,
-        )
+        model.train()
+        running_loss = 0.0
+        seen = 0
+        correct = 0
+        start_time = time.time()
+        stop_training = False
+
+        if hasattr(train_loader.dataset, "set_epoch"):
+            train_loader.dataset.set_epoch(epoch_idx)
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch_idx)
+
+        for step_idx, (inputs, second, labels, _) in enumerate(train_loader, start=1):
+            inputs, second, labels = prepare_batch(inputs, second, labels, device)
+
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
+                outputs = forward_privacy_model(model, inputs, second, args.input_modality, args.rgb_norm)
+                loss_logits, loss_labels = training_loss_inputs(outputs, labels)
+                loss = F.cross_entropy(loss_logits, loss_labels, weight=loss_weight)
+                probabilities = aggregate_probabilities(outputs)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            global_step += 1
+            if max_updates > 0 and global_step >= max_updates:
+                stop_training = True
+
+            batch_size = labels.shape[0]
+            running_loss += float(loss.detach().item()) * batch_size
+            seen += batch_size
+            correct += int((probabilities.argmax(dim=1) == labels).sum().item())
+
+            if args.print_every > 0 and step_idx % args.print_every == 0:
+                elapsed = time.time() - start_time
+                avg_loss = running_loss / max(1, seen)
+                avg_acc = correct / max(1, seen)
+                print(
+                    f"[epoch {epoch_idx + 1:02d}/{args.epochs:02d} step {step_idx:04d}/{len(train_loader):04d}] "
+                    f"loss={avg_loss:.4f} acc={avg_acc:.4f} lr={optimizer.param_groups[0]['lr']:.6f} "
+                    f"time={elapsed / 60.0:.1f}m",
+                    flush=True,
+                )
+
+            if stop_training:
+                print(f"[STOP] reached max_updates={max_updates}", flush=True)
+                break
+
+        epoch_stats = {
+            "loss": running_loss / max(1, seen),
+            "accuracy": correct / max(1, seen),
+            "lr": float(optimizer.param_groups[0]["lr"]),
+        }
         epoch_stats["epoch"] = epoch_idx + 1
 
         eval_metrics = evaluate(
@@ -1680,6 +1770,7 @@ def train_attribute_fold(
             root_dir=Path(args.root_dir),
             input_modality=args.input_modality,
             rgb_norm=args.rgb_norm,
+            max_batches=max_eval_batches,
         )
         eval_score = float(eval_metrics[selection_metric])
         epoch_stats[f"test_{selection_metric}"] = eval_score
@@ -1689,6 +1780,8 @@ def train_attribute_fold(
             best_eval_metrics = eval_metrics
             best_state = clone_state_dict_to_cpu(model)
         history_rows.append(epoch_stats)
+        if stop_training:
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state, strict=False)
@@ -1702,6 +1795,7 @@ def train_attribute_fold(
             root_dir=Path(args.root_dir),
             input_modality=args.input_modality,
             rgb_norm=args.rgb_norm,
+            max_batches=max_eval_batches,
         )
 
     history_fieldnames = ["epoch", "loss", "accuracy", "lr"]

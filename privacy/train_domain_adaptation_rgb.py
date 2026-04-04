@@ -553,6 +553,7 @@ def evaluate_multi_attribute(
     rgb_norm: str,
     *,
     aggregate_by_video: bool = True,
+    max_batches: int = 0,
 ) -> Dict[str, Dict[str, object]]:
     model.eval()
     all_true: Dict[str, List[int]] = {attr: [] for attr in attributes}
@@ -560,7 +561,9 @@ def evaluate_multi_attribute(
     all_paths: List[str] = []
     root_resolved = root_dir.resolve()
 
-    for primary, _secondary, labels, paths in dataloader:
+    for batch_idx, (primary, _secondary, labels, paths) in enumerate(dataloader):
+        if max_batches > 0 and batch_idx >= int(max_batches):
+            break
         primary = primary.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
             logits_per_attr = model(primary, rgb_norm=rgb_norm)
@@ -645,12 +648,17 @@ def train_privacy_fold(
 
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=float(args.lr), weight_decay=float(args.weight_decay))
     steps_per_epoch = max(1, len(train_loader))
+    max_updates = max(0, int(getattr(args, "max_updates", 0)))
+    max_eval_batches = max(0, int(getattr(args, "max_eval_batches", 0)))
+    total_steps = steps_per_epoch * max(1, int(args.epochs))
+    if max_updates > 0:
+        total_steps = min(total_steps, max_updates)
     scheduler = build_warmup_cosine_scheduler(
         optimizer,
         base_lr=float(args.lr),
         min_lr=float(args.min_lr),
         warmup_steps=steps_per_epoch * int(args.warmup_epochs),
-        total_steps=steps_per_epoch * max(1, int(args.epochs)),
+        total_steps=total_steps,
     )
     try:
         scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
@@ -663,6 +671,7 @@ def train_privacy_fold(
     best_eval_per_attr: Dict[str, Dict[str, object]] = {}
     best_epoch = 0
     history_rows: List[Dict[str, object]] = []
+    global_step = 0
 
     for epoch_idx in range(int(args.epochs)):
         model.train()
@@ -672,6 +681,7 @@ def train_privacy_fold(
         running_loss = 0.0
         seen = 0
         t0 = time.time()
+        stop_training = False
 
         for step_idx, (primary, _secondary, labels, _paths) in enumerate(train_loader, start=1):
             primary = primary.to(device, non_blocking=True)
@@ -690,6 +700,20 @@ def train_privacy_fold(
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            global_step += 1
+            if max_updates > 0 and global_step >= max_updates:
+                stop_training = True
+            if int(getattr(args, "save_every", 0)) > 0 and global_step % int(args.save_every) == 0:
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "args": vars(args),
+                        "fold_id": fold.fold_id,
+                        "global_step": global_step,
+                        "epoch": epoch_idx + 1,
+                    },
+                    fold_dir / "checkpoint_latest.pt",
+                )
 
             running_loss += float(loss.detach().item()) * primary.shape[0]
             seen += primary.shape[0]
@@ -704,12 +728,25 @@ def train_privacy_fold(
                     flush=True,
                 )
 
+            if stop_training:
+                print(f"[STOP] reached max_updates={max_updates}", flush=True)
+                break
+
         epoch_stats: Dict[str, object] = {
             "epoch": epoch_idx + 1,
             "loss": running_loss / max(1, seen),
             "lr": float(optimizer.param_groups[0]["lr"]),
         }
-        eval_per_attr = evaluate_multi_attribute(model, test_loader, device, attributes, Path(args.root_dir), rgb_norm, aggregate_by_video=True)
+        eval_per_attr = evaluate_multi_attribute(
+            model,
+            test_loader,
+            device,
+            attributes,
+            Path(args.root_dir),
+            rgb_norm,
+            aggregate_by_video=True,
+            max_batches=max_eval_batches,
+        )
         mean_score = float(np.mean([float(m[selection_metric]) for m in eval_per_attr.values()]))
         mean_f1 = float(np.mean([float(m["f1"]) for m in eval_per_attr.values()]))
         mean_cmap = float(np.mean([float(m["cmap"]) for m in eval_per_attr.values()]))
@@ -733,12 +770,23 @@ def train_privacy_fold(
             best_eval_per_attr = eval_per_attr
             best_state = clone_state_dict_to_cpu(model)
         history_rows.append(epoch_stats)
+        if stop_training:
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state, strict=False)
         eval_per_attr = best_eval_per_attr
     else:
-        eval_per_attr = evaluate_multi_attribute(model, test_loader, device, attributes, Path(args.root_dir), rgb_norm, aggregate_by_video=True)
+        eval_per_attr = evaluate_multi_attribute(
+            model,
+            test_loader,
+            device,
+            attributes,
+            Path(args.root_dir),
+            rgb_norm,
+            aggregate_by_video=True,
+            max_batches=max_eval_batches,
+        )
 
     save_rows_csv(fold_dir / "train_history.csv", history_rows)
     torch.save({
@@ -885,11 +933,13 @@ def run_domain_adaptation(args) -> None:
         return ds, loader
 
     @torch.no_grad()
-    def _evaluate_action_accuracy(model, dataloader) -> float:
+    def _evaluate_action_accuracy(model, dataloader, *, max_batches: int = 0) -> float:
         model.eval()
         correct = 0
         seen = 0
-        for primary, _secondary, labels, _paths in dataloader:
+        for batch_idx, (primary, _secondary, labels, _paths) in enumerate(dataloader):
+            if max_batches > 0 and batch_idx >= int(max_batches):
+                break
             primary = primary.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, enabled=(device.type == "cuda")):
@@ -945,7 +995,11 @@ def run_domain_adaptation(args) -> None:
     print(f"[MODEL] R(2+1)-D DA trainable={trainable_p}/{total_p}", flush=True)
 
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=float(args.lr), weight_decay=float(args.weight_decay))
+    max_updates = max(0, int(getattr(args, "max_updates", 0)))
+    max_eval_batches = max(0, int(getattr(args, "max_eval_batches", 0)))
     total_steps = max(1, int(args.epochs)) * max(1, len(src_loader))
+    if max_updates > 0:
+        total_steps = min(total_steps, max_updates)
     scheduler = build_warmup_cosine_scheduler(optimizer, base_lr=float(args.lr), min_lr=float(args.min_lr), warmup_steps=int(args.warmup_steps), total_steps=total_steps)
     try:
         scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
@@ -962,6 +1016,7 @@ def run_domain_adaptation(args) -> None:
         correct = 0
         seen = 0
         t0 = time.time()
+        stop_training = False
 
         for step, (src_primary, _src_sec, src_labels, _paths) in enumerate(src_loader):
             tgt_primary, _tgt_sec, _tgt_labels, _tgt_paths = next(tgt_forever)
@@ -994,6 +1049,19 @@ def run_domain_adaptation(args) -> None:
             scaler.update()
             scheduler.step()
             global_step += 1
+            if max_updates > 0 and global_step >= max_updates:
+                stop_training = True
+            if int(getattr(args, "save_every", 0)) > 0 and global_step % int(args.save_every) == 0:
+                ckpt_payload = {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                    "eval_metrics": {},
+                    "args": vars(args),
+                }
+                torch.save(ckpt_payload, ckpt_dir / "checkpoint_latest.pt")
 
             running_loss += float(loss.detach().item()) * src_primary.shape[0]
             seen += src_primary.shape[0]
@@ -1009,8 +1077,12 @@ def run_domain_adaptation(args) -> None:
                     flush=True,
                 )
 
+            if stop_training:
+                print(f"[STOP] reached max_updates={max_updates}", flush=True)
+                break
+
         epoch_acc = correct / max(1, seen)
-        target_acc = _evaluate_action_accuracy(model, eval_loader)
+        target_acc = _evaluate_action_accuracy(model, eval_loader, max_batches=max_eval_batches)
         print(
             f"[EPOCH {epoch + 1:03d}] src_acc={epoch_acc:.4f} "
             f"target_acc={target_acc:.4f} loss={running_loss / max(1, seen):.4f}",
@@ -1030,6 +1102,8 @@ def run_domain_adaptation(args) -> None:
         if target_acc > best_target_acc:
             best_target_acc = target_acc
             torch.save(ckpt_payload, ckpt_dir / "checkpoint_best.pt")
+        if stop_training:
+            break
 
     print(f"[DONE] DA training complete. Best target_acc={best_target_acc:.4f}", flush=True)
 
@@ -1087,6 +1161,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rgb_norm", type=str, default="i3d", choices=["i3d", "clip", "none"])
     parser.add_argument("--print_every", type=int, default=50)
     parser.add_argument("--log_every", type=int, default=20)
+    parser.add_argument("--save_every", type=int, default=0)
+    parser.add_argument("--max_updates", type=int, default=0, help="Stop after this many optimizer updates (0 disables).")
+    parser.add_argument("--max_eval_batches", type=int, default=0, help="Limit evaluation to this many batches (0 disables).")
 
     # Privacy attacker
     parser.add_argument("--dataset_name", type=str, default="hmdb51", choices=["hmdb51", "ucf101"])

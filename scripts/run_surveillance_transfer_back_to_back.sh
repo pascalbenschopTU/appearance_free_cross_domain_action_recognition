@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TC_CLIP_DIR="$ROOT_DIR/tc-clip"
 cd "$ROOT_DIR"
 
@@ -60,6 +61,13 @@ RGB_K400_NUM_WORKERS="${RGB_K400_NUM_WORKERS:-16}"
 RGB_K400_DEVICE="${RGB_K400_DEVICE:-cuda}"
 RGB_K400_PRETRAINED="${RGB_K400_PRETRAINED:-1}"
 
+DEBUG_MODE="${DEBUG_MODE:-0}"
+DEBUG_MAX_UPDATES="${DEBUG_MAX_UPDATES:-0}"
+DEBUG_SAVE_EVERY="${DEBUG_SAVE_EVERY:-0}"
+DEBUG_VAL_SUBSET_SIZE="${DEBUG_VAL_SUBSET_SIZE:-0}"
+DEBUG_VAL_SAMPLES_PER_CLASS="${DEBUG_VAL_SAMPLES_PER_CLASS:-0}"
+DEBUG_EPOCHS="${DEBUG_EPOCHS:-0}"
+
 if [[ "$LABEL_ONLY_BASELINE" == "1" ]]; then
   HEAD_MODES_RAW="class"
   TC_CLIP_TEXT_PROMPT_MODE="labels"
@@ -97,6 +105,42 @@ latest_ckpt() {
   fi
   mapfile -t sorted < <(ls -t "${matches[@]}" 2>/dev/null | awk '!seen[$0]++')
   printf '%s\n' "${sorted[0]}"
+}
+
+append_motion_debug_args() {
+  local -n args_ref="$1"
+  if [[ "$DEBUG_MODE" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${DEBUG_EPOCHS:-0}" != "0" ]]; then
+    args_ref+=(--epochs "$DEBUG_EPOCHS")
+  fi
+  if [[ "${DEBUG_MAX_UPDATES:-0}" != "0" ]]; then
+    args_ref+=(--max_updates "$DEBUG_MAX_UPDATES")
+  fi
+  if [[ "${DEBUG_SAVE_EVERY:-0}" != "0" ]]; then
+    args_ref+=(--save_every "$DEBUG_SAVE_EVERY")
+  fi
+  args_ref+=(--checkpoint_mode latest --val_skip_epochs 0 --val_every 1)
+  if [[ "${DEBUG_VAL_SUBSET_SIZE:-0}" != "0" ]]; then
+    args_ref+=(--val_subset_size "$DEBUG_VAL_SUBSET_SIZE")
+  fi
+  if [[ "${DEBUG_VAL_SAMPLES_PER_CLASS:-0}" != "0" ]]; then
+    args_ref+=(--val_samples_per_class "$DEBUG_VAL_SAMPLES_PER_CLASS")
+  fi
+}
+
+append_eval_debug_args() {
+  local -n args_ref="$1"
+  if [[ "$DEBUG_MODE" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${DEBUG_VAL_SUBSET_SIZE:-0}" != "0" ]]; then
+    args_ref+=(--val_subset_size "$DEBUG_VAL_SUBSET_SIZE")
+  fi
+  if [[ "${DEBUG_VAL_SAMPLES_PER_CLASS:-0}" != "0" ]]; then
+    args_ref+=(--val_samples_per_class "$DEBUG_VAL_SAMPLES_PER_CLASS")
+  fi
 }
 
 normalize_train_dataset() {
@@ -193,8 +237,8 @@ motion_eval_class_text_json() {
 
 motion_eval_config() {
   case "$1" in
-    rwf2000) echo "configs/ntu_transfer/eval/rwf2000_direct_val.toml" ;;
-    ucf_crime) echo "configs/ntu_transfer/eval/ucf_crime_surveillance_val.toml" ;;
+    rwf2000) echo "configs/surveillance_transfer/eval/rwf2000_direct_val.toml" ;;
+    ucf_crime) echo "configs/surveillance_transfer/eval/ucf_crime_surveillance_val.toml" ;;
   esac
 }
 
@@ -337,7 +381,7 @@ train_motion_model() {
   texts="$(dataset_class_text_json "$train_dataset")"
 
   MOTION_ARGS=(
-    --config configs/ntu_transfer/finetune/common.toml
+    --config configs/surveillance_transfer/finetune/common.toml
     --out_dir "$out_dir"
     --seed "$SURVEILLANCE_SEED"
     --motion_data_source "$MOTION_DATA_SOURCE"
@@ -358,6 +402,7 @@ train_motion_model() {
   if [[ -n "$ckpt" ]]; then
     MOTION_ARGS+=(--pretrained_ckpt "$ckpt")
   fi
+  append_motion_debug_args MOTION_ARGS
 
   echo
   echo "=================================================================="
@@ -377,13 +422,14 @@ eval_motion_model() {
   class_text_json="$(motion_eval_class_text_json "$train_dataset" "$eval_dataset" "$head_mode")"
 
   MOTION_EVAL_ARGS=(
-    --config configs/ntu_transfer/eval/common.toml
+    --config configs/surveillance_transfer/eval/common.toml
     --config "$(motion_eval_config "$eval_dataset")"
     --ckpt "$ckpt"
     --out_dir "$eval_out_dir"
     --root_dir "$(dataset_root "$eval_dataset")"
     --class_text_json "$class_text_json"
   )
+  append_eval_debug_args MOTION_EVAL_ARGS
 
   echo
   echo "Evaluating motion | train=${train_dataset} | eval=${eval_dataset} | head_mode=${head_mode}"
