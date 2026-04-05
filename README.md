@@ -26,13 +26,13 @@ If you already use the provided Apptainer image, that is enough for the full env
 Typical usage:
 
 ```bash
-apptainer exec --nv Video_LLM_testing/apptainer/huggingface_yolo_cuda.sif bash
+apptainer exec --nv {container}.sif bash
 ```
 
 Then inside the container:
 
 ```bash
-cd motion_only_AR/models/appearance_free_cross_domain_action_recognition
+cd path/to/appearance_free_cross_domain_action_recognition
 python train.py --help
 ```
 
@@ -101,7 +101,7 @@ What each area is for:
 Run commands from:
 
 ```bash
-cd motion_only_AR/models/appearance_free_cross_domain_action_recognition
+cd path/to/appearance_free_cross_domain_action_recognition
 ```
 
 Direct Python entrypoints:
