@@ -1,6 +1,16 @@
 # Appearance-Free Cross-Domain Action Recognition
 
-This directory contains the local motion-recognition code for training, finetuning, evaluation, and experiment orchestration. The repo now uses a thin-root layout:
+This directory contains the local motion-recognition code for training, finetuning, evaluation, and experiment orchestration. 
+
+<p align="center">
+  <img src="assets/mhi_flow_visualized.gif" alt="Optical flow and motion history image example for the Kinetics archery class" width="900" />
+</p>
+
+<p align="center">
+  <em>Example motion features for the Kinetics <strong>archery</strong> class, showing optical flow and motion history images.</em>
+</p>
+
+The repo uses a thin-root layout:
 
 - Stable public Python entrypoints stay at the root: `train.py`, `finetune.py`, `eval.py`
 - Canonical bash launchers live under `scripts/`
@@ -9,7 +19,7 @@ This directory contains the local motion-recognition code for training, finetuni
 
 ## Installation
 
-The recommended environment is the project Apptainer image. In the local setup this repo is commonly run inside a shared Apptainer container built from a project-specific definition file.
+The recommended environment is the project Apptainer image. In the local setup this repo is commonly run inside a shared Apptainer container built from [Apptainer definition](assets/apptainer.def). Do note in the Aptainer definition that some paths such as the location of CLIP have te be defined. This location will be forwarded to `opt/CLIP` during building of the apptainer.
 
 That definition captures the intended software stack for this project, including:
 
@@ -117,8 +127,6 @@ Canonical bash entrypoints:
 ```bash
 bash scripts/<launcher>.sh
 ```
-
-The old root-level `run_*.sh` files still exist as thin compatibility wrappers.
 
 ## Dataset Setup
 
