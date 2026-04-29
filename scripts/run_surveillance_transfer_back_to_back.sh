@@ -32,6 +32,7 @@ UCF_FROM_RWF_TEXTS="tc-clip/labels/custom/ucf_crime_surveillance_rwf_class_texts
 
 CKPT_MHI_OF="${SURVEILLANCE_CKPT_MHI_OF:-out/train_i3d_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss3.4912.pt}"
 CKPT_OF_ONLY="${SURVEILLANCE_CKPT_OF_ONLY:-out/train_i3d_flow_only_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss4.2931.pt}"
+CKPT_X3D_MHI_OF="${SURVEILLANCE_CKPT_X3D_MHI_OF:-out/train_x3d_xs_clipce_clsce_multipos_textadapter_repmix/checkpoints/checkpoint_epoch_039_loss4.9243.pt}"
 MOTION_DATA_SOURCE="${SURVEILLANCE_MOTION_DATA_SOURCE:-video}"
 MOTION_OUT_ROOT="${SURVEILLANCE_OUT_ROOT:-out/surveillance_transfer}"
 
@@ -373,7 +374,13 @@ train_motion_model() {
   local head_mode="$2"
   local out_dir="$3"
   local ckpt="${4:-}"
+  local extra_args=()
   local train_manifest val_manifest labels texts
+
+  if [[ "$#" -gt 4 ]]; then
+    shift 4
+    extra_args=("$@")
+  fi
 
   train_manifest="$(dataset_train_manifest "$train_dataset")"
   val_manifest="$(dataset_val_manifest "$train_dataset")"
@@ -401,6 +408,9 @@ train_motion_model() {
   fi
   if [[ -n "$ckpt" ]]; then
     MOTION_ARGS+=(--pretrained_ckpt "$ckpt")
+  fi
+  if [[ "${#extra_args[@]}" -gt 0 ]]; then
+    MOTION_ARGS+=("${extra_args[@]}")
   fi
   append_motion_debug_args MOTION_ARGS
 
@@ -589,11 +599,16 @@ for raw_train_dataset in "${TRAIN_DATASETS[@]}"; do
   [[ -z "$raw_train_dataset" ]] && continue
   train_dataset="$(normalize_train_dataset "$raw_train_dataset")"
 
-  for motion_setup in mhi_of of_only; do
+  for motion_setup in mhi_of of_only x3d_mhi_of; do
     contains_token "$MODELS_RAW" "motion_${motion_setup}" || continue
+    _motion_extra_args=()
     case "$motion_setup" in
       mhi_of)   _motion_ckpt="$CKPT_MHI_OF" ;;
       of_only)  _motion_ckpt="$CKPT_OF_ONLY" ;;
+      x3d_mhi_of)
+        _motion_ckpt="$CKPT_X3D_MHI_OF"
+        _motion_extra_args=(--model x3d --mhi_frames 16 --flow_frames 64 --unfreeze_modules "")
+        ;;
     esac
     for head_mode in "${HEAD_MODES[@]}"; do
       [[ -z "$head_mode" ]] && continue
@@ -601,7 +616,7 @@ for raw_train_dataset in "${TRAIN_DATASETS[@]}"; do
       if [[ "$head_mode" != "legacy" ]]; then
         motion_out_dir="${motion_out_dir}_${head_mode}"
       fi
-      train_motion_model "$train_dataset" "$head_mode" "$motion_out_dir" "$_motion_ckpt"
+      train_motion_model "$train_dataset" "$head_mode" "$motion_out_dir" "$_motion_ckpt" "${_motion_extra_args[@]}"
       motion_ckpt="$(latest_ckpt "$motion_out_dir")"
       if [[ -z "${motion_ckpt:-}" ]]; then
         echo "No motion checkpoint found in $motion_out_dir/checkpoints" >&2

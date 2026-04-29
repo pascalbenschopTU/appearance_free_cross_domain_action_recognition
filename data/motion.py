@@ -8,12 +8,16 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-import zstandard as zstd
 from torch.utils.data import Dataset
 from torchvision.models.optical_flow import Raft_Large_Weights, raft_large
 
 from .augment import random_motion_augment, select_flow_mhi_indices
 from utils.manifests import classnames_from_id_csv, list_videos
+
+try:
+    import zstandard as zstd
+except ImportError:
+    zstd = None
 
 MAGIC_FLOW = b"MHIFLOW1"
 MAGIC_DPHASE = b"MHIDPHAS"
@@ -62,10 +66,12 @@ def _unpack_blob(blob: bytes):
 
 def load_zstd_mhi_second(
     zst_path: str,
-    dctx: zstd.ZstdDecompressor,
+    dctx,
     device: str = "cpu",
     dtype: torch.dtype = torch.float16,
 ):
+    if zstd is None:
+        raise ImportError("zstandard is required to load precomputed motion .zst tensors.")
     with open(zst_path, "rb") as f:
         comp = f.read()
 
@@ -272,6 +278,8 @@ class MotionTwoStreamZstdDataset(Dataset):
         self.epoch = int(epoch)
 
     def _get_dctx(self):
+        if zstd is None:
+            raise ImportError("zstandard is required to load precomputed motion .zst tensors.")
         if self._dctx is None:
             self._dctx = zstd.ZstdDecompressor()
         return self._dctx
